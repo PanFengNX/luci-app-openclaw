@@ -1,0 +1,188 @@
+{
+  "version": 3,
+  "note": "精选预设（离线可用）。完整列表请通过 'openclaw models list --provider <id>' 在线获取，或手动输入模型 ID。",
+  "providers": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com",
+      "api": "openai-completions",
+      "env": "DEEPSEEK_API_KEY",
+      "authChoice": "deepseek-api-key",
+      "plugin": "@openclaw/deepseek-provider",
+      "bundled": false,
+      "defaultModel": "deepseek-v4-flash",
+      "keyUrl": "https://platform.deepseek.com/api_keys",
+      "models": [
+        { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "reasoning": true, "context": 1000000 },
+        { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "reasoning": true, "context": 1000000 },
+        { "id": "deepseek-chat", "name": "DeepSeek Chat (V3.2)", "reasoning": false, "context": 131072 },
+        { "id": "deepseek-reasoner", "name": "DeepSeek Reasoner (V3.2)", "reasoning": true, "context": 131072 }
+      ]
+    },
+    {
+      "id": "zai",
+      "name": "Z.AI (GLM / 智谱)",
+      "baseUrl": "https://api.z.ai/api/paas/v4",
+      "api": "openai-completions",
+      "env": "ZAI_API_KEY",
+      "authChoice": "zai-api-key",
+      "bundled": true,
+      "defaultModel": "glm-5.1",
+      "keyUrl": "https://z.ai/model-api",
+      "authChoices": [
+        { "id": "zai-api-key", "name": "自动识别（按 Key 形态选择端点）" },
+        { "id": "zai-global", "name": "通用 API（国际）" },
+        { "id": "zai-cn", "name": "通用 API（中国大陆 open.bigmodel.cn）" },
+        { "id": "zai-coding-global", "name": "Coding Plan（国际）" },
+        { "id": "zai-coding-cn", "name": "Coding Plan（中国大陆）" }
+      ],
+      "models": [
+        { "id": "glm-5.1", "name": "GLM-5.1（默认）", "reasoning": true, "context": 202000 },
+        { "id": "glm-5", "name": "GLM-5", "reasoning": true, "context": 202000 },
+        { "id": "glm-5-turbo", "name": "GLM-5 Turbo", "reasoning": true, "context": 202000 },
+        { "id": "glm-5v-turbo", "name": "GLM-5V Turbo（支持图片）", "reasoning": true, "context": 202000 },
+        { "id": "glm-4.7", "name": "GLM-4.7", "reasoning": true, "context": 204000 },
+        { "id": "glm-4.7-flash", "name": "GLM-4.7 Flash", "reasoning": true, "context": 200000 },
+        { "id": "glm-4.7-flashx", "name": "GLM-4.7 FlashX", "reasoning": true, "context": 200000 },
+        { "id": "glm-4.6", "name": "GLM-4.6", "reasoning": true, "context": 200000 },
+        { "id": "glm-4.6v", "name": "GLM-4.6V（默认图片模型）", "reasoning": true, "context": 200000 },
+        { "id": "glm-4.5", "name": "GLM-4.5", "reasoning": true, "context": 128000 },
+        { "id": "glm-4.5-air", "name": "GLM-4.5 Air", "reasoning": true, "context": 128000 },
+        { "id": "glm-4.5-flash", "name": "GLM-4.5 Flash", "reasoning": true, "context": 128000 },
+        { "id": "glm-4.5v", "name": "GLM-4.5V（支持图片）", "reasoning": true, "context": 128000 }
+      ]
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-completions",
+      "env": "OPENAI_API_KEY",
+      "authChoice": "openai-api-key",
+      "bundled": true,
+      "defaultModel": "gpt-5.1",
+      "keyUrl": "https://platform.openai.com/api-keys",
+      "models": [
+        { "id": "gpt-5.1", "name": "GPT-5.1", "reasoning": true, "context": 400000 },
+        { "id": "gpt-5-mini", "name": "GPT-5 mini", "reasoning": true, "context": 400000 },
+        { "id": "gpt-4o", "name": "GPT-4o", "reasoning": false, "context": 128000 },
+        { "id": "gpt-4o-mini", "name": "GPT-4o mini", "reasoning": false, "context": 128000 }
+      ]
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic (Claude)",
+      "baseUrl": "https://api.anthropic.com",
+      "api": "anthropic-messages",
+      "env": "ANTHROPIC_API_KEY",
+      "authChoice": "anthropic-api-key",
+      "bundled": true,
+      "defaultModel": "claude-opus-4-6",
+      "keyUrl": "https://console.anthropic.com/settings/keys",
+      "models": [
+        { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", "reasoning": true, "context": 200000 },
+        { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "reasoning": true, "context": 200000 },
+        { "id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "reasoning": true, "context": 200000 }
+      ]
+    },
+    {
+      "id": "google",
+      "name": "Google (Gemini)",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "api": "google-generative-ai",
+      "env": "GEMINI_API_KEY",
+      "authChoice": "google-api-key",
+      "bundled": true,
+      "defaultModel": "gemini-3-flash",
+      "keyUrl": "https://aistudio.google.com/app/apikey",
+      "models": [
+        { "id": "gemini-3-pro", "name": "Gemini 3 Pro", "reasoning": true, "context": 1000000 },
+        { "id": "gemini-3-flash", "name": "Gemini 3 Flash", "reasoning": true, "context": 1000000 }
+      ]
+    },
+    {
+      "id": "moonshot",
+      "name": "Moonshot (Kimi)",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "api": "openai-completions",
+      "env": "MOONSHOT_API_KEY",
+      "authChoice": "moonshot-api-key",
+      "bundled": true,
+      "defaultModel": "kimi-k2.5",
+      "keyUrl": "https://platform.moonshot.cn/console/api-keys",
+      "models": [
+        { "id": "kimi-k2.5", "name": "Kimi K2.5", "reasoning": true, "context": 256000 },
+        { "id": "kimi-k2-turbo-preview", "name": "Kimi K2 Turbo", "reasoning": true, "context": 256000 }
+      ]
+    },
+    {
+      "id": "qwen",
+      "name": "阿里云百炼 (Qwen)",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api": "openai-completions",
+      "env": "DASHSCOPE_API_KEY",
+      "authChoice": "qwen-api-key",
+      "bundled": true,
+      "defaultModel": "qwen3-max",
+      "keyUrl": "https://bailian.console.aliyun.com/?tab=model#/api-key",
+      "models": [
+        { "id": "qwen3-max", "name": "通义千问 Max", "reasoning": true, "context": 262144 },
+        { "id": "qwen3-plus", "name": "通义千问 Plus", "reasoning": true, "context": 131072 },
+        { "id": "qwen3-flash", "name": "通义千问 Flash", "reasoning": true, "context": 131072 }
+      ]
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "baseUrl": "https://api.minimaxi.com/v1",
+      "api": "openai-completions",
+      "env": "MINIMAX_API_KEY",
+      "authChoice": "minimax-api-key",
+      "bundled": true,
+      "defaultModel": "MiniMax-M2",
+      "keyUrl": "https://platform.minimaxi.com/",
+      "models": [
+        { "id": "MiniMax-M2", "name": "MiniMax M2", "reasoning": true, "context": 204800 }
+      ]
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "api": "openai-completions",
+      "env": "OPENROUTER_API_KEY",
+      "authChoice": "openrouter-api-key",
+      "bundled": true,
+      "defaultModel": "",
+      "keyUrl": "https://openrouter.ai/keys",
+      "models": []
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama（本地）",
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "api": "openai-completions",
+      "env": "",
+      "authChoice": "",
+      "bundled": true,
+      "defaultModel": "qwen2.5:7b",
+      "keyUrl": "https://ollama.com/",
+      "models": [
+        { "id": "qwen2.5:7b", "name": "qwen2.5:7b", "reasoning": false, "context": 32768 }
+      ]
+    },
+    {
+      "id": "custom",
+      "name": "自定义（OpenAI 兼容）",
+      "baseUrl": "",
+      "api": "openai-completions",
+      "env": "",
+      "authChoice": "",
+      "bundled": true,
+      "defaultModel": "",
+      "keyUrl": "",
+      "models": []
+    }
+  ]
+}

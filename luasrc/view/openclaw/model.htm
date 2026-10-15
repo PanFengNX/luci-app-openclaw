@@ -1,0 +1,229 @@
+<%+header%>
+<style>
+.oc-card{border:1px solid #ddd;border-radius:6px;padding:14px 16px;margin-bottom:14px;background:#fff}
+.oc-card h3{margin:0 0 10px 0;font-size:15px}
+.oc-row{margin-bottom:10px}
+.oc-row label{display:inline-block;width:150px;font-size:13px;color:#555;vertical-align:top}
+.oc-hint{font-size:12px;color:#888;margin-top:4px}
+select,input[type=text]{padding:4px 6px;min-width:280px}
+button,.oc-btn{background:#0069d9;color:#fff;border:0;border-radius:4px;padding:6px 14px;cursor:pointer;margin-right:6px}
+.oc-btn.gray{background:#6c757d}
+.oc-btn.green{background:#1a7f37}
+.oc-tag{display:inline-block;background:#eef4ff;color:#2a5db0;border-radius:8px;padding:1px 8px;font-size:11px;margin-left:6px}
+.oc-tag.ok{background:#e8f6ec;color:#1a7f37}
+.oc-tag.warn{background:#fff4e5;color:#a15c00}
+.oc-out{background:#1e1e1e;color:#eaeaea;font-family:monospace;font-size:12px;padding:10px;border-radius:4px;white-space:pre-wrap;max-height:260px;overflow:auto}
+</style>
+
+<h2><a id="content" name="content">模型配置</a></h2>
+
+<div class="oc-card">
+  <h3>默认模型</h3>
+  <div class="oc-hint">当前生效：<b id="cur-model">读取中…</b></div>
+
+  <div class="oc-row" style="margin-top:12px">
+    <label>服务商 Provider</label>
+    <select id="m-provider"></select>
+    <span id="m-provider-tag"></span>
+  </div>
+  <div class="oc-hint" id="m-keyurl"></div>
+
+  <div class="oc-row">
+    <label>模型</label>
+    <select id="m-model"></select>
+    <button id="btn-discover" class="oc-btn gray">从 OpenClaw 刷新列表</button>
+  </div>
+  <div class="oc-row">
+    <label>手动输入模型 ID</label>
+    <input type="text" id="m-model-custom" placeholder="留空则使用下拉选择；上游新模型可直接手填">
+  </div>
+
+  <div class="oc-row">
+    <label>API Key</label>
+    <input type="text" id="m-key" placeholder="sk-..." style="min-width:340px">
+  </div>
+  <div class="oc-row">
+    <label>Base URL（可选）</label>
+    <input type="text" id="m-base" placeholder="默认使用服务商官方地址，留空即可">
+  </div>
+  <div class="oc-hint" id="m-base-hint"></div>
+
+  <div style="margin-top:14px">
+    <button id="btn-apply" class="oc-btn green">安装插件 · 写入 Key · 设为默认</button>
+    <button id="btn-restart" class="oc-btn gray">重启网关</button>
+  </div>
+  <div class="oc-hint" id="m-status"></div>
+  <div class="oc-out" id="m-out" style="display:none;margin-top:10px"></div>
+</div>
+
+<div class="oc-card">
+  <h3>说明</h3>
+  <div class="oc-hint" style="line-height:1.7">
+    · 服务商与模型清单直接来自已安装的 OpenClaw（<code>openclaw models list --all</code>），未安装时回退到内置精选预设。<br>
+    · 点击绿色按钮会依次完成：<b>安装该服务商官方插件</b> → <b>写入 API Key</b>（<code>~/.openclaw/.env</code> 与配置）→ <b>设为默认模型</b> → 重启网关。<br>
+    · <b>DeepSeek</b> 由官方插件 <code>@openclaw/deepseek-provider</code> 提供，默认模型 <code>deepseek/deepseek-v4-flash</code>。<br>
+    · <b>Z.AI（GLM / 智谱）</b> 为 OpenClaw 内置 provider（<code>zai</code>），默认模型 <code>zai/glm-5.1</code>，支持国际 / 国内 / Coding Plan 端点。<br>
+    · 标记说明：<span class="oc-tag ok">内置</span> 无需插件 · <span class="oc-tag">需插件</span> 会自动安装 · <span class="oc-tag ok">已配置</span> 已写入过配置。
+  </div>
+</div>
+
+<script>
+var API = {
+  providers:'<%=luci.dispatcher.build_url("admin","services","openclaw","api","providers")%>',
+  presets:  '<%=luci.dispatcher.build_url("admin","services","openclaw","api","presets")%>',
+  models:   '<%=luci.dispatcher.build_url("admin","services","openclaw","api","models")%>',
+  apply:    '<%=luci.dispatcher.build_url("admin","services","openclaw","api","apply")%>',
+  run:      '<%=luci.dispatcher.build_url("admin","services","openclaw","api","run")%>',
+  service:  '<%=luci.dispatcher.build_url("admin","services","openclaw","api","service")%>'
+};
+var CATALOG = [];
+function $(id){ return document.getElementById(id); }
+function get(url, cb){ var x=new XMLHttpRequest(); x.open('GET',url,true); x.onreadystatechange=function(){ if(x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({});} } }; x.send(); }
+function post(url, data, cb){
+  var body=[]; for (var k in data) body.push(encodeURIComponent(k)+'='+encodeURIComponent(data[k]));
+  var x=new XMLHttpRequest(); x.open('POST',url,true);
+  x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+  x.onreadystatechange=function(){ if(x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({});} } };
+  x.send(body.join('&'));
+}
+function jp(s, fb){ try{ return JSON.parse(s); }catch(e){ return fb; } }
+function curProvider(){
+  var id = $('m-provider').value;
+  for (var i=0;i<CATALOG.length;i++) if (CATALOG[i].id===id) return CATALOG[i];
+  return null;
+}
+
+function loadCurrent(){
+  get(API.run + '?cmd=models%20current', function(r){
+    $('cur-model').textContent = (r.output||'').trim() || '(未设置)';
+  });
+}
+
+function loadCatalog(){
+  $('m-status').textContent = '正在读取 OpenClaw 支持的服务商…';
+  get(API.providers, function(r){
+    CATALOG = jp(r.data||'[]', []);
+    if (!CATALOG.length){
+      // fallback to offline presets
+      get(API.presets, function(p){
+        var o = jp(p.data||'{"providers":[]}', {providers:[]});
+        CATALOG = (o.providers||[]).map(function(x){
+          x.bundled = !x.plugin; x.installed = false; x.configured = false; x.hasKey = false;
+          return x;
+        });
+        renderCatalog();
+      });
+      return;
+    }
+    renderCatalog();
+  });
+}
+
+function renderCatalog(){
+  var sel = $('m-provider'); sel.innerHTML = '';
+  CATALOG.forEach(function(p){
+    var o = document.createElement('option');
+    o.value = p.id;
+    o.textContent = (p.name||p.id) + '  (' + p.id + ')' + (p.hasKey ? '  ●' : '');
+    if (p.id === 'deepseek') o.selected = true;
+    sel.appendChild(o);
+  });
+  $('m-status').textContent = '共 ' + CATALOG.length + ' 个服务商（● 表示已写入 Key）。';
+  renderProvider();
+}
+
+function addTag(host, text, ok){
+  var s = document.createElement('span');
+  s.className = 'oc-tag' + (ok ? ' ok' : '');
+  s.textContent = text;
+  host.appendChild(s);
+}
+
+function renderProvider(){
+  var p = curProvider(); if(!p) return;
+  // Build the tag strip as DOM nodes: provider names and plugin ids are parsed
+  // out of OpenClaw's catalog and must never be concatenated into markup.
+  var tagHost = $('m-provider-tag');
+  tagHost.innerHTML = '';
+  if (p.bundled)      addTag(tagHost, '内置', true);
+  if (p.plugin)       addTag(tagHost, '需插件 ' + p.plugin, false);
+  if (p.installed)    addTag(tagHost, '插件已装', true);
+  if (p.configured)   addTag(tagHost, '已配置', true);
+  if (p.hasKey)       addTag(tagHost, '已有 Key', true);
+
+  var ku = $('m-keyurl'); ku.innerHTML = '';
+  if (p.keyUrl) {
+    ku.appendChild(document.createTextNode('申请地址：'));
+    // only http(s) becomes a link - a javascript: URL here would be an XSS
+    if (/^https?:\/\//i.test(p.keyUrl)) {
+      var a = document.createElement('a');
+      a.href = p.keyUrl; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      a.textContent = p.keyUrl;
+      ku.appendChild(a);
+    } else {
+      ku.appendChild(document.createTextNode(p.keyUrl));
+    }
+  }
+  $('m-base').value = p.baseUrl || '';
+  $('m-base-hint').textContent = (p.id==='custom')
+    ? '自定义 Provider 必须填写 Base URL，且为 OpenAI 兼容接口。'
+    : ('默认 Base URL：' + (p.baseUrl || '-'));
+  var sel = $('m-model'); sel.innerHTML = '';
+  (p.models||[]).forEach(function(m){
+    var o = document.createElement('option');
+    o.value = m.id; o.textContent = (m.name||m.id) + '  (' + m.id + ')';
+    if (m.id === p.defaultModel) o.selected = true;
+    sel.appendChild(o);
+  });
+  if (!(p.models||[]).length){
+    var o = document.createElement('option');
+    o.value=''; o.textContent='（该服务商无固定清单，请手动输入模型 ID）';
+    sel.appendChild(o);
+  }
+}
+
+$('m-provider').onchange = renderProvider;
+
+$('btn-discover').onclick = function(){
+  var p = $('m-provider').value;
+  $('m-status').textContent = '正在从 OpenClaw 获取…';
+  get(API.models + '?provider=' + encodeURIComponent(p), function(r){
+    var arr = jp(r.data||'[]', []);
+    if (!arr.length){ $('m-status').textContent = '未获取到在线清单（可能插件未安装），已保留预设列表。'; return; }
+    var sel = $('m-model'); sel.innerHTML = '';
+    arr.forEach(function(id){
+      var o = document.createElement('option'); o.value = id; o.textContent = id; sel.appendChild(o);
+    });
+    $('m-status').textContent = 'OpenClaw 返回 ' + arr.length + ' 个模型。';
+  });
+};
+
+$('btn-apply').onclick = function(){
+  var p = $('m-provider').value;
+  var m = $('m-model-custom').value.trim() || $('m-model').value;
+  var k = $('m-key').value.trim();
+  var b = $('m-base').value.trim();
+  if (p === 'custom' && !b){ alert('自定义 Provider 需要 Base URL'); return; }
+  if (!k && !confirm('未填写 API Key，仍要为 ' + p + ' 安装插件并设置默认模型吗？')) return;
+  $('btn-apply').disabled = true;
+  $('m-status').textContent = '正在安装插件并写入配置（可能需要 1-3 分钟）…';
+  $('m-out').style.display=''; $('m-out').textContent='';
+  post(API.apply, { provider:p, apikey:k, model:m, baseurl:b }, function(r){
+    if (r && r.ok === false){
+      $('m-status').textContent = '应用失败：Provider 名称 / Base URL / API Key 未通过校验，或插件安装未成功。';
+      $('btn-apply').disabled = false;
+      return;
+    }
+    $('m-status').textContent = '已应用 ' + p + '/' + m + '，正在重启网关…';
+    post(API.service, { action:'restart' }, function(){
+      setTimeout(function(){ loadCurrent(); $('m-status').textContent = '完成。'; $('btn-apply').disabled=false; loadCatalog(); }, 4000);
+    });
+  });
+};
+
+$('btn-restart').onclick = function(){ post(API.service, {action:'restart'}, function(){ $('m-status').textContent='已重启'; }); };
+
+loadCurrent();
+loadCatalog();
+</script>
+<%+footer%>

@@ -1,0 +1,194 @@
+#!/bin/sh /etc/rc.common
+# OpenClaw 助手 - procd service
+#
+# Stability rules borrowed from the iStoreOS openclawmgr (and tightened):
+#   * never start on a privileged port (<=1024)  -> would fight SSH/LuCI
+#   * only pass --force when the port is >1024 AND lsof/fuser exists, so
+#     OpenClaw can never kill the router's own management services
+#   * `--allow-unconfigured` so the gateway comes up even without a model
+#   * respawn 3600 10 5 - give up only after 10 crashes in an hour
+#   * locate the CLI entry from several candidates (npm layout changes)
+
+START=99
+STOP=10
+USE_PROCD=1
+
+OC_UCI="openclawmgr"
+OC_USER="openclawmgr"
+
+uci_get() {
+	local v
+	v="$(uci -q get "${OC_UCI}.${1}" 2>/dev/null)"
+	printf '%s' "${v:-${2:-}}"
+}
+
+json_get() {
+	local file="$1" expr="$2"
+	[ -f "$file" ] || return 0
+	command -v jsonfilter >/dev/null 2>&1 || return 0
+	jsonfilter -i "$file" -e "$expr" 2>/dev/null | head -n1
+}
+
+oc_base_dir() {
+	local d
+	d="$(uci_get main.base_dir '')"
+	[ -n "$d" ] || d="/mnt/data/OpenClawMgr"
+	# never turn "/" into "" (an empty value would make derived paths relative)
+	d="${d%/}"
+	[ -n "$d" ] || d="/"
+	printf '%s' "$d"
+}
+
+oc_node_dir() { printf '%s/node' "$(oc_base_dir)"; }
+oc_oc_dir() {
+	# 必须与 lib.sh 的 oc_oc_dir() 保持一致：程序目录可以独立于安装目录，
+	# 这里漏改的话服务会去 <安装目录>/openclaw 找一个并不存在的程序。
+	local d
+	d="$(uci_get main.openclaw_dir '')"
+	[ -n "$d" ] || d="$(oc_base_dir)/openclaw"
+	d="${d%/}"
+	[ -n "$d" ] || d="/"
+	printf '%s' "$d"
+}
+oc_home()     { printf '%s/home' "$(oc_base_dir)"; }
+
+_find_entry() {
+	local d="${1}/lib/node_modules/openclaw" e
+	for e in "$d/openclaw.mjs" "$d/dist/cli.js" "$d/dist/index.js" "$d/openclaw.js"; do
+		[ -f "$e" ] && { printf '%s' "$e"; return 0; }
+	done
+	return 1
+}
+
+# collect KEY=value pairs the gateway should see (API keys etc.)
+_env_args() {
+	local envf="$1" k v out=""
+	[ -f "$envf" ] || { printf '%s' "$out"; return 0; }
+	while IFS='=' read -r k v; do
+		case "$k" in ''|\#*) continue ;; esac
+		case "$k" in *[!A-Za-z0-9_]*) continue ;; esac
+		v="${v%\"}"; v="${v#\"}"
+		# skip empty values and anything containing whitespace: procd_set_param
+		# env takes a flat list, spaces would corrupt it
+		[ -n "$v" ] || continue
+		case "$v" in *' '*|*'	'*) continue ;; esac
+		out="$out $k=$v"
+	done <"$envf"
+	printf '%s' "$out"
+}
+
+start_service() {
+	local base nodedir globaldir home entry node_bin
+	local port bind token json_port json_bind json_token cfg
+	local force_opt="" user_opt="" env_args=""
+
+	config_load "$OC_UCI"
+	config_get_bool enabled main enabled 0
+	config_get base_dir main base_dir ""
+
+	base="$(oc_base_dir)"
+	nodedir="$(oc_node_dir)"
+	globaldir="$(oc_oc_dir)"
+	home="$(oc_home)"
+	node_bin="${nodedir}/bin/node"
+	cfg="${home}/.openclaw/openclaw.json"
+
+	[ "$enabled" -eq 1 ] || return 0
+
+	# --- runtime values: JSON wins, UCI is the fallback
+	port="$(uci_get main.port 18789)"
+	bind="$(uci_get main.bind lan)"
+	token=""
+	json_port="$(json_get "$cfg" '@.gateway.port')"
+	json_bind="$(json_get "$cfg" '@.gateway.bind')"
+	json_token="$(json_get "$cfg" '@.gateway.auth.token')"
+	[ -n "$json_port" ] && port="$json_port"
+	[ -n "$json_bind" ] && bind="$json_bind"
+	[ -n "$json_token" ] && token="$json_token"
+
+	# --- safety: numeric, unprivileged port
+	case "$port" in
+		''|*[!0-9]*)
+			logger -t openclawmgr "Refusing to start: port '$port' is not numeric"
+			return 1 ;;
+	esac
+	if [ "$port" -le 1024 ] 2>/dev/null; then
+		logger -t openclawmgr "Refusing to start: unsafe port $port (must be >1024)"
+		return 1
+	fi
+	if [ "$port" -gt 65535 ] 2>/dev/null; then
+		logger -t openclawmgr "Refusing to start: invalid port $port"
+		return 1
+	fi
+
+	[ -x "$node_bin" ] || { logger -t openclawmgr "Node.js 运行时缺失：$node_bin"; return 1; }
+	entry="$(_find_entry "$globaldir")" || {
+		logger -t openclawmgr "OpenClaw 未安装（$globaldir 下找不到入口），请先安装运行环境"
+		return 1
+	}
+	[ -n "$token" ] || { logger -t openclawmgr "未生成网关 token，拒绝启动"; return 1; }
+
+	mkdir -p "$home/.openclaw/workspace" "$base/logs" "$base/workspace" "$base/tmp" 2>/dev/null || true
+	chmod 700 "$base/tmp" 2>/dev/null || true
+	if id "$OC_USER" >/dev/null 2>&1; then
+		chown "$OC_USER:$OC_USER" "$base/tmp" 2>/dev/null || true
+	fi
+
+	# --- --force lets OpenClaw kill a conflicting listener, but only when it
+	#     can do so safely and only on unprivileged ports.
+	if [ "$port" -gt 1024 ] 2>/dev/null &&
+		{ command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1; }; then
+		force_opt="--force"
+	fi
+
+	if id "$OC_USER" >/dev/null 2>&1; then
+		user_opt="$OC_USER"
+		chown -R "$OC_USER:$OC_USER" "$home" 2>/dev/null || true
+		chmod -R u+rwX "$home" 2>/dev/null || true
+	fi
+
+	env_args="$(_env_args "$home/.openclaw/.env")"
+
+	procd_open_instance "gateway"
+	# The token is NOT passed as --token any more: every local user can read
+	# /proc/<pid>/cmdline, so the credential was world readable for as long as
+	# the gateway ran. OPENCLAW_GATEWAY_TOKEN below is the documented
+	# equivalent (it even takes precedence over the config file).
+	procd_set_param command "$node_bin" "$entry" gateway run \
+		--port "$port" --bind "$bind" --auth token \
+		--allow-unconfigured $force_opt
+	# shellcheck disable=SC2086
+	procd_set_param env \
+		HOME="$home" \
+		OPENCLAW_HOME="$home" \
+		OPENCLAW_STATE_DIR="$home/.openclaw" \
+		OPENCLAW_CONFIG_PATH="$home/.openclaw/openclaw.json" \
+		OPENCLAW_GATEWAY_PORT="$port" \
+		OPENCLAW_GATEWAY_BIND="$bind" \
+		OPENCLAW_GATEWAY_TOKEN="$token" \
+		TMPDIR="$base/tmp" \
+		PATH="${nodedir}/bin:${globaldir}/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+		$env_args
+	[ -n "$user_opt" ] && procd_set_param user "$user_opt"
+	procd_set_param respawn 3600 10 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+
+	logger -t openclawmgr "started (base=$base port=$port bind=$bind)"
+}
+
+stop_service() {
+	# procd stops the instance; never blanket-kill by name here (that used to
+	# take down unrelated processes matching 'openclaw').
+	rm -f /var/run/openclawmgr.pid 2>/dev/null || true
+	logger -t openclawmgr "stopped"
+}
+
+reload_service() {
+	restart
+}
+
+service_triggers() {
+	procd_add_reload_trigger "$OC_UCI"
+}

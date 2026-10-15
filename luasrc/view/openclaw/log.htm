@@ -1,0 +1,44 @@
+<%+header%>
+<style>
+.oc-card{border:1px solid #ddd;border-radius:6px;padding:14px 16px;margin-bottom:14px;background:#fff}
+.oc-card h3{margin:0 0 10px 0;font-size:15px}
+.oc-out{background:#1e1e1e;color:#eaeaea;font-family:monospace;font-size:12px;padding:10px;border-radius:4px;white-space:pre-wrap;height:480px;overflow:auto}
+button,.oc-btn{background:#0069d9;color:#fff;border:0;border-radius:4px;padding:6px 14px;cursor:pointer;margin-right:6px}
+.oc-btn.gray{background:#6c757d}
+.oc-hint{font-size:12px;color:#888;margin-top:6px}
+</style>
+
+<h2><a id="content" name="content">日志</a></h2>
+
+<div class="oc-card">
+  <h3>OpenClaw 助手 · 运行日志</h3>
+  <div>
+    <button id="btn-refresh">刷新</button>
+    <button id="btn-auto" class="oc-btn gray">自动刷新：关</button>
+    <button id="btn-doctor" class="oc-btn gray">运行 doctor 体检</button>
+  </div>
+  <div style="margin-top:10px" class="oc-out" id="out">加载中…</div>
+  <div class="oc-hint">日志来源于 /var/log/openclawmgr.log（管理脚本）与 procd 标准输出（可用 logread 查看）。</div>
+</div>
+
+<script>
+var LOG = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","log")%>';
+var DOC = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>';
+var timer = null;
+function $(id){ return document.getElementById(id); }
+function get(url, cb){ var x=new XMLHttpRequest(); x.open('GET',url,true); x.onreadystatechange=function(){ if(x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({});} } }; x.send(); }
+function refresh(){
+  get(LOG + '?lines=400', function(r){ $('out').textContent = r.log || '(无日志)'; $('out').scrollTop = $('out').scrollHeight; });
+}
+$('btn-refresh').onclick = refresh;
+$('btn-auto').onclick = function(){
+  if (timer){ clearInterval(timer); timer=null; $('btn-auto').textContent='自动刷新：关'; }
+  else { timer = setInterval(refresh, 3000); $('btn-auto').textContent='自动刷新：开'; }
+};
+$('btn-doctor').onclick = function(){
+  $('out').textContent = '运行 openclaw doctor …\n';
+  get(DOC, function(r){ $('out').textContent += (r.output || '(无输出)'); });
+};
+refresh();
+</script>
+<%+footer%>

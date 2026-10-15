@@ -1,0 +1,6 @@
+dist/
+.tmp/
+.review/
+.workbuddy/
+*.pyc
+__pycache__/

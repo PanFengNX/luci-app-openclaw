@@ -1,0 +1,98 @@
+<%+header%>
+<style>
+.oc-card{border:1px solid #ddd;border-radius:6px;padding:14px 16px;margin-bottom:14px;background:#fff}
+.oc-card h3{margin:0 0 10px 0;font-size:15px}
+.oc-hint{font-size:12px;color:#888;margin-top:4px;line-height:1.7}
+button,.oc-btn{background:#0069d9;color:#fff;border:0;border-radius:4px;padding:6px 14px;cursor:pointer;margin-right:6px}
+.oc-btn.gray{background:#6c757d}
+.oc-out{background:#1e1e1e;color:#eaeaea;font-family:monospace;font-size:12px;padding:10px;border-radius:4px;white-space:pre-wrap;max-height:400px;overflow:auto}
+input[type=text]{padding:4px 6px;min-width:260px}
+</style>
+
+<h2><a id="content" name="content">消息渠道</a></h2>
+
+<div class="oc-card">
+  <h3>微信</h3>
+  <div class="oc-hint">
+    使用官方插件 <code>@tencent-weixin/openclaw-weixin-cli</code> 安装。安装前会自动检查 python3、目录权限与
+    <code>ilinkai.weixin.qq.com</code> 连通性。若提示缺少 python3，OpenWrt 24.10+ 执行
+    <code>apk add python3-light</code>，更早版本执行 <code>opkg update &amp;&amp; opkg install python3-light</code>。
+  </div>
+  <div style="margin-top:10px">
+    <button id="btn-wx-install">安装 / 重新安装插件</button>
+    <button id="btn-wx-login" class="oc-btn gray">登录账号（生成二维码链接）</button>
+  </div>
+  <div class="oc-hint">扫码流程：点击「登录账号」→ 打开输出的链接 → 微信扫一扫 → 页面提示成功后重启网关 → 给网关发一条消息测试。</div>
+</div>
+
+<div class="oc-card">
+  <h3>其他渠道（Telegram / 飞书 / Discord / Slack …）</h3>
+  <div class="oc-row">
+    <label>渠道登录命令</label>
+    <input type="text" id="ch-cmd" placeholder="channels login --channel telegram" style="min-width:340px">
+    <button id="btn-ch-run">执行</button>
+  </div>
+  <div class="oc-hint">常用：<code>channels login --channel telegram</code>、<code>channels login --channel feishu</code>、<code>channels login --channel discord</code>。也可在「命令行」页执行任意 openclaw 子命令。</div>
+</div>
+
+<div class="oc-card">
+  <h3>已配置渠道</h3>
+  <button id="btn-ch-list" class="oc-btn gray">刷新</button>
+  <div class="oc-out" id="ch-out">（点击刷新）</div>
+</div>
+
+<div class="oc-card">
+  <h3>执行结果</h3>
+  <div class="oc-out" id="out">（暂无）</div>
+</div>
+
+<script>
+var API = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","channels")%>';
+var RUN = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","run")%>';
+function $(id){ return document.getElementById(id); }
+function post(url, data, cb){
+  var body=[]; for (var k in data) body.push(encodeURIComponent(k)+'='+encodeURIComponent(data[k]));
+  var x=new XMLHttpRequest(); x.open('POST',url,true);
+  x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+  x.onreadystatechange=function(){ if(x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({});} } };
+  x.send(body.join('&'));
+}
+function get(url, cb){ var x=new XMLHttpRequest(); x.open('GET',url,true); x.onreadystatechange=function(){ if(x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({});} } }; x.send(); }
+
+$('btn-wx-install').onclick = function(){
+  $('out').textContent = '正在安装微信插件，请稍候…';
+  post(API, { action: 'weixin_install' }, function(r){ $('out').textContent = r.output || '(无输出)'; });
+};
+$('btn-wx-login').onclick = function(){
+  $('out').textContent = '正在生成登录链接…';
+  post(API, { action: 'weixin_login' }, function(r){
+    var o = r.output || '(无输出)';
+    // Linkify without innerHTML: the login output is produced by the channel
+    // plugin, so treat it as untrusted text and build nodes instead.
+    var m = o.match(/https?:\/\/\S+/);
+    var host = $('out');
+    host.innerHTML = '';
+    if (m) {
+      var at = o.indexOf(m[0]);
+      host.appendChild(document.createTextNode(o.slice(0, at)));
+      var a = document.createElement('a');
+      a.href = m[0]; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      a.style.color = '#7fd1ff'; a.textContent = m[0];
+      host.appendChild(a);
+      host.appendChild(document.createTextNode(o.slice(at + m[0].length)));
+    } else {
+      host.textContent = o;
+    }
+  });
+};
+$('btn-ch-list').onclick = function(){
+  get(API + '?action=list', function(r){ $('ch-out').textContent = r.output || '(未配置渠道)'; });
+};
+$('btn-ch-run').onclick = function(){
+  var c = $('ch-cmd').value.trim();
+  if (!c) return;
+  $('out').textContent = '执行中…';
+  post(RUN, { cmd: c }, function(r){ $('out').textContent = r.output || '(无输出)'; });
+};
+</script>
+<%+footer%>

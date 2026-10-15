@@ -1,0 +1,17 @@
+{
+	"luci-app-openclaw": {
+		"description": "Grant access to OpenClaw 助手 (openclawmgr) configuration",
+		"read": {
+			"file": {
+				"/etc/config/openclawmgr": [ "read" ],
+				"/var/log/openclawmgr.log": [ "read" ],
+				"/var/log/openclawmgr-install.log": [ "read" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/etc/config/openclawmgr": [ "write" ]
+			}
+		}
+	}
+}

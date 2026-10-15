@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# verify-project.sh — luci-app-openclaw 全量回归验证
+#
+# 任何代码改动（无论人写还是 AI 写）在交付前都必须跑通本脚本。
+# 它只做检查，不修改任何文件。
+#
+# 用法：
+#   tools/verify-project.sh            # 全部检查
+#   tools/verify-project.sh --no-build # 跳过打包（只做语法与结构检查）
+#
+# 退出码：0 = 全部通过；1 = 有失败项
+
+set -u
+
+PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJ" || exit 1
+
+DO_BUILD=1
+[ "${1:-}" = "--no-build" ] && DO_BUILD=0
+
+PASS=0
+FAIL=0
+SKIP=0
+
+ok()   { printf '  \033[32mok\033[0m    %s\n' "$1"; PASS=$((PASS + 1)); }
+bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL + 1)); }
+skip() { printf '  \033[33mskip\033[0m  %s\n' "$1"; SKIP=$((SKIP + 1)); }
+head_() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
+
+# --------------------------------------------------------------------------
+# 解释器
+PY=""
+for cand in python3 python "$HOME/.workbuddy/binaries/python/versions/3.13.12/python.exe"; do
+	if command -v "$cand" >/dev/null 2>&1; then PY="$cand"; break; fi
+	[ -x "$cand" ] && { PY="$cand"; break; }
+done
+
+NODE=""
+for cand in node "$(command -v node 2>/dev/null)" \
+	"C:/Program Files/nodejs/node.exe" \
+	"$HOME/.workbuddy/binaries/node/versions/22.22.2-6/node.exe"; do
+	[ -n "$cand" ] || continue
+	if command -v "$cand" >/dev/null 2>&1 || [ -x "$cand" ]; then NODE="$cand"; break; fi
+done
+
+# --------------------------------------------------------------------------
+head_ "1. Shell 语法（sh -n）"
+sh_count=0
+while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	sh_count=$((sh_count + 1))
+	if err="$(sh -n "$f" 2>&1)"; then
+		ok "$f"
+	else
+		bad "$f"
+		printf '        %s\n' "$err"
+	fi
+done < <(find root -name '*.sh' -type f 2>/dev/null; \
+	printf '%s\n' root/etc/init.d/openclawmgr; \
+	find root/etc/uci-defaults -type f 2>/dev/null; \
+	find tools -name '*.sh' -type f 2>/dev/null)
+[ "$sh_count" -eq 0 ] && bad "没有找到任何 shell 脚本（路径错误？）"
+
+# --------------------------------------------------------------------------
+head_ "2. LuCI 页面内嵌 JS（node --check）"
+if [ -z "$NODE" ]; then
+	skip "找不到 node，跳过"
+else
+	js_count=0
+	for f in luasrc/view/openclaw/*.htm; do
+		[ -f "$f" ] || continue
+		js_count=$((js_count + 1))
+		# 必须带 .js 后缀：node --check 会拒绝未知扩展名的文件
+		tmp="${TMPDIR:-/tmp}/ocjs-$$-$js_count.js"
+		awk '/<script/{s=1;next} /<\/script>/{s=0} s' "$f" >"$tmp"
+		if "$NODE" --check "$tmp" >/dev/null 2>&1; then
+			ok "$f"
+		else
+			bad "$f"
+			"$NODE" --check "$tmp" 2>&1 | head -5 | sed 's/^/        /'
+		fi
+		rm -f "$tmp"
+	done
+	[ "$js_count" -eq 0 ] && bad "没有找到 LuCI 视图文件"
+fi
+
+# --------------------------------------------------------------------------
+head_ "3. Python 打包脚本（py_compile）"
+if [ -z "$PY" ]; then
+	skip "找不到 python，跳过"
+else
+	py_count=0
+	for f in scripts/*.py tools/*.py; do
+		[ -f "$f" ] || continue
+		py_count=$((py_count + 1))
+		if "$PY" -m py_compile "$f" >/dev/null 2>&1; then
+			ok "$f"
+		else
+			bad "$f"
+			"$PY" -m py_compile "$f" 2>&1 | head -5 | sed 's/^/        /'
+		fi
+	done
+	[ "$py_count" -eq 0 ] && skip "没有找到 python 脚本"
+	rm -rf scripts/__pycache__ tools/__pycache__ 2>/dev/null
+fi
+
+# --------------------------------------------------------------------------
+head_ "4. JSON 合法性"
+for f in root/usr/share/rpcd/acl.d/*.json; do
+	[ -f "$f" ] || continue
+	if [ -n "$PY" ]; then
+		if "$PY" -c "import json,sys; json.load(open(sys.argv[1],encoding='utf-8'))" "$f" >/dev/null 2>&1; then
+			ok "$f"
+		else
+			bad "$f"
+		fi
+	else
+		skip "$f（无 python）"
+	fi
+done
+
+# --------------------------------------------------------------------------
+head_ "5. 必须存在的关键文件"
+for f in \
+	Makefile \
+	root/etc/init.d/openclawmgr \
+	root/etc/config/openclawmgr \
+	root/etc/uci-defaults/99-openclawmgr \
+	root/usr/libexec/istorec/openclawmgr.sh \
+	root/usr/libexec/openclawmgr/lib.sh \
+	root/usr/libexec/openclawmgr/install.sh \
+	root/usr/libexec/openclawmgr/versions.sh \
+	root/usr/libexec/openclawmgr/models.sh \
+	root/usr/libexec/openclawmgr/channels.sh \
+	root/usr/libexec/openclawmgr/repair.sh \
+	root/usr/libexec/openclawmgr/backup.sh \
+	luasrc/controller/openclaw.lua \
+	root/usr/share/rpcd/acl.d/luci-app-openclaw.json
+do
+	[ -e "$f" ] && ok "$f" || bad "缺失：$f"
+done
+
+# --------------------------------------------------------------------------
+head_ "6. 危险模式残留扫描"
+# 这些是历史审计中明确修掉的问题，回归时不允许复活
+scan_forbid() {
+	local desc="$1" pat="$2"
+	local hit
+	# grep 输出形如 "文件:行号:内容"，注释行必须按"内容"部分判断，
+	# 直接在整行上过滤 ^# 是无效的（那会把所有命中都漏掉）
+	hit="$(grep -rnE "$pat" root/ luasrc/ 2>/dev/null \
+		| grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' \
+		| head -5)"
+	if [ -n "$hit" ]; then
+		bad "$desc"
+		printf '%s\n' "$hit" | sed 's/^/        /'
+	else
+		ok "$desc"
+	fi
+}
+scan_forbid "无 pgrep -f 模糊强杀"          "pgrep -f '?openclaw'?[^)]*kill|kill -9 \\\$\\(pgrep"
+scan_forbid "无 /tmp 固定名临时文件"        "/tmp/openclawmgr-|/tmp/oc-[a-z]"
+scan_forbid "无未引用的 run 参数拼接"        'run " \.\. cmd'
+scan_forbid "无 --token 出现在命令行"        '\-\-token "\$token"'
+scan_forbid "无 curl 管道执行"              '\(curl\|wget\)[^|]*\|\s*\(sh\|bash\|ash\)'
+
+# --------------------------------------------------------------------------
+head_ "7. 安全不变量回归测试（路径/端口/URL/JSON 转义）"
+if [ -f tools/tests/path-validate.sh ]; then
+	if out="$(sh tools/tests/path-validate.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "path-validate.sh 全部断言通过"
+	else
+		bad "path-validate.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/path-validate.sh"
+fi
+
+head_ "7b. 备份归档安全校验（拒绝越界/链接/设备条目）"
+if [ -f tools/tests/backup-archive.sh ]; then
+	if out="$(sh tools/tests/backup-archive.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "backup-archive.sh 全部断言通过"
+	else
+		bad "backup-archive.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/backup-archive.sh"
+fi
+
+# --------------------------------------------------------------------------
+head_ "8. 打包与三种包格式校验"
+if [ "$DO_BUILD" -eq 0 ]; then
+	skip "--no-build 指定，跳过"
+elif [ -z "$PY" ]; then
+	skip "找不到 python，跳过"
+else
+	if "$PY" scripts/build_apk.py >/dev/null 2>&1; then
+		ok "build_apk.py 构建成功"
+		APKS=()
+		for f in \
+			dist/luci-app-openclaw-1.0.0-r1.apk \
+			dist/luci-app-openclaw-1.0.0-r1-v2.apk \
+			dist/luci-app-openclaw_1.0.0_all.ipk
+		do
+			[ -f "$f" ] && APKS+=("$f")
+		done
+		if [ "${#APKS[@]}" -eq 3 ]; then
+			out="$("$PY" scripts/verify_apk.py "${APKS[@]}" 2>&1)"
+			if printf '%s' "$out" | grep -q 'RESULT: PASS'; then
+				ok "三种包格式 verify 全部 PASS"
+			else
+				bad "verify 未通过"
+				printf '%s\n' "$out" | tail -20 | sed 's/^/        /'
+			fi
+		else
+			bad "缺少构建产物（找到 ${#APKS[@]}/3）"
+		fi
+	else
+		bad "build_apk.py 构建失败"
+		"$PY" scripts/build_apk.py 2>&1 | tail -15 | sed 's/^/        /'
+	fi
+fi
+
+# --------------------------------------------------------------------------
+printf '\n\033[1m== 汇总 ==\033[0m\n'
+printf '  通过 %d  失败 %d  跳过 %d\n' "$PASS" "$FAIL" "$SKIP"
+if [ "$FAIL" -gt 0 ]; then
+	printf '  \033[31m结论：不通过\033[0m\n'
+	exit 1
+fi
+printf '  \033[32m结论：通过\033[0m\n'
+exit 0

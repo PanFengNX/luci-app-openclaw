@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""verify_apk.py - structural self-check for the packages produced by build_apk.py.
+
+  python3 scripts/verify_apk.py dist/luci-app-openclaw-1.0.0-r1.apk        # APK v3
+  python3 scripts/verify_apk.py dist/luci-app-openclaw-1.0.0-r1-v2.apk     # APK v2
+  python3 scripts/verify_apk.py dist/luci-app-openclaw_1.0.0_all.ipk       # ipk
+
+APK v2 checks: gzip segment layout, .PKGINFO fields, datahash, per file SHA1.
+APK v3 checks: ADB container, block order, object graph, PKGINFO HASHES.
+ipk checks   : debian-binary, ./control, data members.
+
+Exit code 0 = looks installable.
+"""
+import hashlib
+import io
+import struct
+import sys
+import tarfile
+import zlib
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import apk3  # noqa: E402
+
+
+def ok(msg):
+    print(f"  ok   {msg}")
+
+
+def bad(msg):
+    print(f"  FAIL {msg}")
+    return 1
+
+
+def warn(msg):
+    print(f"  warn {msg}")
+
+
+# --------------------------------------------------------------------------- ar
+def ar_parse(blob: bytes):
+    """Parse a Unix ar(5) archive -> [(name, payload), ...].
+
+    ipk 和 APK v2 都是 ar 归档，**校验容器本身**才是重点。早先这个脚本只把
+    文件当成连续的 gzip 段来拆，于是"三段裸拼接、没有 ar 头"的坏包也能全绿，
+    而 opkg 会直接报 file format is invalid or inconsistent。
+    """
+    if not blob.startswith(b"!<arch>\n"):
+        raise ValueError("missing ar magic '!<arch>\\n'")
+    out = []
+    off = 8
+    while off + 60 <= len(blob):
+        hdr = blob[off:off + 60]
+        if hdr[58:60] != b"\x60\n":
+            raise ValueError(f"bad member header magic at offset {off}: {hdr[58:60]!r}")
+        name = hdr[0:16].decode("ascii", "replace").rstrip()
+        if name.endswith("/"):          # GNU ar form
+            name = name[:-1]
+        try:
+            size = int(hdr[48:58].decode().strip())
+        except ValueError:
+            raise ValueError(f"bad size field at offset {off}: {hdr[48:58]!r}")
+        data = blob[off + 60: off + 60 + size]
+        if len(data) != size:
+            raise ValueError(f"truncated member {name!r}: want {size}, got {len(data)}")
+        out.append((name, data))
+        off += 60 + size
+        if size % 2:                    # members are 2-byte aligned
+            off += 1
+    if off != len(blob):
+        raise ValueError(f"trailing garbage: parsed {off} of {len(blob)} bytes")
+    if not out:
+        raise ValueError("archive has no members")
+    return out
+
+
+def check_ar(blob: bytes, rc: int):
+    """Shared ar-container assertion for ipk / APK v2.
+
+    Returns (rc, {name: payload}) — the dict is None when the container is broken,
+    so callers must bail out instead of falling back to gzip sniffing.
+    """
+    try:
+        ms = ar_parse(blob)
+    except ValueError as e:  # noqa: BLE001
+        return rc | bad(f"ar 容器无效：{e}"), None
+    names = [n for n, _ in ms]
+    ok(f"ar 容器 OK：{len(blob)} 字节，{len(ms)} 个成员 {names}")
+    if names[0] != "debian-binary":
+        rc |= bad(f"第一个成员应为 debian-binary，实际 {names[0]}")
+    for want in ("control.tar.gz", "data.tar.gz"):
+        if want not in names:
+            rc |= bad(f"缺少成员 {want}")
+    return rc, dict(ms)
+
+
+# --------------------------------------------------------------------------- v2
+def verify_v2(path: Path) -> int:
+    print(f"APK v2 (ar archive): {path.name}")
+    rc = 0
+    blob = path.read_bytes()
+    rc, mem = check_ar(blob, rc)
+    if mem is None:
+        return rc
+
+    ctl_raw = mem["control.tar.gz"]
+    dat_raw = mem["data.tar.gz"]
+
+    tf = tarfile.open(fileobj=io.BytesIO(zlib.decompress(ctl_raw, 31)))
+    if ".PKGINFO" not in tf.getnames():
+        return bad("control segment has no .PKGINFO")
+    pk = tf.extractfile(".PKGINFO").read().decode()
+    print("\n.PKGINFO:")
+    print("\n".join("       " + l for l in pk.strip().splitlines()))
+
+    want = None
+    for line in pk.splitlines():
+        if line.startswith("datahash = "):
+            want = line.split("= ", 1)[1].strip()
+    got = hashlib.sha256(dat_raw).hexdigest()
+    if want == got:
+        ok("datahash == sha256(data.tar.gz)")
+    else:
+        rc |= bad(f"datahash mismatch expected={want} actual={got}")
+
+    nfiles = 0
+    dtf = tarfile.open(fileobj=io.BytesIO(zlib.decompress(dat_raw, 31)))
+    for m in dtf.getmembers():
+        if not m.isfile():
+            continue
+        nfiles += 1
+        w = m.pax_headers.get("APK-TOOLS.checksum.SHA1")
+        if w is None:
+            rc |= bad(f"missing checksum header: {m.name}")
+            continue
+        g = hashlib.sha1(dtf.extractfile(m).read()).hexdigest()
+        if g != w:
+            rc |= bad(f"checksum mismatch: {m.name}")
+    ok(f"{nfiles} file(s) checksum-verified")
+    return rc
+
+
+# --------------------------------------------------------------------------- v3
+def read_blocks(body: bytes):
+    out = []
+    off = 8
+    while off < len(body):
+        ts = struct.unpack_from("<I", body, off)[0]
+        if (ts >> 30) == 3:
+            t = ts & 0x3FFFFFFF
+            size = struct.unpack_from("<Q", body, off + 8)[0]
+            hdr = 16
+        else:
+            t = ts >> 30
+            size = ts & 0x3FFFFFFF
+            hdr = 4
+        if size < hdr or off + size > len(body):
+            raise ValueError(f"bad block size {size} at offset {off}")
+        out.append((t, body[off + hdr:off + size]))
+        off += size
+        while off % 8:
+            off += 1
+    return out
+
+
+def adb_walk(buf: bytes, val: int, seen=None):
+    """minimal recursive sanity walk of an adb object tree"""
+    if seen is None:
+        seen = set()
+    o = val & 0x0FFFFFFF
+    t = val >> 28
+    if o in seen or o + 4 > len(buf):
+        return
+    seen.add(o)
+    if t not in (apk3.TYPE_OBJECT, apk3.TYPE_ARRAY):
+        return
+    (count,) = struct.unpack_from("<I", buf, o)
+    if o + 4 + 4 * (count - 1) > len(buf):
+        raise ValueError(f"object at {o} overruns the buffer")
+    for i in range(count - 1):
+        (slot,) = struct.unpack_from("<I", buf, o + 4 + 4 * i)
+        if slot:
+            adb_walk(buf, slot, seen)
+
+
+def verify_v3(path: Path) -> int:
+    print(f"APK v3 (ADB container): {path.name}")
+    rc = 0
+    blob = path.read_bytes()
+    if blob[:3] != b"ADB":
+        return bad("magic is not 'ADB'")
+    ok(f"magic ADB, compression byte = {blob[3:4].decode(errors='replace')!r}")
+    body = apk3._decompress(blob)
+    if body[:8] != b"ADB.pckg":
+        return bad("schema header is not 'ADB.pckg'")
+    ok(f"schema 'pckg', inflated {len(body)} bytes")
+
+    try:
+        blocks = read_blocks(body)
+    except ValueError as e:
+        return bad(str(e))
+    kinds = [t for t, _ in blocks]
+    ok(f"blocks: {kinds}  (0=ADB 1=SIG 2=DATA)")
+    if not kinds or kinds[0] != apk3.BLOCK_ADB:
+        rc |= bad("first block must be the ADB block")
+
+    adb = blocks[0][1]
+    compat, ver, _res, root = struct.unpack_from("<BBHI", adb, 0)
+    ok(f"adb_hdr compat={compat} ver={ver} root=0x{root:x}")
+    if ver != 0:
+        warn(f"unexpected adb version {ver}")
+
+    try:
+        adb_walk(adb, root)
+        ok("object graph walk: no dangling / overrunning offsets")
+    except Exception as e:  # noqa: BLE001
+        rc |= bad(f"object graph walk failed: {e}")
+
+    ro = root & 0x0FFFFFFF
+    (count,) = struct.unpack_from("<I", adb, ro)
+    if count < 2:
+        rc |= bad("root object has no slots")
+    else:
+        (pk_val,) = struct.unpack_from("<I", adb, ro + 4)
+        po = pk_val & 0x0FFFFFFF
+        # slot 1 = NAME, slot 3 = HASHES
+        (name_val,) = struct.unpack_from("<I", adb, po + 4)
+        no = name_val & 0x0FFFFFFF
+        n = adb[no]
+        ok(f"pkgname = {adb[no + 1:no + 1 + n].decode(errors='replace')}")
+
+        (ver_val,) = struct.unpack_from("<I", adb, po + 8)
+        vo = ver_val & 0x0FFFFFFF
+        n = adb[vo]
+        ok(f"pkgver  = {adb[vo + 1:vo + 1 + n].decode(errors='replace')}")
+
+        (h_val,) = struct.unpack_from("<I", adb, po + 12)
+        ho = h_val & 0x0FFFFFFF
+        stored = bytes(adb[ho + 1:ho + 21])
+        if len(stored) != 20:
+            rc |= bad(f"HASHES blob is {len(stored)} bytes, expected 20")
+        else:
+            saved = bytearray(adb)
+            saved[ho + 1:ho + 21] = b"\0" * 20
+            calc = hashlib.sha256(bytes(saved)).digest()[:20]
+            if stored == calc:
+                ok("PKGINFO HASHES == SHA256(payload|hashes=0)[:20]  (apk-tools rule)")
+            else:
+                rc |= bad(f"HASHES mismatch stored={stored.hex()} calc={calc.hex()}")
+
+    datas = [b for t, b in blocks if t == apk3.BLOCK_DATA]
+    ok(f"DATA blocks: {len(datas)}")
+    for b in datas:
+        if len(b) < 8:
+            rc |= bad("DATA block shorter than its 8 byte header")
+            break
+        p_idx, f_idx = struct.unpack_from("<II", b, 0)
+        if p_idx == 0 or f_idx == 0:
+            rc |= bad("DATA block has a 0 path/file index (must be 1-based)")
+            break
+    return rc
+
+
+# --------------------------------------------------------------------------- ipk
+def verify_ipk(path: Path) -> int:
+    print(f"ipk (opkg): {path.name}")
+    rc = 0
+    blob = path.read_bytes()
+    rc, m = check_ar(blob, rc)
+    if m is None:
+        return rc
+
+    if m["debian-binary"] != b"2.0\n":
+        rc |= bad(f"debian-binary 内容应为 '2.0\\n'，实际 {m['debian-binary']!r}")
+    else:
+        ok("debian-binary = 2.0")
+
+    ctl = tarfile.open(fileobj=io.BytesIO(zlib.decompress(m["control.tar.gz"], 31)))
+    if "./control" not in ctl.getnames():
+        rc |= bad("control tarball has no ./control")
+    else:
+        txt = ctl.extractfile("./control").read().decode()
+        ok("control:\n" + "\n".join("       " + l for l in txt.strip().splitlines()))
+    data = tarfile.open(fileobj=io.BytesIO(zlib.decompress(m["data.tar.gz"], 31)))
+    ok(f"data members: {len(data.getnames())}")
+    return rc
+
+
+def detect_ar_kind(path: Path) -> str:
+    """'apk2' or 'ipk' — 靠 control 段里的标志文件判断，不依赖文件名。"""
+    try:
+        mem = dict(ar_parse(path.read_bytes()))
+        ctl = zlib.decompress(mem["control.tar.gz"], 31)
+        names = tarfile.open(fileobj=io.BytesIO(ctl)).getnames()
+    except Exception:  # noqa: BLE001
+        return "ipk"        # 交给 verify_ipk 报出具体错误
+    return "apk2" if ".PKGINFO" in names else "ipk"
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        return 2
+    rc = 0
+    for a in sys.argv[1:]:
+        p = Path(a)
+        if not p.exists():
+            print(f"  FAIL {p} does not exist")
+            rc = 1
+            continue
+        head = p.read_bytes()[:8]
+        if head[:3] == b"ADB":
+            rc |= verify_v3(p)
+        elif head == b"!<arch>\n":
+            # ipk 与 APK v2 都是 ar 归档 —— 这里必须按容器判断。
+            # 早先的版本用 "开头是 2.0\n" 认 ipk、"开头是 gzip 魔数" 认 v2，
+            # 等于把"没有 ar 容器"当成了正常特征，于是坏包一路全绿。
+            if detect_ar_kind(p) == "apk2":
+                rc |= verify_v2(p)
+            else:
+                rc |= verify_ipk(p)
+        else:
+            print(f"  FAIL {p.name}: 不是有效的包 —— 既不是 ADB 容器，"
+                  f"也不是 ar 归档（开头 {head[:4]!r}，应为 b'!<arch>' 或 b'ADB'）")
+            rc |= 1
+        print()
+    print("RESULT:", "PASS" if rc == 0 else "FAIL")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

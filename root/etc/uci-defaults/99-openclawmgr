@@ -1,0 +1,64 @@
+#!/bin/sh
+# openclawmgr - first boot defaults
+
+[ -x /usr/libexec/openclawmgr/lib.sh ] || exit 0
+. /usr/libexec/openclawmgr/lib.sh
+
+OC_USER="openclawmgr"
+
+uci -q get openclawmgr.main >/dev/null 2>&1 || {
+	uci -q set openclawmgr.main=main
+}
+
+# port / bind / versions
+[ -n "$(uci -q get openclawmgr.main.port)" ]     || uci -q set openclawmgr.main.port=18789
+[ -n "$(uci -q get openclawmgr.main.bind)" ]     || uci -q set openclawmgr.main.bind=lan
+[ -n "$(uci -q get openclawmgr.main.oc_version)" ]   || uci -q set openclawmgr.main.oc_version=latest
+[ -n "$(uci -q get openclawmgr.main.node_version)" ] || uci -q set openclawmgr.main.node_version=auto
+[ -n "$(uci -q get openclawmgr.main.preinstall_providers)" ] || uci -q set openclawmgr.main.preinstall_providers=deepseek
+
+# pick the largest writable mount as the default base dir.
+# NOTE: /var was deliberately removed from the candidate list - on many
+# devices it is a tmpfs mount (RAM) AND oc_validate_base_dir() rejects it,
+# so picking it produced a default the installer would always refuse.
+# /root and /overlay are excluded for the same reason. A fresh device with
+# no external storage simply keeps the /mnt/data default and gets a clear
+# error in the UI instead of a silently broken configuration.
+pick_base() {
+	local best="" bestfree=0 p free
+	for p in $(df -m 2>/dev/null | awk 'NR>1{print $6}' | grep -E '^/(mnt|data|nvme|sd|mmc|usb)'); do
+		[ -d "$p" ] || continue
+		[ -w "$p" ] || continue
+		free="$(df -m "$p" 2>/dev/null | awk 'NR==2{print $4}')"
+		[ -n "$free" ] || free=0
+		if [ "$free" -gt "$bestfree" ]; then best="$p"; bestfree="$free"; fi
+	done
+	# whatever we picked must survive the safety checks used everywhere else
+	[ -n "$best" ] && oc_validate_base_dir "$best/OpenClawMgr" || best=""
+	printf '%s' "$best"
+}
+
+cur="$(uci -q get openclawmgr.main.base_dir)"
+if [ -z "$cur" ]; then
+	b="$(pick_base)"
+	[ -n "$b" ] && uci -q set openclawmgr.main.base_dir="$b/OpenClawMgr"
+fi
+
+uci -q commit openclawmgr
+
+# system account
+oc_ensure_user >/dev/null 2>&1
+
+# prepare directories
+base="$(uci -q get openclawmgr.main.base_dir)"
+if [ -n "$base" ]; then
+	mkdir -p "$base" "$base/home" "$base/logs" 2>/dev/null
+	oc_fix_perms >/dev/null 2>&1
+fi
+
+chmod +x /etc/init.d/openclawmgr 2>/dev/null
+chmod +x /usr/libexec/istorec/openclawmgr.sh 2>/dev/null
+chmod +x /usr/libexec/openclawmgr/*.sh 2>/dev/null
+
+rm -f /tmp/luci-indexcache 2>/dev/null
+exit 0

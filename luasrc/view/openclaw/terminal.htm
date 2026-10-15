@@ -1,0 +1,56 @@
+<%+header%>
+<style>
+.oc-card{border:1px solid #ddd;border-radius:6px;padding:14px 16px;margin-bottom:14px;background:#fff}
+.oc-card h3{margin:0 0 10px 0;font-size:15px}
+.oc-hint{font-size:12px;color:#888;margin-top:4px;line-height:1.7}
+button,.oc-btn{background:#0069d9;color:#fff;border:0;border-radius:4px;padding:6px 14px;cursor:pointer;margin-right:6px}
+.oc-btn.gray{background:#6c757d}
+.oc-out{background:#1e1e1e;color:#eaeaea;font-family:monospace;font-size:12px;padding:10px;border-radius:4px;white-space:pre-wrap;min-height:340px;max-height:520px;overflow:auto}
+input[type=text]{padding:5px 6px;min-width:520px}
+</style>
+
+<h2><a id="content" name="content">命令行</a></h2>
+
+<div class="oc-card">
+  <h3>OpenClaw CLI</h3>
+  <div class="oc-hint">
+    在网关环境中执行 <code>openclaw &lt;子命令&gt;</code>（无需写 openclaw 前缀）。例如：
+    <code>status</code>、<code>plugins list</code>、<code>models list --provider zai</code>、
+    <code>config set gateway.bind lan</code>、<code>gateway restart</code>、<code>skills list</code>。
+    单条命令超时 120 秒。<br>
+    出于安全考虑，只允许白名单内的子命令：status、version、help、doctor、health、update、models、
+    plugins、channels、gateway、config、agents、sessions、cron、skills、logs、onboard、message、
+    memory、workspace；参数中不允许出现 <code>$ ` ; | &amp; &lt; &gt; ( ) { } ! \</code>。
+  </div>
+  <div style="margin-top:10px">
+    <input type="text" id="cmd" placeholder="status" value="status">
+    <button id="btn-run">执行</button>
+    <button id="btn-clear" class="oc-btn gray">清空</button>
+  </div>
+  <div style="margin-top:12px" class="oc-out" id="out">$ </div>
+</div>
+
+<script>
+var RUN = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","run")%>';
+function $(id){ return document.getElementById(id); }
+function post(url, data, cb){
+  var body=[]; for (var k in data) body.push(encodeURIComponent(k)+'='+encodeURIComponent(data[k]));
+  var x=new XMLHttpRequest(); x.open('POST',url,true);
+  x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+  x.onreadystatechange=function(){ if(x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({});} } };
+  x.send(body.join('&'));
+}
+function run(){
+  var c = $('cmd').value.trim(); if(!c) return;
+  $('out').textContent += '$ openclaw ' + c + '\n执行中…\n';
+  post(RUN, { cmd: c }, function(r){
+    $('out').textContent = $('out').textContent.replace(/执行中…\n$/, '');
+    $('out').textContent += (r.output || '(无输出)') + '\n';
+    $('out').scrollTop = $('out').scrollHeight;
+  });
+}
+$('btn-run').onclick = run;
+$('cmd').onkeydown = function(e){ if (e.keyCode === 13) run(); };
+$('btn-clear').onclick = function(){ $('out').textContent = '$ '; };
+</script>
+<%+footer%>
