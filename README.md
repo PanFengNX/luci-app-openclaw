@@ -1,22 +1,46 @@
 # luci-app-openclaw — OpenClaw 助手 for OpenWrt
 
-在 OpenWrt 上原生安装、启动并管理 **官方 OpenClaw**（npm 包 `openclaw`，非魔改版），功能对齐 iStoreOS 应用商店里的
-`openclawmgr`（OpenClaw Launcher），并额外增加 **DeepSeek** 与 **Z.AI（GLM / 智谱）** 默认模型。
+在 OpenWrt 上原生安装、启动并管理 **官方 OpenClaw**（npm 包 `openclaw`，非魔改版），
+内置 **DeepSeek** 与 **Z.AI（GLM / 智谱）** 默认模型。
 
 LuCI 入口：**服务 → OpenClaw 助手**（`/cgi-bin/luci/admin/services/openclaw`）。
 
-> 包名取 `luci-app-openclaw`（软件名：OpenClaw 助手），避免与 iStoreOS 的 `openclawmgr` 重名冲突；
-> 但 **UCI 配置段、init 脚本、istorec 接口、日志文件名仍保持 `openclawmgr`**，
-> 以便完全兼容 iStoreOS 的既有契约（`openclawmgr.main.*`、`/usr/libexec/istorec/openclawmgr.sh`）。
+## 与 iStoreOS 自带的 luci-app-openclawmgr 完全独立
+
+本包**不复用** iStoreOS 应用商店里 `luci-app-openclawmgr` 的任何标识或路径，
+两者可以同时安装、互不干扰：
+
+| 项目 | iStoreOS luci-app-openclawmgr | 本包 |
+| --- | --- | --- |
+| 包名 | `luci-app-openclawmgr` | `luci-app-openclaw` |
+| UCI 配置 | `/etc/config/openclawmgr`（段 `openclawmgr`） | `/etc/config/openclaw`（段 `openclaw`） |
+| procd 服务 | `/etc/init.d/openclawmgr` | `/etc/init.d/openclaw` |
+| 主脚本 | `/usr/libexec/istorec/openclawmgr.sh` | `/usr/libexec/istorec/openclaw.sh` |
+| 脚本目录 | `/usr/libexec/openclawmgr/` | `/usr/libexec/openclaw/` |
+| 运行用户 | `openclawmgr` | `openclaw` |
+| 运行目录 | `/tmp/.openclaw` | `/tmp/.openclaw` |
+| 日志 | `/var/log/openclawmgr*.log` | `/var/log/openclaw*.log` |
+| 默认数据目录 | `/mnt/data/OpenClawMgr` | `/mnt/data/OpenClaw` |
+
+因此**不需要** `replaces` / `conflicts` 声明，也不会出现
+`trying to overwrite ... owned by` 之类的文件冲突。两者的 Node 运行时、
+OpenClaw 程序与数据各自独立，**不共享任何文件**。
+
+> `usr/libexec/istorec/openclaw.sh` 只是为了让 iStore 能显示/控制本包而实现的
+> **可选**接口；不装 iStore 也完全可用。
 
 ## 兼容性
 
-| OpenWrt | 包管理器 | 产物 | 说明 |
-| --- | --- | --- | --- |
-| **25.12 及更新** | apk-tools 3.x | `luci-app-openclaw-<ver>-r<rel>.apk` | **APK v3（ADB 容器）**，首选 |
-| 24.10 | apk-tools 2.x | `luci-app-openclaw-<ver>-r<rel>-v2.apk` | APK v2（gzip 三段式） |
-| 23.05 及更早 | opkg | `luci-app-openclaw_<ver>_all.ipk` | 传统 ipk |
-| 任意 | — | `luci-app-openclaw-<ver>.run` | 自解压安装，不需要包管理器 |
+| OpenWrt / iStoreOS | 包管理器 | 该装哪个产物 |
+| --- | --- | --- |
+| **25.12 及更新**（含 iStoreOS 25.12.x） | apk-tools **3.x** | `luci-app-openclaw-<ver>-r<rel>.apk`（**APK v3 / ADB 容器**） |
+| 24.10 及更早（含 iStoreOS ≤ 24.10） | opkg | `luci-app-openclaw_<ver>_all.ipk` |
+| Alpine 类 | apk-tools 2.x | `luci-app-openclaw-<ver>-r<rel>-v2.apk`（OpenWrt 用不到） |
+| 任意 | — | `luci-app-openclaw-<ver>.run`（自解压，不需要包管理器） |
+
+> **选错格式会直接装不上**：OpenWrt 正式版**从未**使用过 apk 2.x —— 24.10 及更早是 opkg，
+> 25.12 起直接换到 apk-tools 3.x。所以 `-v2.apk` 对 OpenWrt 没有目标平台，
+> 装它会报 `unexpected end of file`。
 
 ### OpenWrt 25.12 的三处关键适配
 
@@ -37,11 +61,11 @@ OpenWrt 官方源（24.10 / 25.12 的 base、packages、luci、routing、telepho
 OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-builds.nodejs.org` 的
 `linux-x64-musl` / `linux-arm64-musl` 构建）。
 
-## 与 iStoreOS openclawmgr 的对应关系
+## 功能对照
 
 | 能力 | 本实现 |
 | --- | --- |
-| 原生部署（procd + Node/npm，非 docker） | ✅ `/etc/init.d/openclawmgr` |
+| 原生部署（procd + Node/npm，非 docker） | ✅ `/etc/init.d/openclaw` |
 | 安装路径可选（自动检测挂载盘与剩余空间） | ✅ 状态页列出挂载点 + 手动输入，安装前写入探针与空间检查 |
 | 在线安装运行环境 | ✅ 一键拉取 Node.js + npm 安装 OpenClaw，实时日志 |
 | 端口 / 绑定模式 | ✅ 18789，bind: loopback / lan / auto / tailnet / custom |
@@ -49,19 +73,21 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 | 微信渠道插件 | ✅ 官方 `@tencent-weixin/openclaw-weixin-cli`（含前置检查） |
 | 命令行页面 | ✅ 任意 `openclaw <子命令>` |
 | 日志 / doctor 体检 | ✅ 含 `doctor --fix` 一键修复 |
-| istorec 接口 `install/start/stop/status/port/token` | ✅ `/usr/libexec/istorec/openclawmgr.sh`（同样契约，可直接被 iStore entry.sh 调用） |
-| UCI 配置 `openclawmgr.main.*` | ✅ `base_dir`、`port`、`bind`、`enabled` … |
+| 程序目录与数据目录可分离 | ✅ `main.openclaw_dir` |
+| 一键备份与恢复 | ✅ 归档逐条安全校验 + 还原前自动快照 |
+| UCI 配置 `openclaw.main.*` | ✅ `base_dir`、`openclaw_dir`、`port`、`bind`、`enabled` … |
+| istorec 接口 `install/start/stop/status/port/token` | ✅ `/usr/libexec/istorec/openclaw.sh`（**可选**，供 iStore 显示与控制） |
 
 ## 稳定性设计（对齐 iStoreOS 并修正其缺陷）
 
-首要目标是「跑得稳」。做法是**保留 iStoreOS openclawmgr 的正确部分，修正会导致故障的部分**。
+首要目标是「跑得稳」。本包独立实现，并参考 iStoreOS 的稳定性经验修正已知缺陷。
 
 ### 借鉴 iStoreOS（保留）
 
 | 机制 | 作用 |
 | --- | --- |
 | `validate_base_dir` | 拒绝在 `/root/*`、`/usr`、`/etc`、`/tmp`、`/var`、`/overlay`、`/rom` 等系统路径上操作 |
-| `acquire_lock` + 陈旧检测 | `/tmp/openclawmgr.lock`（mkdir 原子锁），持有者进程已退出则自动清理 |
+| `acquire_lock` + 陈旧检测 | `/tmp/.openclaw/lock`（mkdir 原子锁），持有者进程已退出则自动清理 |
 | `ensure_safe_port` | 拒绝 `<=1024` 的特权端口 |
 | 下载进度 + 卡死检测 | curl 后台下载，定期汇报；60s 无进展即判定停滞并报错，而不是无限挂着 |
 | 缓存校验 `cached_node_archive_ok` | 复用已下载的 Node 压缩包前先 `xz -t` / `tar -tJf` 校验，损坏则重下 |
@@ -90,7 +116,7 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 | --- | --- | --- | --- |
 | 1 | `api_run` 把浏览器传来的 `cmd` **不加引号**拼进 shell 字符串 | 任意命令执行（root）。`cmd=status;reboot` 即可 | 首 token 白名单（20 个 openclaw 子命令）+ 每个 token 经 `q()` 单引号转义；`cmd_run` 再拦一次 `$ \` ; \| & < > ( ) { } ! \` |
 | 2 | 网关 token 以 `--token <值>` 出现在命令行 | 任何本地用户读 `/proc/<pid>/cmdline` 即可拿到凭据 | 改走 `OPENCLAW_GATEWAY_TOKEN` 环境变量（官方文档等价方式，且优先级高于配置文件） |
-| 3 | 临时文件用 `/tmp/openclawmgr-*` 固定名 | `/tmp` 是 1777，本地用户可预置符号链接 → 以 root 覆写任意文件；预置锁目录 → 管理功能全部被拒绝 | 统一迁入私有目录 `/tmp/.openclawmgr`（0700、属主校验、启动时回收异常条目） |
+| 3 | 临时文件用 `/tmp/openclaw-*` 固定名 | `/tmp` 是 1777，本地用户可预置符号链接 → 以 root 覆写任意文件；预置锁目录 → 管理功能全部被拒绝 | 统一迁入私有目录 `/tmp/.openclaw`（0700、属主校验、启动时回收异常条目） |
 | 4 | 状态页把 `d.url` / `d.token` 拼进 `<a href>` | XSS；token 进入浏览器历史与 Referer | 只以 `textContent` 显示 URL，token 仅存在于 JS 变量 |
 | 5 | 模型页把 `p.keyUrl`、渠道页把登录输出拼进 `innerHTML` | XSS（`javascript:` URL、插件输出里的标签） | 改 DOM 构建；`keyUrl` 只接受 `http(s)` 才生成链接 |
 | 6 | API Key 原样写入 `.env` | 含换行的 Key 会额外注入任意环境变量行 | 校验字符集 → 剥离控制字符 → 只取首行；`.env` 权限 600 |
@@ -131,7 +157,7 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 | 27 | **`oc_backup_resolve` 绝对路径分支未挡 `..`** | `$OC_RUNDIR/../../etc/x` 能通过前缀匹配 → verify/restore 可作用到备份目录之外 | 绝对路径分支与纯文件名分支对称地拒绝 `..` |
 | 28 | **`create --name` 缺参时死循环** | `shift 2` 越界不移位 → 挂死一个 root 进程，前端永远等不到 JSON（已实测确认） | `shift; name="${1:-}"; [ $# -eq 0 ] \|\| shift` |
 | 29 | **API Key 经 `env` 仍暴露在 cmdline** | 早先改的 `env OC_APPLY_KEY=... cmd` 只是把密钥从 `models.sh` 的 argv 挪到了 `sh`/`env` 的 argv，暴露窗口一样长 | 改为写 0600 临时文件 + `--key-file`，helper 读后即删 |
-| 30 | `/tmp/.openclawmgr` 可被预置符号链接 | 本地用户预置同名链接 → root 把上传内容写进链接指向的文件 | 先 `test -L` 探测，是链接即拒绝 |
+| 30 | `/tmp/.openclaw` 可被预置符号链接 | 本地用户预置同名链接 → root 把上传内容写进链接指向的文件 | 先 `test -L` 探测，是链接即拒绝 |
 | 31 | 归档条目名可伪造清单 | busybox tar 不转义名字，含换行的条目名会拆成两行，伪造出"看似合法"的清单行 | awk 中额外拒绝含控制字符与 ` -> ` 的条目名 |
 | 32 | 固定名临时文件（`bk-list.txt`/`bk-tar.err`） | 并发实例互相踩；名字被预置成符号链接时会写穿 | 加 PID 后缀 + 写入前 `rm -f` + 用后清理 |
 | 33 | 空间检查查错了文件系统 | 归档不是直接从数据目录生成，而是先 `cp -a` 到 `$OC_RUNDIR`（OpenWrt 上是 tmpfs=RAM），检查漏掉了真正会被写满的目标 | 追加暂存目录所在文件系统的剩余空间检查 |
@@ -175,13 +201,13 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 
 ### 3. 一键修复 + 一键 doctor（新增）
 
-- **一键修复**（`/usr/libexec/openclawmgr/repair.sh`，LuCI 状态页绿色按钮）共 13 项检查：
+- **一键修复**（`/usr/libexec/openclaw/repair.sh`，LuCI 状态页绿色按钮）共 13 项检查：
   安装目录存在与可写 → 运行用户 → 目录重建 → Node 可运行 → openclaw 启动脚本重建
   （从 `openclaw.mjs/.js` 重新生成 shim）→ helper 脚本权限 → 配置文件损坏自动备份重建 →
   `.env` 收紧为 600 → 属主与权限 → init 脚本 enable → 端口占用 → CA 证书 → 清 LuCI 缓存 → 重启。
   支持 `--json`（LuCI 消费）与 `--no-restart`。
 - **doctor 一键修复**：先跑 `openclaw doctor --fix`，再跑一遍 repair，两条链路合一。
-- **doctor**（只读）：`openclawmgr.sh doctor` 输出体检报告。
+- **doctor**（只读）：`openclaw.sh doctor` 输出体检报告。
 
 ### 4. 安装时可选 Node.js 与 OpenClaw 版本，且版本数据全部在线获取
 
@@ -230,12 +256,12 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 命令行等价接口：
 
 ```sh
-openclawmgr.sh backup [--name <备注>] [--no-workspace]
-openclawmgr.sh backups
-openclawmgr.sh backup-verify <文件名>
-openclawmgr.sh backup-delete <文件名>
-openclawmgr.sh backup-path
-openclawmgr.sh restore <文件名> [--no-safety]
+openclaw.sh backup [--name <备注>] [--no-workspace]
+openclaw.sh backups
+openclaw.sh backup-verify <文件名>
+openclaw.sh backup-delete <文件名>
+openclaw.sh backup-path
+openclaw.sh restore <文件名> [--no-safety]
 ```
 
 ### 8. 打包格式修复：ipk / APK v2 的 ar 容器
@@ -275,17 +301,22 @@ apk add --allow-untrusted luci-app-openclaw-1.0.0-r1.apk
 **不要**装 `...-v2.apk` —— 那是 apk-tools 2.x / Alpine 的格式，不是 OpenWrt 25.12 的
 ADB（APK v3）格式，装错会报 `unexpected end of file`。
 
-iStoreOS 还自带一个旧包 `luci-app-openclawmgr`，它拥有与本包**完全相同**的文件
-（`/etc/config/openclawmgr`、`/etc/init.d/openclawmgr`、`/usr/libexec/istorec/openclawmgr.sh` …）。
-这些路径是刻意保留的（兼容 iStoreOS 契约），所以 APK v3 的 PKGINFO（字段 17 `REPLACES`）
-与 ipk 的 control 都声明了替换/冲突关系，允许本包接管这些文件。
+**本包与 iStoreOS 自带的 `luci-app-openclawmgr` 完全独立**，文件路径没有任何重叠
+（见开头对照表），因此：
 
-若仍提示旧包冲突，先卸载再装：
+- **不需要**先卸载 `luci-app-openclawmgr`，两者可以共存；
+- 元数据里也**不再声明** `replaces` / `conflicts`，不会出现
+  `trying to overwrite ... owned by` 的冲突错误；
+- 两者各自安装 Node.js 与 OpenClaw，**数据目录也不同**
+  （旧包 `/mnt/data/OpenClawMgr`，本包 `/mnt/data/OpenClaw`）。
+
+如果你希望彻底不保留旧包，可以自行卸载：
 
 ```sh
 apk del luci-app-openclawmgr
-apk add --allow-untrusted luci-app-openclaw-1.0.0-r1.apk
 ```
+
+> 注意：卸载旧包**可能连带删除它自己的数据目录**。若要保留，先自行备份。
 
 本版本同时修正了 post-install 脚本首行缺少 `#!` 导致的 `execve: Exec format error`。
 
@@ -354,19 +385,19 @@ python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 /
 ### 命令行
 
 ```sh
-openclawmgr.sh info                       # JSON 状态
-openclawmgr.sh versions                   # 在线版本清单
-openclawmgr.sh check 2026.10.3 24.16.0    # 校验 Node 是否满足 engines
-openclawmgr.sh install --oc-version latest --node-version auto --base-dir /mnt/sda1/OpenClawMgr
-openclawmgr.sh install-bg ...             # 后台安装（LuCI 使用）
-openclawmgr.sh start|stop|restart|status|port|token
-openclawmgr.sh repair [--json] [--no-restart]    # 一键修复
-openclawmgr.sh doctor [--fix]                    # 体检 / 一键修复
-openclawmgr.sh diag-run doctor|doctor-fix|repair # 后台启动诊断（LuCI 使用）
-openclawmgr.sh diag-poll repair                  # {"done":bool,"rc":"0","output":".."}
-openclawmgr.sh models catalog|presets|apply deepseek sk-xxx deepseek-v4-flash
-openclawmgr.sh channels weixin install|weixin login
-openclawmgr.sh run plugins list
+openclaw.sh info                       # JSON 状态
+openclaw.sh versions                   # 在线版本清单
+openclaw.sh check 2026.10.3 24.16.0    # 校验 Node 是否满足 engines
+openclaw.sh install --oc-version latest --node-version auto --base-dir /mnt/sda1/OpenClaw
+openclaw.sh install-bg ...             # 后台安装（LuCI 使用）
+openclaw.sh start|stop|restart|status|port|token
+openclaw.sh repair [--json] [--no-restart]    # 一键修复
+openclaw.sh doctor [--fix]                    # 体检 / 一键修复
+openclaw.sh diag-run doctor|doctor-fix|repair # 后台启动诊断（LuCI 使用）
+openclaw.sh diag-poll repair                  # {"done":bool,"rc":"0","output":".."}
+openclaw.sh models catalog|presets|apply deepseek sk-xxx deepseek-v4-flash
+openclaw.sh channels weixin install|weixin login
+openclaw.sh run plugins list
 ```
 
 ## 目录结构
@@ -375,18 +406,18 @@ openclawmgr.sh run plugins list
 Makefile                                  OpenWrt 包定义（feeds / SDK）
 luasrc/controller/openclaw.lua            LuCI 路由 + JSON API
 luasrc/view/openclaw/*.htm                状态/安装、模型、渠道、命令行、日志
-root/etc/config/openclawmgr               UCI 默认配置（保持 iStoreOS 契约）
-root/etc/init.d/openclawmgr               procd 服务
-root/etc/uci-defaults/99-openclawmgr      首次安装初始化（用户、目录、默认挂载点）
-root/usr/libexec/istorec/openclawmgr.sh   主管理脚本（iStore 兼容契约）
-root/usr/libexec/openclawmgr/lib.sh       公共库（semver / engines 解析、下载、日志）
-root/usr/libexec/openclawmgr/versions.sh  在线版本发现与兼容性校验
-root/usr/libexec/openclawmgr/install.sh   安装流程
-root/usr/libexec/openclawmgr/models.sh    模型目录、插件安装、Key 写入、设为默认
-root/usr/libexec/openclawmgr/repair.sh    一键修复（13 项检查）
-root/usr/libexec/openclawmgr/backup.sh    备份与恢复（归档安全校验 + 安全快照）
-root/usr/libexec/openclawmgr/channels.sh  微信等渠道
-root/usr/share/openclawmgr/model-presets.json
+root/etc/config/openclaw                 UCI 默认配置（独立）
+root/etc/init.d/openclaw                 procd 服务
+root/etc/uci-defaults/99-openclaw        首次安装初始化（用户、目录、默认挂载点）
+root/usr/libexec/istorec/openclaw.sh      可选 iStore 控制接口
+root/usr/libexec/openclaw/lib.sh       公共库（semver / engines 解析、下载、日志）
+root/usr/libexec/openclaw/versions.sh  在线版本发现与兼容性校验
+root/usr/libexec/openclaw/install.sh   安装流程
+root/usr/libexec/openclaw/models.sh    模型目录、插件安装、Key 写入、设为默认
+root/usr/libexec/openclaw/repair.sh    一键修复（13 项检查）
+root/usr/libexec/openclaw/backup.sh    备份与恢复（归档安全校验 + 安全快照）
+root/usr/libexec/openclaw/channels.sh  微信等渠道
+root/usr/share/openclaw/model-presets.json
 root/usr/share/rpcd/acl.d/luci-app-openclaw.json
 scripts/apk3.py                           APK v3（ADB）写出器 —— OpenWrt 25.12
 scripts/build_apk.py                      生成 apk v3 / apk v2 / ipk / .run

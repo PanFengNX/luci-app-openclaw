@@ -6,7 +6,7 @@
 #
 # 退出码：0 = 全部通过；1 = 有失败
 
-LIB="$(dirname "$0")/../../root/usr/libexec/openclawmgr/lib.sh"
+LIB="$(dirname "$0")/../../root/usr/libexec/openclaw/lib.sh"
 [ -f "$LIB" ] || { echo "找不到 $LIB"; exit 2; }
 . "$LIB"
 
@@ -27,9 +27,9 @@ expect() {  # expect <desc> <rc> <want>
 
 # ---------------------------------------------------------------- 路径校验
 # 允许的形态
-oc_validate_base_dir /mnt/data/OpenClawMgr; expect "接受 /mnt/data/OpenClawMgr" "$?" 0
+oc_validate_base_dir /mnt/data/OpenClaw; expect "接受 /mnt/data/OpenClaw" "$?" 0
 oc_validate_base_dir /mnt/sda1/oc;          expect "接受 /mnt/sda1/oc"          "$?" 0
-oc_validate_base_dir /mnt/data/OpenClawMgr/; expect "接受尾部斜杠"             "$?" 0
+oc_validate_base_dir /mnt/data/OpenClaw/; expect "接受尾部斜杠"             "$?" 0
 
 # 系统路径必须拒绝
 for p in / /root /root/x /etc /etc/passwd /usr /usr/lib /bin /sbin /lib \
@@ -48,10 +48,10 @@ oc_validate_base_dir "";         expect "拒绝空字符串"     "$?" 1
 # 解析后的路径仍要过滤（安全控件本体）
 oc_validate_base_dir_shape /etc;                  expect "shape 拒绝 /etc"      "$?" 1
 oc_validate_base_dir_shape /var;                  expect "shape 拒绝 /var"      "$?" 1
-oc_validate_base_dir_shape /mnt/data/OpenClawMgr; expect "shape 接受正常路径"   "$?" 0
+oc_validate_base_dir_shape /mnt/data/OpenClaw; expect "shape 接受正常路径"   "$?" 0
 
 # 不存在的目录必须接受（全新安装场景）
-oc_validate_base_dir /mnt/__oc_does_not_exist__/OpenClawMgr
+oc_validate_base_dir /mnt/__oc_does_not_exist__/OpenClaw
 expect "接受尚不存在的目录" "$?" 0
 
 # 桩注入：模拟符号链接解析结果

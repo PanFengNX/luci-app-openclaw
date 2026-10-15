@@ -1,4 +1,4 @@
--- Copyright (C) openclawmgr - LuCI controller
+-- Copyright (C) openclaw - LuCI controller
 -- OpenClaw 助手 (OpenClaw Assistant) for OpenWrt
 -- package: luci-app-openclaw
 
@@ -9,8 +9,8 @@ local util  = require "luci.util"
 local http  = require "luci.http"
 local jsonc = require "luci.jsonc"
 
-local SH     = "/usr/libexec/istorec/openclawmgr.sh"
-local MODELS = "/usr/libexec/openclawmgr/models.sh"
+local SH     = "/usr/libexec/istorec/openclaw.sh"
+local MODELS = "/usr/libexec/openclaw/models.sh"
 
 function index()
 	entry({"admin", "services", "openclaw"}, firstchild(), _("OpenClaw 助手"), 60).dependent = false
@@ -89,16 +89,16 @@ end
 function api_versions()
 	local refresh = http.formvalue("refresh")
 	local arg = refresh == "1" and " refresh" or ""
-	local ocv = sh("/usr/libexec/openclawmgr/versions.sh oc-versions" .. arg)
-	local nv  = sh("/usr/libexec/openclawmgr/versions.sh node-versions" .. arg)
-	local urls = sh("/usr/libexec/openclawmgr/versions.sh urls")
+	local ocv = sh("/usr/libexec/openclaw/versions.sh oc-versions" .. arg)
+	local nv  = sh("/usr/libexec/openclaw/versions.sh node-versions" .. arg)
+	local urls = sh("/usr/libexec/openclaw/versions.sh urls")
 	out({ ok = true, openclaw = ocv, node = nv, sources = urls })
 end
 
 function api_check()
 	local ocv = http.formvalue("oc") or "latest"
 	local nv  = http.formvalue("node") or ""
-	local r = sh("/usr/libexec/openclawmgr/versions.sh check " .. q(ocv) .. " " .. q(nv))
+	local r = sh("/usr/libexec/openclaw/versions.sh check " .. q(ocv) .. " " .. q(nv))
 	local ok = r:find('"ok":true') ~= nil
 	out({ ok = ok, data = r })
 end
@@ -126,7 +126,7 @@ local MAX_ILOG = 262144   -- 256 KiB
 
 function api_ilog()
 	local r = ""
-	local f = io.open("/var/log/openclawmgr-install.log", "r")
+	local f = io.open("/var/log/openclaw-install.log", "r")
 	if f then
 		-- 只读尾部：read("*a") 会把几十 MB 的安装日志整份读进内存，
 		-- 之后才截断，正好和上面"限制内存"的初衷相反。
@@ -174,13 +174,13 @@ function api_save()
 end
 
 function api_presets()
-	local r = sh("/usr/libexec/openclawmgr/models.sh presets")
+	local r = sh("/usr/libexec/openclaw/models.sh presets")
 	out({ ok = true, data = r })
 end
 
 function api_models()
 	local p = http.formvalue("provider") or ""
-	local r = sh("/usr/libexec/openclawmgr/models.sh discover " .. q(p))
+	local r = sh("/usr/libexec/openclaw/models.sh discover " .. q(p))
 	out({ ok = true, data = r })
 end
 
@@ -252,11 +252,11 @@ function api_channels()
 	local act = http.formvalue("action") or "list"
 	local r
 	if act == "weixin_install" then
-		r = sh("/usr/libexec/openclawmgr/channels.sh weixin install")
+		r = sh("/usr/libexec/openclaw/channels.sh weixin install")
 	elseif act == "weixin_login" then
-		r = sh("/usr/libexec/openclawmgr/channels.sh weixin login")
+		r = sh("/usr/libexec/openclaw/channels.sh weixin login")
 	else
-		r = sh("/usr/libexec/openclawmgr/channels.sh list")
+		r = sh("/usr/libexec/openclaw/channels.sh list")
 	end
 	out({ ok = true, output = r })
 end
@@ -281,7 +281,7 @@ function api_doctor()
 end
 
 function api_providers()
-	local r = sh("/usr/libexec/openclawmgr/models.sh catalog")
+	local r = sh("/usr/libexec/openclaw/models.sh catalog")
 	out({ ok = true, data = r })
 end
 
@@ -323,9 +323,9 @@ end
 --   * 上传的归档先落到私有 rundir，再由 backup.sh 校验后才允许还原
 --   * 下载强制 attachment，避免浏览器直接渲染内容
 
-local RUNDIR = "/tmp/.openclawmgr"
+local RUNDIR = "/tmp/.openclaw"
 -- 首字符必须是字母数字：排除 "." / ".."（会被拼成路径穿越）与前导 "-"
--- （会被 helper 的 getopts 当成选项）。这些名字会原样下传给 openclawmgr.sh。
+-- （会被 helper 的 getopts 当成选项）。这些名字会原样下传给 openclaw.sh。
 local SAFE_NAME = "^[A-Za-z0-9][A-Za-z0-9._-]*$"
 local MAX_UPLOAD = 64 * 1024 * 1024   -- 64 MiB
 

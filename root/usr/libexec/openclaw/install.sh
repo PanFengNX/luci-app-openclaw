@@ -1,12 +1,12 @@
 #!/bin/sh
-# openclawmgr - installation routines
+# openclaw - installation routines
 #
 # Installs an upstream, unmodified OpenClaw (npm package "openclaw") plus the
 # Node.js runtime that its package.json engines.node demands. Versions are
 # resolved online; a Node.js release below the required range is rejected.
 
-OC_LIB="/usr/libexec/openclawmgr/lib.sh"
-OC_VER="/usr/libexec/openclawmgr/versions.sh"
+OC_LIB="/usr/libexec/openclaw/lib.sh"
+OC_VER="/usr/libexec/openclaw/versions.sh"
 . "$OC_LIB"
 . "$OC_VER"
 
@@ -65,7 +65,7 @@ OC_DIR="${OC_DIR_ARG:-$(uci_get main.openclaw_dir '')}"
 OC_DIR="${OC_DIR%/}"
 HOME_DIR="$BASE_DIR/home"
 
-: >"$OC_INSTALLLOG" 2>/dev/null || OC_INSTALLLOG="${OC_RUNDIR:-/tmp/.openclawmgr}/install.log"
+: >"$OC_INSTALLLOG" 2>/dev/null || OC_INSTALLLOG="${OC_RUNDIR:-/tmp/.openclaw}/install.log"
 : >"$OC_INSTALLLOG" 2>/dev/null || true
 ilog() { printf '%s\n' "$*" | tee -a "$OC_INSTALLLOG"; }
 
@@ -120,7 +120,7 @@ resolve_versions() {
 	case "$OCV" in
 		latest|extended-stable|beta|stable)
 			local resolved
-			resolved="$(awk -F'\t' -v x="$OCV" '$1==x{printf "%s",$2; exit}' "${OC_CACHE_DIR:-/tmp/.openclawmgr/cache}/oc-tags.tsv" 2>/dev/null)"
+			resolved="$(awk -F'\t' -v x="$OCV" '$1==x{printf "%s",$2; exit}' "${OC_CACHE_DIR:-/tmp/.openclaw/cache}/oc-tags.tsv" 2>/dev/null)"
 			[ -n "$resolved" ] || die "无法获取 OpenClaw 的 $OCV 版本号（网络问题？）"
 			ilog "标签 $OCV -> OpenClaw $resolved"
 			OCV="$resolved"
@@ -142,7 +142,7 @@ resolve_versions() {
 		fi
 	elif [ "$NODE_V" = "auto" ] || [ -z "$NODE_V" ]; then
 		sh "$OC_VER" node-versions refresh >/dev/null 2>&1
-		NODE_V="$(awk -F'\t' '{print $1}' "${OC_CACHE_DIR:-/tmp/.openclawmgr/cache}/node-versions.tsv" 2>/dev/null | while read -r nv; do
+		NODE_V="$(awk -F'\t' '{print $1}' "${OC_CACHE_DIR:-/tmp/.openclaw/cache}/node-versions.tsv" 2>/dev/null | while read -r nv; do
 			n="${nv#v}"
 			if engines_match "$n" "$ENGINES"; then printf '%s\n' "$nv"; break; fi
 		done)"
@@ -362,11 +362,11 @@ finish() {
 	uci_set main.oc_version "$OCV"
 	uci_set main.node_version "$NODE_V"
 	uci_commit
-	chmod +x /etc/init.d/openclawmgr 2>/dev/null
-	/etc/init.d/openclawmgr enable >/dev/null 2>&1
+	chmod +x /etc/init.d/openclaw 2>/dev/null
+	/etc/init.d/openclaw enable >/dev/null 2>&1
 	if [ "$NO_START" != "1" ]; then
 		ilog "启动服务 ..."
-		/etc/init.d/openclawmgr restart
+		/etc/init.d/openclaw restart
 	fi
 	ilog "== 部署完成 =="
 	ilog "OpenClaw $OCV  |  Node.js $NODE_V  |  目录 $BASE_DIR"

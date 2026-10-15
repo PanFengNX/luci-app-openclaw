@@ -1,5 +1,5 @@
 #!/bin/sh
-# openclawmgr - online version discovery
+# openclaw - online version discovery
 #
 # All version data is fetched live from upstream:
 #   * OpenClaw releases + required Node.js range -> npm registry (official package)
@@ -8,13 +8,13 @@
 # Output is JSON so the LuCI controller can pass it straight through.
 
 OC_LIB="$(dirname "$0")/lib.sh"
-[ -f "$OC_LIB" ] || OC_LIB="/usr/libexec/openclawmgr/lib.sh"
+[ -f "$OC_LIB" ] || OC_LIB="/usr/libexec/openclaw/lib.sh"
 . "$OC_LIB"
 
 # Cache lives in the private rundir: a predictable name under world-writable
 # /tmp can be pre-created as a symlink by any local user, and versions.sh
 # writes these files as root.
-OC_CACHE_DIR="${OC_RUNDIR:-/tmp/.openclawmgr}/cache"
+OC_CACHE_DIR="${OC_RUNDIR:-/tmp/.openclaw}/cache"
 OC_CACHE_TTL=300
 
 npm_registry() {

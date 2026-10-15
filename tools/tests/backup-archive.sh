@@ -38,10 +38,10 @@ fi
 rm -rf "$SBX"
 mkdir -p "$SBX/libexec" "$SBX/cases" "$SBX/rundir" || exit 2
 
-sed "s#/usr/libexec/openclawmgr/#$SBX/libexec/#g" \
-	"$PROJ/root/usr/libexec/openclawmgr/lib.sh" >"$SBX/libexec/lib.sh"
-sed "s#/usr/libexec/openclawmgr/#$SBX/libexec/#g" \
-	"$PROJ/root/usr/libexec/openclawmgr/backup.sh" >"$SBX/libexec/backup.sh"
+sed "s#/usr/libexec/openclaw/#$SBX/libexec/#g" \
+	"$PROJ/root/usr/libexec/openclaw/lib.sh" >"$SBX/libexec/lib.sh"
+sed "s#/usr/libexec/openclaw/#$SBX/libexec/#g" \
+	"$PROJ/root/usr/libexec/openclaw/backup.sh" >"$SBX/libexec/backup.sh"
 
 # 让 rundir 指向测试目录：oc_backup_resolve 只接受 rundir 下的绝对路径
 cat >>"$SBX/libexec/lib.sh" <<EOF
@@ -101,7 +101,7 @@ def build(name, entries, manifest=True):
 
 
 GOOD = [
-    ("./etc/config/openclawmgr", "config openclawmgr\n\toption port '18789'\n"),
+    ("./etc/config/openclaw", "config openclaw\n\toption port '18789'\n"),
     ("./home/.openclaw/openclaw.json", '{"gateway":{"port":18789}}\n'),
     ("./home/.openclaw/.env", "DEEPSEEK_API_KEY=sk-test\n"),
 ]
@@ -112,7 +112,7 @@ build("no-manifest.tar.gz", GOOD, manifest=False)
 build("abs-path.tar.gz", GOOD + [("/etc/passwd", "root:x:0:0\n")])
 build("dotdot.tar.gz", GOOD + [("./home/../../etc/passwd", "x\n")])
 build("symlink.tar.gz", GOOD + [("./home/.openclaw/evil", "SYMLINK:/etc")])
-build("hardlink.tar.gz", GOOD + [("./home/.openclaw/hard", "HARDLINK:./etc/config/openclawmgr")])
+build("hardlink.tar.gz", GOOD + [("./home/.openclaw/hard", "HARDLINK:./etc/config/openclaw")])
 build("chrdev.tar.gz", GOOD + [("./home/.openclaw/null", "CHRDEV")])
 build("fifo.tar.gz", GOOD + [("./home/.openclaw/pipe", "FIFO")])
 build("no-dot-slash.tar.gz", GOOD + [("etc/config/other", "x\n")])

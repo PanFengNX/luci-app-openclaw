@@ -1,7 +1,7 @@
 #!/bin/sh
-# openclawmgr - messaging channel helpers (WeChat / Feishu / Telegram / Discord)
+# openclaw - messaging channel helpers (WeChat / Feishu / Telegram / Discord)
 
-OC_LIB="/usr/libexec/openclawmgr/lib.sh"
+OC_LIB="/usr/libexec/openclaw/lib.sh"
 . "$OC_LIB"
 
 oc_env() {
@@ -44,7 +44,7 @@ weixin_install() {
 	fi
 	oc_fix_perms
 	oc_info "重启网关以加载插件"
-	/etc/init.d/openclawmgr restart
+	/etc/init.d/openclaw restart
 }
 
 weixin_login() {

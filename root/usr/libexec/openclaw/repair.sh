@@ -1,5 +1,5 @@
 #!/bin/sh
-# openclawmgr - one click repair
+# openclaw - one click repair
 #
 # Fixes the things that most commonly break a native OpenClaw deployment on
 # OpenWrt: ownership/permissions, missing directories, a corrupted
@@ -8,10 +8,10 @@
 #
 # Usage: repair.sh [--json] [--no-restart]
 
-OC_LIB="/usr/libexec/openclawmgr/lib.sh"
+OC_LIB="/usr/libexec/openclaw/lib.sh"
 . "$OC_LIB"
 
-INITD="/etc/init.d/openclawmgr"
+INITD="/etc/init.d/openclaw"
 JSON=0
 RESTART=1
 FIXED=0
@@ -59,7 +59,7 @@ say() {
 }
 
 if ! oc_validate_base_dir "$(oc_base_dir)"; then
-	say FAIL "安装目录不安全：$(oc_base_dir)（请先在状态页改为 /mnt/.../OpenClawMgr）"
+	say FAIL "安装目录不安全：$(oc_base_dir)（请先在状态页改为 /mnt/.../OpenClaw）"
 	# Do not fall through: the steps below create directories inside BASE and
 	# then run `chown -R` / `chmod -R` on it, so on a system path (/etc, /tmp,
 	# ...) "repair" would recursively take ownership of the system tree. The
@@ -141,7 +141,7 @@ else
 	say OK "OpenClaw 可执行文件就绪"
 fi
 # all helper scripts executable
-for f in "$OC_DIR"/bin/* /usr/libexec/openclawmgr/*.sh /usr/libexec/istorec/openclawmgr.sh; do
+for f in "$OC_DIR"/bin/* /usr/libexec/openclaw/*.sh /usr/libexec/istorec/openclaw.sh; do
 	[ -f "$f" ] || continue
 	[ -x "$f" ] || { chmod +x "$f" 2>/dev/null && say FIX "已修复可执行权限：$f"; }
 done

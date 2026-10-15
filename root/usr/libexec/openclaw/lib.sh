@@ -1,26 +1,26 @@
 #!/bin/sh
-# openclawmgr - shared helpers
+# openclaw - shared helpers
 # POSIX sh (busybox ash) compatible.
 
-OC_NAME="openclawmgr"
-OC_UCI="openclawmgr"
+OC_NAME="openclaw"
+OC_UCI="openclaw"
 OC_LOGDIR="/var/log"
-OC_LOGFILE="$OC_LOGDIR/openclawmgr.log"
-OC_INSTALLLOG="$OC_LOGDIR/openclawmgr-install.log"
-OC_TASKLOG="$OC_LOGDIR/openclawmgr-task.log"
+OC_LOGFILE="$OC_LOGDIR/openclaw.log"
+OC_INSTALLLOG="$OC_LOGDIR/openclaw-install.log"
+OC_TASKLOG="$OC_LOGDIR/openclaw-task.log"
 
-OC_USER="openclawmgr"
-OC_GROUP="openclawmgr"
+OC_USER="openclaw"
+OC_GROUP="openclaw"
 
 # ---------------------------------------------------------------- rundir
-# Everything transient used to live at hard-coded /tmp/openclawmgr-* names.
+# Everything transient used to live at hard-coded /tmp/openclaw-* names.
 # /tmp is mode 1777 on OpenWrt, so any local user could pre-create those
 # paths: a symlink at .../install.rc makes us overwrite an arbitrary file as
 # root, and a pre-created lock directory denies every management action.
 # We now keep one private, mode-0700 directory and validate its ownership on
 # every start. The name stays predictable on purpose - diag-run and diag-poll
 # are separate processes and must agree on where the output file is.
-OC_RUNDIR_BASE="/tmp/.openclawmgr"
+OC_RUNDIR_BASE="/tmp/.openclaw"
 
 oc_dir_uid() {
 	# oc_dir_uid <dir> -> numeric owner uid ("-1" when unknown).
@@ -67,7 +67,7 @@ oc_rundir() {
 
 # Resolved once, at load time. Every caller then shares the same directory.
 # On failure we still point at the base name rather than at "" - that keeps
-# every derived path under /tmp/.openclawmgr instead of escaping to "/lock",
+# every derived path under /tmp/.openclaw instead of escaping to "/lock",
 # and the subsequent mkdir simply fails (fail closed).
 OC_RUNDIR="$(oc_rundir)"
 [ -n "$OC_RUNDIR" ] || OC_RUNDIR="$OC_RUNDIR_BASE"
@@ -114,7 +114,7 @@ uci_commit() { uci -q commit "$OC_UCI" 2>/dev/null; }
 oc_base_dir() {
 	local d
 	d="$(uci_get main.base_dir '')"
-	[ -n "$d" ] || d="/mnt/data/OpenClawMgr"
+	[ -n "$d" ] || d="/mnt/data/OpenClaw"
 	# normalise: strip trailing slashes, but never turn "/" into "" ——
 	# an empty result would make every derived path relative (e.g. oc_oc_bin
 	# would become "/bin/openclaw") and hide the real value in error messages.
@@ -541,7 +541,7 @@ oc_fix_perms() {
 }
 
 # ---------------------------------------------------------------- safety
-# Everything below was modelled on the iStoreOS openclawmgr, which does a
+# Everything below was modelled on iStoreOS's luci-app-openclawmgr, which does a
 # genuinely good job at not bricking the router. Adopted:
 #   * refuse to operate on system / dot-path base directories
 #   * a real lock so two LuCI clicks cannot run two installs at once
@@ -566,7 +566,7 @@ oc_validate_base_dir() {
 	# Three layers:
 	#   1. shape filter - absolute path, no "." / ".." segments, and never on
 	#      a system prefix (see oc_validate_base_dir_shape)
-	#   2. physical resolution - `/mnt/data/OpenClawMgr -> /etc` must not slip
+	#   2. physical resolution - `/mnt/data/OpenClaw -> /etc` must not slip
 	#      past a pure string filter, because oc_fix_perms later runs
 	#      `chown -R` and `chmod -R` on the base dir
 	#   3. the final component must not itself be a symlink - `chown -R link`
@@ -626,7 +626,7 @@ oc_require_dir() {
 	fi
 	if ! oc_validate_base_dir "$d"; then
 		oc_err "拒绝在不安全的安装目录上操作：$d"
-		oc_err "请改用专用目录，例如 /mnt/sda1/OpenClawMgr 或 /mnt/data/OpenClawMgr"
+		oc_err "请改用专用目录，例如 /mnt/sda1/OpenClaw 或 /mnt/data/OpenClaw"
 		exit 2
 	fi
 	return 0

@@ -1,9 +1,9 @@
 #!/bin/sh
-# openclawmgr - one click backup / restore
+# openclaw - one click backup / restore
 #
 # 备份内容（只备份"不可再生"的部分）：
 #   $BASE_DIR/home/.openclaw   配置、模型、渠道、会话、工作区数据
-#   /etc/config/openclawmgr    UCI 设置
+#   /etc/config/openclaw    UCI 设置
 #
 # 刻意不备份（体积大且可重新获取）：
 #   $BASE_DIR/node  $BASE_DIR/openclaw  npm-cache  cache  logs
@@ -21,7 +21,7 @@
 #
 # 所有输出均为单行 JSON（除 path）。
 
-OC_LIB="/usr/libexec/openclawmgr/lib.sh"
+OC_LIB="/usr/libexec/openclaw/lib.sh"
 [ -f "$OC_LIB" ] || OC_LIB="$(dirname "$0")/lib.sh"
 . "$OC_LIB"
 
@@ -227,7 +227,7 @@ cmd_create() {
 	# 被打断也要清掉（/tmp 是 tmpfs，残留会一直占内存）
 	trap 'rm -rf "${stage:-}" 2>/dev/null' EXIT INT TERM HUP
 
-	cp /etc/config/openclawmgr "$stage/etc/config/openclawmgr" 2>/dev/null
+	cp /etc/config/openclaw "$stage/etc/config/openclaw" 2>/dev/null
 	cp -a "$data" "$stage/home/.openclaw" 2>/dev/null || {
 		rm -rf "$stage"; die_json "复制数据目录失败"
 	}
@@ -357,7 +357,7 @@ cmd_restore() {
 	fi
 
 	# 3) 停网关（配置正在被替换）
-	[ -x /etc/init.d/openclawmgr ] && /etc/init.d/openclawmgr stop >/dev/null 2>&1
+	[ -x /etc/init.d/openclaw ] && /etc/init.d/openclaw stop >/dev/null 2>&1
 
 	# 4) 解压到暂存区（绝不直接解到目标树）
 	# home/data 必须在装 trap 之前就定义好：中断处理函数会用到它们。
@@ -396,9 +396,9 @@ cmd_restore() {
 	rm -f "$terr"
 
 	# 5) UCI 配置
-	if [ -f "$stage/etc/config/openclawmgr" ]; then
-		cp "$stage/etc/config/openclawmgr" /etc/config/openclawmgr 2>/dev/null \
-			|| oc_warn "写入 /etc/config/openclawmgr 失败"
+	if [ -f "$stage/etc/config/openclaw" ]; then
+		cp "$stage/etc/config/openclaw" /etc/config/openclaw 2>/dev/null \
+			|| oc_warn "写入 /etc/config/openclaw 失败"
 	fi
 
 	# 6) 数据目录（整体替换，先移到一边以便失败回滚）
@@ -439,8 +439,8 @@ cmd_restore() {
 
 	# 8) 起网关
 	local started=0
-	if [ -x /etc/init.d/openclawmgr ]; then
-		/etc/init.d/openclawmgr start >/dev/null 2>&1 && started=1
+	if [ -x /etc/init.d/openclaw ]; then
+		/etc/init.d/openclaw start >/dev/null 2>&1 && started=1
 	fi
 
 	blog "已从备份还原：$(basename "$p")"

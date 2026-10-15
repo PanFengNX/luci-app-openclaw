@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # OpenClaw 助手 - procd service
 #
-# Stability rules borrowed from the iStoreOS openclawmgr (and tightened):
+# Stability rules borrowed from iStoreOS's luci-app-openclawmgr (and tightened):
 #   * never start on a privileged port (<=1024)  -> would fight SSH/LuCI
 #   * only pass --force when the port is >1024 AND lsof/fuser exists, so
 #     OpenClaw can never kill the router's own management services
@@ -13,8 +13,8 @@ START=99
 STOP=10
 USE_PROCD=1
 
-OC_UCI="openclawmgr"
-OC_USER="openclawmgr"
+OC_UCI="openclaw"
+OC_USER="openclaw"
 
 uci_get() {
 	local v
@@ -32,7 +32,7 @@ json_get() {
 oc_base_dir() {
 	local d
 	d="$(uci_get main.base_dir '')"
-	[ -n "$d" ] || d="/mnt/data/OpenClawMgr"
+	[ -n "$d" ] || d="/mnt/data/OpenClaw"
 	# never turn "/" into "" (an empty value would make derived paths relative)
 	d="${d%/}"
 	[ -n "$d" ] || d="/"
@@ -109,24 +109,24 @@ start_service() {
 	# --- safety: numeric, unprivileged port
 	case "$port" in
 		''|*[!0-9]*)
-			logger -t openclawmgr "Refusing to start: port '$port' is not numeric"
+			logger -t openclaw "Refusing to start: port '$port' is not numeric"
 			return 1 ;;
 	esac
 	if [ "$port" -le 1024 ] 2>/dev/null; then
-		logger -t openclawmgr "Refusing to start: unsafe port $port (must be >1024)"
+		logger -t openclaw "Refusing to start: unsafe port $port (must be >1024)"
 		return 1
 	fi
 	if [ "$port" -gt 65535 ] 2>/dev/null; then
-		logger -t openclawmgr "Refusing to start: invalid port $port"
+		logger -t openclaw "Refusing to start: invalid port $port"
 		return 1
 	fi
 
-	[ -x "$node_bin" ] || { logger -t openclawmgr "Node.js 运行时缺失：$node_bin"; return 1; }
+	[ -x "$node_bin" ] || { logger -t openclaw "Node.js 运行时缺失：$node_bin"; return 1; }
 	entry="$(_find_entry "$globaldir")" || {
-		logger -t openclawmgr "OpenClaw 未安装（$globaldir 下找不到入口），请先安装运行环境"
+		logger -t openclaw "OpenClaw 未安装（$globaldir 下找不到入口），请先安装运行环境"
 		return 1
 	}
-	[ -n "$token" ] || { logger -t openclawmgr "未生成网关 token，拒绝启动"; return 1; }
+	[ -n "$token" ] || { logger -t openclaw "未生成网关 token，拒绝启动"; return 1; }
 
 	mkdir -p "$home/.openclaw/workspace" "$base/logs" "$base/workspace" "$base/tmp" 2>/dev/null || true
 	chmod 700 "$base/tmp" 2>/dev/null || true
@@ -175,14 +175,14 @@ start_service() {
 	procd_set_param stderr 1
 	procd_close_instance
 
-	logger -t openclawmgr "started (base=$base port=$port bind=$bind)"
+	logger -t openclaw "started (base=$base port=$port bind=$bind)"
 }
 
 stop_service() {
 	# procd stops the instance; never blanket-kill by name here (that used to
 	# take down unrelated processes matching 'openclaw').
-	rm -f /var/run/openclawmgr.pid 2>/dev/null || true
-	logger -t openclawmgr "stopped"
+	rm -f /var/run/openclaw.pid 2>/dev/null || true
+	logger -t openclaw "stopped"
 }
 
 reload_service() {

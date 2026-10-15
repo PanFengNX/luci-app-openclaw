@@ -1,21 +1,21 @@
 #!/bin/sh
-# openclawmgr - first boot defaults
+# openclaw - first boot defaults
 
-[ -x /usr/libexec/openclawmgr/lib.sh ] || exit 0
-. /usr/libexec/openclawmgr/lib.sh
+[ -x /usr/libexec/openclaw/lib.sh ] || exit 0
+. /usr/libexec/openclaw/lib.sh
 
-OC_USER="openclawmgr"
+OC_USER="openclaw"
 
-uci -q get openclawmgr.main >/dev/null 2>&1 || {
-	uci -q set openclawmgr.main=main
+uci -q get openclaw.main >/dev/null 2>&1 || {
+	uci -q set openclaw.main=main
 }
 
 # port / bind / versions
-[ -n "$(uci -q get openclawmgr.main.port)" ]     || uci -q set openclawmgr.main.port=18789
-[ -n "$(uci -q get openclawmgr.main.bind)" ]     || uci -q set openclawmgr.main.bind=lan
-[ -n "$(uci -q get openclawmgr.main.oc_version)" ]   || uci -q set openclawmgr.main.oc_version=latest
-[ -n "$(uci -q get openclawmgr.main.node_version)" ] || uci -q set openclawmgr.main.node_version=auto
-[ -n "$(uci -q get openclawmgr.main.preinstall_providers)" ] || uci -q set openclawmgr.main.preinstall_providers=deepseek
+[ -n "$(uci -q get openclaw.main.port)" ]     || uci -q set openclaw.main.port=18789
+[ -n "$(uci -q get openclaw.main.bind)" ]     || uci -q set openclaw.main.bind=lan
+[ -n "$(uci -q get openclaw.main.oc_version)" ]   || uci -q set openclaw.main.oc_version=latest
+[ -n "$(uci -q get openclaw.main.node_version)" ] || uci -q set openclaw.main.node_version=auto
+[ -n "$(uci -q get openclaw.main.preinstall_providers)" ] || uci -q set openclaw.main.preinstall_providers=deepseek
 
 # pick the largest writable mount as the default base dir.
 # NOTE: /var was deliberately removed from the candidate list - on many
@@ -34,31 +34,31 @@ pick_base() {
 		if [ "$free" -gt "$bestfree" ]; then best="$p"; bestfree="$free"; fi
 	done
 	# whatever we picked must survive the safety checks used everywhere else
-	[ -n "$best" ] && oc_validate_base_dir "$best/OpenClawMgr" || best=""
+	[ -n "$best" ] && oc_validate_base_dir "$best/OpenClaw" || best=""
 	printf '%s' "$best"
 }
 
-cur="$(uci -q get openclawmgr.main.base_dir)"
+cur="$(uci -q get openclaw.main.base_dir)"
 if [ -z "$cur" ]; then
 	b="$(pick_base)"
-	[ -n "$b" ] && uci -q set openclawmgr.main.base_dir="$b/OpenClawMgr"
+	[ -n "$b" ] && uci -q set openclaw.main.base_dir="$b/OpenClaw"
 fi
 
-uci -q commit openclawmgr
+uci -q commit openclaw
 
 # system account
 oc_ensure_user >/dev/null 2>&1
 
 # prepare directories
-base="$(uci -q get openclawmgr.main.base_dir)"
+base="$(uci -q get openclaw.main.base_dir)"
 if [ -n "$base" ]; then
 	mkdir -p "$base" "$base/home" "$base/logs" 2>/dev/null
 	oc_fix_perms >/dev/null 2>&1
 fi
 
-chmod +x /etc/init.d/openclawmgr 2>/dev/null
-chmod +x /usr/libexec/istorec/openclawmgr.sh 2>/dev/null
-chmod +x /usr/libexec/openclawmgr/*.sh 2>/dev/null
+chmod +x /etc/init.d/openclaw 2>/dev/null
+chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null
+chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null
 
 rm -f /tmp/luci-indexcache 2>/dev/null
 exit 0

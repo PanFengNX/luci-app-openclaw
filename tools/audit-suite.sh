@@ -24,23 +24,23 @@ TIMEOUT_PER_BATCH="${TIMEOUT_PER_BATCH:-720}"
 # 粒度原则（实测结论）：AI 网关每轮 5–30 秒，任务必须小到 10 轮左右能完成。
 # 一个 700 行的文件整体审计是跑不完的 —— 要按函数组拆开。
 BATCHES=(
-	"backup-core|root/usr/libexec/openclawmgr/backup.sh|新建的备份实现，只看 create / list / delete 三个命令与 oc_backup_resolve 的路径约束。重点：文件名注入、路径越界、空间检查、暂存目录清理、权限收紧失败是否告警、JSON 输出是否被日志污染"
+	"backup-core|root/usr/libexec/openclaw/backup.sh|新建的备份实现，只看 create / list / delete 三个命令与 oc_backup_resolve 的路径约束。重点：文件名注入、路径越界、空间检查、暂存目录清理、权限收紧失败是否告警、JSON 输出是否被日志污染"
 
-	"backup-restore|root/usr/libexec/openclawmgr/backup.sh|只看 verify / restore 与 oc_archive_inspect / oc_archive_ok_size。重点：恶意归档（绝对路径/../符号链接/硬链接/设备/FIFO/缺清单）是否被完整拒绝、解压体积上限、安全快照与回滚路径、还原中断后的残留"
+	"backup-restore|root/usr/libexec/openclaw/backup.sh|只看 verify / restore 与 oc_archive_inspect / oc_archive_ok_size。重点：恶意归档（绝对路径/../符号链接/硬链接/设备/FIFO/缺清单）是否被完整拒绝、解压体积上限、安全快照与回滚路径、还原中断后的残留"
 
-	"lib-ver|root/usr/libexec/openclawmgr/lib.sh|只看版本相关函数：_ver_field / _ver_raw / _cmp_one / _caret_ok / _tilde_ok / engines_match / engines_min_version / ver_ge 等。重点：semver 边界（预发布号、位数不足、x-range）、运算符优先级、变量作用域泄漏"
+	"lib-ver|root/usr/libexec/openclaw/lib.sh|只看版本相关函数：_ver_field / _ver_raw / _cmp_one / _caret_ok / _tilde_ok / engines_match / engines_min_version / ver_ge 等。重点：semver 边界（预发布号、位数不足、x-range）、运算符优先级、变量作用域泄漏"
 
-	"lib-net|root/usr/libexec/openclawmgr/lib.sh|只看网络与解析函数：oc_fetch / oc_fetch_body / oc_json_get / oc_json_has / oc_json_str / oc_safe_url / oc_need / oc_ca_ok / oc_arch / oc_sys_version。重点：URL 校验绕过、控制字符、awk/tr 可移植性、错误码被管道吞掉"
+	"lib-net|root/usr/libexec/openclaw/lib.sh|只看网络与解析函数：oc_fetch / oc_fetch_body / oc_json_get / oc_json_has / oc_json_str / oc_safe_url / oc_need / oc_ca_ok / oc_arch / oc_sys_version。重点：URL 校验绕过、控制字符、awk/tr 可移植性、错误码被管道吞掉"
 
-	"lib-safe|root/usr/libexec/openclawmgr/lib.sh|只看安全与进程函数：oc_rundir / oc_dir_uid / oc_lock_acquire / oc_lock_release / oc_locked / oc_pid_in_ancestry / oc_kill_tree / oc_gateway_pids / oc_ensure_user / oc_fix_perms / oc_validate_base_dir / oc_validate_base_dir_shape / oc_canonical_dir。重点：锁的竞态与自愈、误杀进程、符号链接绕过、路径形状过滤"
+	"lib-safe|root/usr/libexec/openclaw/lib.sh|只看安全与进程函数：oc_rundir / oc_dir_uid / oc_lock_acquire / oc_lock_release / oc_locked / oc_pid_in_ancestry / oc_kill_tree / oc_gateway_pids / oc_ensure_user / oc_fix_perms / oc_validate_base_dir / oc_validate_base_dir_shape / oc_canonical_dir。重点：锁的竞态与自愈、误杀进程、符号链接绕过、路径形状过滤"
 
-	"install|root/usr/libexec/openclawmgr/install.sh|安装流程。重点：参数解析、错误码传播、管道吞错、下载校验与断点、npm 源/代理注入、.env 写入、幂等性与失败回滚、--force 语义"
+	"install|root/usr/libexec/openclaw/install.sh|安装流程。重点：参数解析、错误码传播、管道吞错、下载校验与断点、npm 源/代理注入、.env 写入、幂等性与失败回滚、--force 语义"
 
-	"versions|root/usr/libexec/openclawmgr/versions.sh|在线版本发现。重点：缓存读写一致性、并发刷新、engines 解析、网络失败降级、JSON 转义、oc-tags.tsv 与 oc-versions.tsv 的同步"
+	"versions|root/usr/libexec/openclaw/versions.sh|在线版本发现。重点：缓存读写一致性、并发刷新、engines 解析、网络失败降级、JSON 转义、oc-tags.tsv 与 oc-versions.tsv 的同步"
 
-	"models-channels|root/usr/libexec/openclawmgr/models.sh root/usr/libexec/openclawmgr/channels.sh|模型与渠道。重点：插件安装与缓存失效、API Key 传递路径（argv vs 环境变量）、preset 解析、jsonfilter 使用、渠道命令的错误处理"
+	"models-channels|root/usr/libexec/openclaw/models.sh root/usr/libexec/openclaw/channels.sh|模型与渠道。重点：插件安装与缓存失效、API Key 传递路径（argv vs 环境变量）、preset 解析、jsonfilter 使用、渠道命令的错误处理"
 
-	"repair|root/usr/libexec/openclawmgr/repair.sh|一键修复。重点：13 项检查的幂等性与顺序、FAIL 后是否真的停止、chown/chmod 的作用范围、JSON 模式输出、退出码语义"
+	"repair|root/usr/libexec/openclaw/repair.sh|一键修复。重点：13 项检查的幂等性与顺序、FAIL 后是否真的停止、chown/chmod 的作用范围、JSON 模式输出、退出码语义"
 
 	"luci-ctrl|luasrc/controller/openclaw.lua|LuCI 控制器（含新增的备份/恢复端点）。重点：命令注入（q() 转义是否覆盖所有 formvalue）、白名单粒度、上传/下载端点的路径约束、错误处理与 JSON 输出"
 

@@ -1,36 +1,37 @@
 #!/bin/sh
-# openclawmgr - OpenClaw Launcher for OpenWrt (iStore compatible CLI)
+# openclaw - OpenClaw Launcher for OpenWrt (iStore compatible CLI)
 #
 # Native (non-docker) deployment of the official OpenClaw package:
 #   procd + private Node.js runtime + npm global install of "openclaw".
 #
-# Compatible with the iStoreOS entry.sh contract:
-#   openclawmgr.sh status   -> "" (not deployed) | "stopped" | "running"
-#   openclawmgr.sh port     -> gateway port
-#   openclawmgr.sh token    -> gateway auth token
-#   openclawmgr.sh install|start|stop
+# Also implements the iStoreOS entry.sh contract (optional - the package
+# works standalone; iStore just uses this to show/control it):
+#   openclaw.sh status   -> "" (not deployed) | "stopped" | "running"
+#   openclaw.sh port     -> gateway port
+#   openclaw.sh token    -> gateway auth token
+#   openclaw.sh install|start|stop
 
-OC_LIB="/usr/libexec/openclawmgr/lib.sh"
-OC_VER="/usr/libexec/openclawmgr/versions.sh"
-OC_INSTALL="/usr/libexec/openclawmgr/install.sh"
-OC_MODELS="/usr/libexec/openclawmgr/models.sh"
-OC_CHANNELS="/usr/libexec/openclawmgr/channels.sh"
-OC_REPAIR="/usr/libexec/openclawmgr/repair.sh"
-OC_BACKUP="/usr/libexec/openclawmgr/backup.sh"
+OC_LIB="/usr/libexec/openclaw/lib.sh"
+OC_VER="/usr/libexec/openclaw/versions.sh"
+OC_INSTALL="/usr/libexec/openclaw/install.sh"
+OC_MODELS="/usr/libexec/openclaw/models.sh"
+OC_CHANNELS="/usr/libexec/openclaw/channels.sh"
+OC_REPAIR="/usr/libexec/openclaw/repair.sh"
+OC_BACKUP="/usr/libexec/openclaw/backup.sh"
 . "$OC_LIB"
 
-INITD="/etc/init.d/openclawmgr"
+INITD="/etc/init.d/openclaw"
 # inside the private 0700 rundir - see oc_rundir() in lib.sh
-DIAG_PREFIX="${OC_RUNDIR:-/tmp/.openclawmgr}/diag"
-OC_INST_RC="${OC_RUNDIR:-/tmp/.openclawmgr}/install.rc"
-OC_INST_DONE="${OC_RUNDIR:-/tmp/.openclawmgr}/install.done"
+DIAG_PREFIX="${OC_RUNDIR:-/tmp/.openclaw}/diag"
+OC_INST_RC="${OC_RUNDIR:-/tmp/.openclaw}/install.rc"
+OC_INST_DONE="${OC_RUNDIR:-/tmp/.openclaw}/install.done"
 
 installed() {
 	[ -x "$(oc_oc_bin)" ] && [ -x "$(oc_node_bin)" ]
 }
 
 # ---------------------------------------------------------------- guards
-# Modelled on iStoreOS: never touch a system directory, never start on a
+# Modelled on iStoreOS's manager: never touch a system directory, never start on a
 # privileged port, and never let two operations run at the same time.
 require_safe() {
 	oc_require_base_dir
@@ -177,8 +178,8 @@ cmd_diag_poll() {
 
 running() {
 	pgrep -f 'openclaw.*(gateway|run)' >/dev/null 2>&1 && return 0
-	[ -f /var/run/openclawmgr.pid ] && \
-		kill -0 "$(cat /var/run/openclawmgr.pid 2>/dev/null)" 2>/dev/null && return 0
+	[ -f /var/run/openclaw.pid ] && \
+		kill -0 "$(cat /var/run/openclaw.pid 2>/dev/null)" 2>/dev/null && return 0
 	return 1
 }
 
@@ -588,9 +589,9 @@ case "${1:-}" in
 	channels)      shift; sh "$OC_CHANNELS" "$@" ;;
 	*)
 		cat <<EOF
-openclawmgr - OpenClaw Launcher (OpenWrt)
+openclaw - OpenClaw Launcher (OpenWrt)
 
-Usage: openclawmgr.sh <command> [options]
+Usage: openclaw.sh <command> [options]
 
   install [--oc-version <v|latest|extended-stable|beta>]
           [--node-version <vX.Y.Z|auto|system>] [--base-dir <dir>]
@@ -606,7 +607,7 @@ Usage: openclawmgr.sh <command> [options]
   info                      full JSON status
   versions                  online version lists (OpenClaw + Node.js)
   check <oc-ver> <node-ver> verify node satisfies openclaw engines.node
-  save --port 18789 --bind lan --base-dir /mnt/data/OpenClawMgr
+  save --port 18789 --bind lan --base-dir /mnt/data/OpenClaw
        [--openclaw-dir /mnt/nvme0n1-3/OpenClaw]   (empty resets to <base>/openclaw)
   models presets|models <p>|discover <p>|apply <p> <key> [model] [base]|current
   channels weixin install|weixin login|list

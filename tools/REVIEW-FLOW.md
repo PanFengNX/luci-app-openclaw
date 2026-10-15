@@ -6,7 +6,7 @@
 ## 为什么这么做
 
 本项目是路由器上跑的软件包，`root/usr/libexec/` 下的脚本以 **root 身份**执行，
-`root/etc/init.d/openclawmgr` 由 procd 拉起。一次误改可能导致设备无法启动。
+`root/etc/init.d/openclaw` 由 procd 拉起。一次误改可能导致设备无法启动。
 因此：**AI 不允许直接写正式项目目录。**
 
 ## 流程总览
@@ -240,7 +240,7 @@ AI 可能只做了分析没改代码，或任务被中断。看 `ai-stderr.log`�
 | --- | --- | --- |
 | 新增 `oc_canonical_dir()` | 正确 | 保留 |
 | 新增 `oc_validate_base_dir_shape()` | 正确（把纯字符串校验抽出来复用） | 保留 |
-| `oc_validate_base_dir` 增加符号链接解析 | **思路正确**（堵住 `/mnt/data/OpenClawMgr -> /etc` 绕过，否则后续 `chown -R` 会递归改到 `/etc`） | 重写：原实现有语法错误，且要求整条路径必须可解析，会导致**全新安装必失败** |
+| `oc_validate_base_dir` 增加符号链接解析 | **思路正确**（堵住 `/mnt/data/OpenClaw -> /etc` 绕过，否则后续 `chown -R` 会递归改到 `/etc`） | 重写：原实现有语法错误，且要求整条路径必须可解析，会导致**全新安装必失败** |
 | 新增 `oc_component_is_link()` | 有语法错误 | 删除（被上面重写后的逻辑覆盖） |
 | `oc_json_str` 多行处理改为输出 `\n` 转义 | 正确（原先多行值会被静默拼接，破坏 JSON） | 保留 |
 

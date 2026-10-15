@@ -4,9 +4,9 @@ PKG_NAME:=luci-app-openclaw
 PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
-PKG_MAINTAINER:=openclawmgr
+PKG_MAINTAINER:=openclaw
 
-LUCI_TITLE:=OpenClaw 助手 (openclawmgr)
+LUCI_TITLE:=OpenClaw 助手 (openclaw)
 LUCI_DESCRIPTION:=Install, run and manage the official OpenClaw gateway natively on OpenWrt \
 	(procd + private Node.js runtime + npm package). Online version discovery with \
 	engines.node enforcement; DeepSeek and Z.AI (GLM) model presets included. \
@@ -54,9 +54,9 @@ endef
 define Package/$(PKG_NAME)/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
-chmod +x /etc/init.d/openclawmgr 2>/dev/null
-chmod +x /usr/libexec/istorec/openclawmgr.sh 2>/dev/null
-chmod +x /usr/libexec/openclawmgr/*.sh 2>/dev/null
+chmod +x /etc/init.d/openclaw 2>/dev/null
+chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null
+chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null
 rm -f /tmp/luci-indexcache /tmp/luci-modulecache
 exit 0
 endef

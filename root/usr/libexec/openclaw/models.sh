@@ -1,5 +1,5 @@
 #!/bin/sh
-# openclawmgr - model provider configuration
+# openclaw - model provider configuration
 #
 # The model catalogue is built from what OpenClaw itself supports:
 #   1. curated presets shipped with this package (offline fallback)
@@ -9,10 +9,10 @@
 # key and sets the chosen model as the default - all in one step.
 # DeepSeek and Z.AI (zai/GLM) are part of the default preset set.
 
-OC_LIB="/usr/libexec/openclawmgr/lib.sh"
+OC_LIB="/usr/libexec/openclaw/lib.sh"
 . "$OC_LIB"
 
-PRESETS="/usr/share/openclawmgr/model-presets.json"
+PRESETS="/usr/share/openclaw/model-presets.json"
 
 oc_env() {
 	export HOME="$(oc_home_dir)"

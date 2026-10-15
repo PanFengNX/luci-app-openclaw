@@ -59,7 +59,7 @@ button:disabled{background:#aaa;cursor:not-allowed}
   <div class="oc-row">
     <label>安装目录</label>
     <select id="in-dir" style="min-width:320px"></select>
-    <input type="text" id="in-dir-custom" placeholder="或手动输入目录，如 /mnt/nvme0n1-3/Configs/OpenClawMgr" style="min-width:280px">
+    <input type="text" id="in-dir-custom" placeholder="或手动输入目录，如 /mnt/nvme0n1-3/Configs/OpenClaw" style="min-width:280px">
   </div>
   <div class="oc-hint" id="in-dir-hint"></div>
 
@@ -261,14 +261,14 @@ function loadMounts(){
     sel.innerHTML = '';
     arr.forEach(function(m){
       var o = document.createElement('option');
-      o.value = m.path.replace(/\/$/,'') + '/OpenClawMgr';
+      o.value = m.path.replace(/\/$/,'') + '/OpenClaw';
       o.textContent = m.path + '  （可用 ' + m.free_mb + ' MB，' + m.dev + '）';
       if (cur && cur.indexOf(m.path) === 0) o.selected = true;
       sel.appendChild(o);
     });
     if (!arr.length){
       var o = document.createElement('option');
-      o.value = '/mnt/data/OpenClawMgr'; o.textContent = '/mnt/data（未检测到外置盘）';
+      o.value = '/mnt/data/OpenClaw'; o.textContent = '/mnt/data（未检测到外置盘）';
       sel.appendChild(o);
     }
 

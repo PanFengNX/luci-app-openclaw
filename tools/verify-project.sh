@@ -56,7 +56,7 @@ while IFS= read -r f; do
 		printf '        %s\n' "$err"
 	fi
 done < <(find root -name '*.sh' -type f 2>/dev/null; \
-	printf '%s\n' root/etc/init.d/openclawmgr; \
+	printf '%s\n' root/etc/init.d/openclaw; \
 	find root/etc/uci-defaults -type f 2>/dev/null; \
 	find tools -name '*.sh' -type f 2>/dev/null)
 [ "$sh_count" -eq 0 ] && bad "没有找到任何 shell 脚本（路径错误？）"
@@ -123,17 +123,17 @@ done
 head_ "5. 必须存在的关键文件"
 for f in \
 	Makefile \
-	root/etc/init.d/openclawmgr \
-	root/etc/config/openclawmgr \
-	root/etc/uci-defaults/99-openclawmgr \
-	root/usr/libexec/istorec/openclawmgr.sh \
-	root/usr/libexec/openclawmgr/lib.sh \
-	root/usr/libexec/openclawmgr/install.sh \
-	root/usr/libexec/openclawmgr/versions.sh \
-	root/usr/libexec/openclawmgr/models.sh \
-	root/usr/libexec/openclawmgr/channels.sh \
-	root/usr/libexec/openclawmgr/repair.sh \
-	root/usr/libexec/openclawmgr/backup.sh \
+	root/etc/init.d/openclaw \
+	root/etc/config/openclaw \
+	root/etc/uci-defaults/99-openclaw \
+	root/usr/libexec/istorec/openclaw.sh \
+	root/usr/libexec/openclaw/lib.sh \
+	root/usr/libexec/openclaw/install.sh \
+	root/usr/libexec/openclaw/versions.sh \
+	root/usr/libexec/openclaw/models.sh \
+	root/usr/libexec/openclaw/channels.sh \
+	root/usr/libexec/openclaw/repair.sh \
+	root/usr/libexec/openclaw/backup.sh \
 	luasrc/controller/openclaw.lua \
 	root/usr/share/rpcd/acl.d/luci-app-openclaw.json
 do
@@ -159,7 +159,7 @@ scan_forbid() {
 	fi
 }
 scan_forbid "无 pgrep -f 模糊强杀"          "pgrep -f '?openclaw'?[^)]*kill|kill -9 \\\$\\(pgrep"
-scan_forbid "无 /tmp 固定名临时文件"        "/tmp/openclawmgr-|/tmp/oc-[a-z]"
+scan_forbid "无 /tmp 固定名临时文件"        "/tmp/openclaw-|/tmp/oc-[a-z]"
 scan_forbid "无未引用的 run 参数拼接"        'run " \.\. cmd'
 scan_forbid "无 --token 出现在命令行"        '\-\-token "\$token"'
 scan_forbid "无 curl 管道执行"              '\(curl\|wget\)[^|]*\|\s*\(sh\|bash\|ash\)'

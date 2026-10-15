@@ -173,7 +173,7 @@ def build_adb(
 ):
     """
     files: iterable of dicts {path, data, mode, mtime, target}
-           path is absolute in the target root, e.g. "/etc/init.d/openclawmgr"
+           path is absolute in the target root, e.g. "/etc/init.d/openclaw"
            target: symlink destination (optional)
     scripts: dict {slot_id: text}  (use SC_POSTINST / SC_POSTUPGRADE ...)
     returns (adb_payload_bytes, [(path_idx, file_idx, data), ...])
