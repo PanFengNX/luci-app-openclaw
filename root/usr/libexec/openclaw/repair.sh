@@ -126,9 +126,11 @@ if [ ! -e "$OB" ]; then
 	mkdir -p "$OC_DIR/bin"
 	target="$(find "$OC_DIR/lib/node_modules/openclaw" -name 'openclaw.mjs' -o -name 'openclaw.js' 2>/dev/null | head -n1)"
 	if [ -n "$target" ]; then
+		# 解释器必须跟随 oc_node_bin()：global 模式下是 /usr/bin/node，
+		# 写死 $NODE_DIR/bin/node 会与 init 脚本启动用的解释器不一致。
 		cat >"$OB" <<EOF
 #!/bin/sh
-exec "$NODE_DIR/bin/node" "$target" "\$@"
+exec "$NB" "$target" "\$@"
 EOF
 		chmod +x "$OB"
 		say FIX "已重建 openclaw 启动脚本"

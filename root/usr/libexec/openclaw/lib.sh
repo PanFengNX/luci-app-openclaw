@@ -123,7 +123,30 @@ oc_base_dir() {
 	printf '%s' "$d"
 }
 
-oc_node_dir()  { printf '%s/node' "$(oc_base_dir)"; }
+# ---------------------------------------------------------------- node paths
+# 运行时有两种部署方式（main.node_mode）：
+#   private（默认）: 解压到 <安装目录>/node，只有本插件用它，系统里其他程序看不到。
+#   global        : 解压到 /usr/lib/nodejs 并在 /usr/bin 建 node/npm/npx 符号链接，
+#                   全系统都能直接用（代价是会占用 overlay 空间、且要接管 /usr/bin）。
+# 两种模式下 $(oc_node_dir)/bin/node 都指向真实的 node 二进制，路径约定因此自洽。
+OC_NODE_GLOBAL_DIR="/usr/lib/nodejs"
+
+oc_node_mode() {
+	local m
+	m="$(uci_get main.node_mode private)"
+	case "$m" in
+		global) printf 'global' ;;
+		*)      printf 'private' ;;
+	esac
+}
+
+oc_node_dir() {
+	if [ "$(oc_node_mode)" = "global" ]; then
+		printf '%s' "$OC_NODE_GLOBAL_DIR"
+	else
+		printf '%s/node' "$(oc_base_dir)"
+	fi
+}
 oc_oc_dir() {
 	# OpenClaw 程序目录。默认是 <安装目录>/openclaw，但可以用 main.openclaw_dir
 	# 单独指定 —— 例如程序放内置 flash、数据（会话/工作区）放大容量磁盘。
@@ -145,8 +168,100 @@ oc_oc_dir_safe() {
 oc_home_dir()  { printf '%s/home' "$(oc_base_dir)"; }
 oc_data_dir()  { printf '%s/home/.openclaw' "$(oc_base_dir)"; }
 oc_conf()      { printf '%s/home/.openclaw/openclaw.json' "$(oc_base_dir)"; }
-oc_node_bin()  { printf '%s/node/bin/node' "$(oc_base_dir)"; }
+oc_node_bin() {
+	# global 模式优先用 /usr/bin/node（存在且可执行时），
+	# 否则退回运行时目录里的真实二进制。private 模式行为不变。
+	if [ "$(oc_node_mode)" = "global" ]; then
+		if [ -x /usr/bin/node ]; then
+			printf '/usr/bin/node'
+		else
+			printf '%s/bin/node' "$OC_NODE_GLOBAL_DIR"
+		fi
+		return 0
+	fi
+	printf '%s/node/bin/node' "$(oc_base_dir)"
+}
 oc_oc_bin()    { printf '%s/bin/openclaw' "$(oc_oc_dir)"; }
+
+oc_npm_cli() {
+	# npm 的 CLI 入口（npm-cli.js）。覆盖 private / global 两种布局：
+	#   1. <运行时目录>/lib/node_modules/npm/bin/npm-cli.js   （官方 tar 包布局）
+	#   2. 由 /usr/bin/npm 反查（global 模式我们建的链接）
+	#   3. 由 node 二进制相对定位（运行时目录被替换成别的布局时）
+	#   4. 在运行时目录里 find 兜底
+	local c nb d
+	c="$(oc_node_dir)/lib/node_modules/npm/bin/npm-cli.js"
+	[ -f "$c" ] && { printf '%s' "$c"; return 0; }
+	if [ -L /usr/bin/npm ]; then
+		c="$(readlink -f /usr/bin/npm 2>/dev/null)" || c=""
+		[ -n "$c" ] && [ -f "$c" ] && { printf '%s' "$c"; return 0; }
+	fi
+	nb="$(oc_node_bin)"
+	if [ -n "$nb" ]; then
+		d="$(dirname "$nb")"
+		for c in "$d/../lib/node_modules/npm/bin/npm-cli.js" "$d/npm-cli.js"; do
+			[ -f "$c" ] && { printf '%s' "$c"; return 0; }
+		done
+	fi
+	c="$(find "$(oc_node_dir)" -name npm-cli.js 2>/dev/null | head -n1)"
+	[ -n "$c" ] && { printf '%s' "$c"; return 0; }
+	return 1
+}
+
+# ---------------------------------------------------------------- global node
+# 「系统全局安装」= 解压到 $OC_NODE_GLOBAL_DIR，再把 node/npm/npx 链接进 /usr/bin。
+# 铁律：只接管本插件自己建的链接，绝不静默覆盖系统已有的 Node.js ——
+# 覆盖后发行版包管理器卸载时会连带删掉我们的运行时，反之我们卸载也会删掉别人的文件。
+
+oc_node_global_bins() {
+	printf 'node npm npx'
+}
+
+oc_node_global_owned() {
+	# oc_node_global_owned <path> -> 0 = 可以安全接管
+	#   * 路径不存在
+	#   * 路径是指向 $OC_NODE_GLOBAL_DIR 的符号链接（本插件建的）
+	# 其余情况（普通文件、指向别处的链接、目录）一律 1。
+	local l="$1" t
+	if [ ! -e "$l" ] && [ ! -L "$l" ]; then
+		return 0
+	fi
+	[ -L "$l" ] || return 1
+	t="$(readlink -f "$l" 2>/dev/null)" || t=""
+	[ -n "$t" ] || return 1
+	case "$t" in
+		"$OC_NODE_GLOBAL_DIR"/*) return 0 ;;
+	esac
+	return 1
+}
+
+oc_node_global_conflict() {
+	# 打印第一个不允许接管的 /usr/bin/<cmd>；无冲突时无输出并返回 1
+	local b
+	for b in $(oc_node_global_bins); do
+		if ! oc_node_global_owned "/usr/bin/$b"; then
+			printf '/usr/bin/%s' "$b"
+			return 0
+		fi
+	done
+	return 1
+}
+
+oc_node_link() {
+	# oc_node_link <target> <link> 幂等；只删「我们自己的」旧链接。
+	# 只删符号链接本身（find -maxdepth 0 -type l），绝不跟随它进入目标目录。
+	local t="$1" l="$2" cur
+	if [ -L "$l" ]; then
+		cur="$(readlink "$l" 2>/dev/null)"
+		[ "$cur" = "$t" ] && return 0
+		find "$l" -maxdepth 0 -type l -delete 2>/dev/null || true
+	elif [ -e "$l" ]; then
+		# 普通文件/目录：oc_node_global_conflict 已经拦过，这里是第二道防线
+		return 1
+	fi
+	ln -s "$t" "$l" 2>/dev/null || return 1
+	return 0
+}
 
 # ---------------------------------------------------------------- http
 oc_fetch() {

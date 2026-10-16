@@ -198,8 +198,8 @@ require_plugin() {
 	# fallback: plain npm install into the private prefix
 	oc_warn "plugins install 未生效，改用 npm 直接安装"
 	local npmcli
-	npmcli="$(oc_node_dir)/lib/node_modules/npm/bin/npm-cli.js"
-	[ -f "$npmcli" ] || npmcli="$(find "$(oc_node_dir)" -name npm-cli.js 2>/dev/null | head -n1)"
+	# oc_npm_cli() 覆盖 private（<安装目录>/node）与 global（/usr/lib/nodejs）两种布局
+	npmcli="$(oc_npm_cli)"
 	if [ -n "$npmcli" ]; then
 		HOME="$HOME" PATH="$PATH" timeout 300 "$(oc_node_bin)" "$npmcli" install -g \
 			--prefix "$(oc_oc_dir)" \

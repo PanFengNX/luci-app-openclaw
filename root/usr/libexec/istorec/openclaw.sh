@@ -318,10 +318,11 @@ cmd_info() {
 		ver="$(HOME="$home" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" "$(oc_oc_bin)" --version 2>/dev/null | head -n1)"
 		nver="$( "$(oc_node_bin)" -v 2>/dev/null)"
 	fi
-	printf '{"status":"%s","installed":%s,"port":"%s","token":"%s","openclaw":"%s","node":"%s","base_dir":"%s","openclaw_dir":"%s","oc_dir_custom":%s,"home":"%s","free_mb":"%s","arch":"%s","musl":%s,"bind":"%s","url":"http://%s:%s/"}\n' \
+	printf '{"status":"%s","installed":%s,"port":"%s","token":"%s","openclaw":"%s","node":"%s","node_mode":"%s","base_dir":"%s","openclaw_dir":"%s","oc_dir_custom":%s,"home":"%s","free_mb":"%s","arch":"%s","musl":%s,"bind":"%s","url":"http://%s:%s/"}\n' \
 		"$st" \
 		"$(installed && echo true || echo false)" \
 		"$port" "$token" "${ver:-}" "${nver:-}" \
+		"$(oc_node_mode)" \
 		"$(oc_json_str "$base")" "$(oc_json_str "$ocdir")" \
 		"$([ -n "$(uci_get main.openclaw_dir '')" ] && echo true || echo false)" \
 		"$home" "${free:-0}" \
@@ -476,6 +477,13 @@ cmd_save() {
 				uci_set main.bind "$2"; shift 2 ;;
 			--oc-version) uci_set main.oc_version "$2"; shift 2 ;;
 			--node-version) uci_set main.node_version "$2"; shift 2 ;;
+			--node-mode)
+				# 运行时部署方式：private（默认）| global
+				case "${2:-}" in
+					private|global) uci_set main.node_mode "$2" ;;
+					*) oc_err "拒绝保存非法 node 模式：${2:-}（只能 private/global）"; exit 2 ;;
+				esac
+				shift 2 ;;
 			--enabled)
 				case "${2:-}" in 0|1) uci_set main.enabled "$2" ;;
 					*) oc_err "拒绝保存非法 enabled：${2:-}（只能 0/1）"; exit 2 ;;
@@ -595,8 +603,10 @@ Usage: openclaw.sh <command> [options]
 
   install [--oc-version <v|latest|extended-stable|beta>]
           [--node-version <vX.Y.Z|auto|system>] [--base-dir <dir>]
-          [--openclaw-dir <dir>] [--no-start]
+          [--openclaw-dir <dir>] [--node-mode <private|global>] [--no-start]
           --openclaw-dir relocates the program itself (default <base-dir>/openclaw)
+          --node-mode global installs Node.js into /usr/lib/nodejs and links it
+          into /usr/bin (system-wide); private (default) keeps it under <base-dir>
   install-bg ...            same, detached; poll with install-status
   install-status            {"state":"running|done|failed"}
   update  [install options] reinstall / upgrade OpenClaw

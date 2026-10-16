@@ -39,7 +39,37 @@ oc_base_dir() {
 	printf '%s' "$d"
 }
 
-oc_node_dir() { printf '%s/node' "$(oc_base_dir)"; }
+oc_node_mode() {
+	# 必须与 lib.sh 的 oc_node_mode() 保持一致
+	local m
+	m="$(uci_get main.node_mode private)"
+	case "$m" in global) printf 'global' ;; *) printf 'private' ;; esac
+}
+
+oc_node_dir() {
+	# global 模式下运行时是系统共享的 /usr/lib/nodejs，不是 <安装目录>/node
+	# （那里根本没有 node）。漏改这里服务会直接起不来。
+	if [ "$(oc_node_mode)" = "global" ]; then
+		printf '/usr/lib/nodejs'
+	else
+		printf '%s/node' "$(oc_base_dir)"
+	fi
+}
+
+oc_node_bin() {
+	# global 模式优先 /usr/bin/node（存在且可执行时），否则退回运行时目录。
+	# 与 lib.sh 的 oc_node_bin() 一致 —— oc_gateway_pids() 靠 argv[0] 匹配进程，
+	# 两边取到的路径必须相同。
+	if [ "$(oc_node_mode)" = "global" ]; then
+		if [ -x /usr/bin/node ]; then
+			printf '/usr/bin/node'
+		else
+			printf '/usr/lib/nodejs/bin/node'
+		fi
+		return 0
+	fi
+	printf '%s/node/bin/node' "$(oc_base_dir)"
+}
 oc_oc_dir() {
 	# 必须与 lib.sh 的 oc_oc_dir() 保持一致：程序目录可以独立于安装目录，
 	# 这里漏改的话服务会去 <安装目录>/openclaw 找一个并不存在的程序。
@@ -90,7 +120,8 @@ start_service() {
 	nodedir="$(oc_node_dir)"
 	globaldir="$(oc_oc_dir)"
 	home="$(oc_home)"
-	node_bin="${nodedir}/bin/node"
+	# 解释器路径跟随 node_mode（global 模式是 /usr/bin/node）
+	node_bin="$(oc_node_bin)"
 	cfg="${home}/.openclaw/openclaw.json"
 
 	[ "$enabled" -eq 1 ] || return 0

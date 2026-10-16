@@ -12,9 +12,13 @@ OC_VER="/usr/libexec/openclaw/versions.sh"
 
 MIN_FREE_MB=900
 REC_FREE_MB=1500
+# /usr/lib/nodejs 所在分区（OpenWrt 上通常是 overlay）解压 Node.js 所需的空间。
+# 官方 tar.xz 解压后约 80-100MB，留出余量取 120MB。
+NODE_GLOBAL_FREE_MB=120
 
 OCV=""
 NODE_V=""
+NODE_MODE=""
 BASE_DIR=""
 OC_DIR_ARG=""
 FORCE=0
@@ -25,8 +29,12 @@ usage() {
 	cat <<EOF
 Usage: install.sh [--oc-version <ver|latest|extended-stable|beta>]
                   [--node-version <v24.16.0|auto|system>]
+                  [--node-mode <private|global>]
                   [--base-dir <path>] [--openclaw-dir <path>]
                   [--force] [--no-start]
+
+  --node-mode private  Node.js 解压到 <安装目录>/node（默认，不动系统目录）
+  --node-mode global   解压到 /usr/lib/nodejs 并链接到 /usr/bin/node|npm|npx
 EOF
 }
 
@@ -34,6 +42,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--oc-version) OCV="$2"; shift 2 ;;
 		--node-version) NODE_V="$2"; shift 2 ;;
+		--node-mode) NODE_MODE="$2"; shift 2 ;;
 		--base-dir) BASE_DIR="$2"; shift 2 ;;
 		--openclaw-dir) OC_DIR_ARG="$2"; shift 2 ;;
 		--force) FORCE=1; shift ;;
@@ -56,7 +65,21 @@ oc_lock_acquire || exit 2
 [ -n "$NODE_V" ] || NODE_V="$(uci_get main.node_version auto)"
 [ -n "$NODE_V" ] || NODE_V="auto"
 
-NODE_DIR="$BASE_DIR/node"
+# 运行时的部署方式。命令行优先，其次 UCI，最后默认 private。
+[ -n "$NODE_MODE" ] || NODE_MODE="$(uci_get main.node_mode private)"
+[ -n "$NODE_MODE" ] || NODE_MODE="private"
+case "$NODE_MODE" in
+	private|global) ;;
+	*) NODE_MODE="private" ;;
+esac
+
+# 注意：这里不能直接用 oc_node_dir()。它读的是 UCI 里的 base_dir，
+# 而本次安装可能通过 --base-dir 指定了别的目录，两者不一定一致。
+if [ "$NODE_MODE" = "global" ]; then
+	NODE_DIR="$OC_NODE_GLOBAL_DIR"
+else
+	NODE_DIR="$BASE_DIR/node"
+fi
 # Program dir is relocatable: --openclaw-dir > main.openclaw_dir > <base>/openclaw.
 # 注意这里不能直接用 oc_oc_dir()：它读的是 UCI 里的 base_dir，而本次安装可能
 # 是通过 --base-dir 指定的新目录，两者不一定一致。
@@ -86,6 +109,23 @@ preflight() {
 	ilog "架构: $(oc_arch) ($(uname -m))  libc: $(oc_is_musl && echo musl || echo glibc)"
 	ilog "系统: OpenWrt $(oc_sys_version)  包管理器: $(oc_has_apk && echo apk || echo opkg)"
 	ilog "安装目录: $BASE_DIR"
+	ilog "Node 模式: $NODE_MODE（运行时目录 $NODE_DIR）"
+
+	# S1：global 模式要接管 /usr/bin/node|npm|npx，装之前先确认它们要么不存在、
+	# 要么就是本插件自己建的链接。否则一旦覆盖，发行版包管理器卸载时会连带删掉
+	# 我们的运行时，反过来本插件卸载也会删掉不属于自己的文件。
+	if [ "$NODE_MODE" = "global" ]; then
+		local conflict
+		conflict="$(oc_node_global_conflict)"
+		if [ -n "$conflict" ]; then
+			ilog "ERROR: 系统已存在 Node.js：$conflict"
+			ilog "全局模式只允许接管本插件安装的 $OC_NODE_GLOBAL_DIR（$conflict 需指向该目录）。"
+			ilog "请改用 private 模式（--node-mode private，运行时装在安装目录内，互不影响），"
+			ilog "或先手动移除系统 Node.js 后重试。"
+			exit 2
+		fi
+		[ -L "$OC_NODE_GLOBAL_DIR" ] && die "拒绝操作：$OC_NODE_GLOBAL_DIR 是符号链接"
+	fi
 
 	mkdir -p "$BASE_DIR" 2>/dev/null || die "无法创建安装目录 $BASE_DIR"
 	# write probe
@@ -169,11 +209,104 @@ verify_node_version() {
 }
 
 # ---------------------------------------------------------------- node
+node_verify_sum() {
+	# node_verify_sum <version-url> <tarball> <file>
+	# 比对 SHASUMS256.txt；取不到清单时只告警不阻断（与旧行为一致）。
+	local vurl="$1" tarball="$2" file="$3" want got
+	oc_fetch "$vurl/SHASUMS256.txt" "$OC_DL/SHASUMS256.txt" 60 2>/dev/null || return 0
+	want="$(grep "  *$tarball\$" "$OC_DL/SHASUMS256.txt" | awk '{print $1}')"
+	if [ -n "$want" ]; then
+		got="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
+		if [ -n "$got" ] && [ "$got" != "$want" ]; then
+			die "校验和不匹配（$tarball）：期望 $want 实际 $got"
+		fi
+		ilog "校验和 OK"
+	else
+		ilog "WARN: SHASUMS256.txt 中没有该文件的记录，跳过校验"
+	fi
+	return 0
+}
+
+install_node_global() {
+	# 「系统全局安装」：解压到 $OC_NODE_GLOBAL_DIR（/usr/lib/nodejs），
+	# 再把 node/npm/npx 链接进 /usr/bin，全系统都能直接用。
+	# 与 private 模式的差别只有落点；归属校验（S1）已在 preflight 里做过。
+	ilog "== 安装 Node.js $NODE_V（系统全局模式） =="
+	local base tarball url dest b got
+	base="$(node_base_url)"
+	tarball="$(node_tarball_name "$NODE_V")"
+	url="$base/$NODE_V/$tarball"
+	dest="$BASE_DIR/cache/$tarball"
+	mkdir -p "$BASE_DIR/cache" "$OC_DL"
+
+	# S2：目标分区（OpenWrt 上 /usr 通常落在 overlay）必须先确认空间。
+	# 写满 overlay 的后果不只是安装失败 —— 之后所有配置变更都无法落盘。
+	mkdir -p "$OC_NODE_GLOBAL_DIR" 2>/dev/null \
+		|| die "无法创建 $OC_NODE_GLOBAL_DIR（只读文件系统？）"
+	if ! oc_need_space "$OC_NODE_GLOBAL_DIR" "$NODE_GLOBAL_FREE_MB"; then
+		ilog "提示：可改用 private 模式（--node-mode private），"
+		ilog "      运行时将装在 $BASE_DIR/node，不占用 overlay 空间。"
+		exit 2
+	fi
+
+	if [ "$FORCE" != "1" ] && [ -x "$NODE_DIR/bin/node" ] && [ "$(NODE_DIR_bin)" = "v${NODE_V#v}" ]; then
+		ilog "Node.js $NODE_V 已存在，跳过下载"
+	else
+		if oc_archive_ok "$dest"; then
+			ilog "复用已缓存的 Node.js 压缩包：$dest"
+		else
+			[ -e "$dest" ] && { ilog "缓存的压缩包已损坏，重新下载：$dest"; rm -f "$dest"; }
+			oc_need_space "$BASE_DIR" 200 || die "空间不足以下载 Node.js（需要约 200MB）"
+			oc_download "$url" "$dest" "下载 Node.js $NODE_V" 600 || die "Node.js 下载失败：$url"
+		fi
+		node_verify_sum "$base/$NODE_V" "$tarball" "$dest"
+		# 清空目标目录。这里刻意不用 rm -rf：find -depth -delete 只删目录内容，
+		# 且默认不跟随符号链接（preflight 已确认它本身不是链接）。
+		mkdir -p "$OC_NODE_GLOBAL_DIR"
+		find "$OC_NODE_GLOBAL_DIR" -depth -delete 2>/dev/null || true
+		mkdir -p "$OC_NODE_GLOBAL_DIR" 2>/dev/null \
+			|| die "无法重建 $OC_NODE_GLOBAL_DIR"
+		ilog "解压中（$OC_NODE_GLOBAL_DIR） ..."
+		if command -v xz >/dev/null 2>&1; then
+			tar -xJf "$dest" -C "$OC_NODE_GLOBAL_DIR" --strip-components=1 || die "解压失败（xz）"
+		else
+			tar -xf "$dest" -C "$OC_NODE_GLOBAL_DIR" --strip-components=1 || die "解压失败（tar）"
+		fi
+		rm -f "$dest"
+	fi
+
+	NODE_BIN="$OC_NODE_GLOBAL_DIR/bin/node"
+	NPM_BIN="$OC_NODE_GLOBAL_DIR/bin/npm"
+	[ -x "$NODE_BIN" ] || die "Node.js 安装后不可执行：$NODE_BIN"
+	got="$("$NODE_BIN" -v 2>/dev/null)"
+	[ -n "$got" ] || die "Node.js 无法运行（$NODE_BIN），可能是架构或 libc 不匹配"
+
+	# 网关以 openclaw 用户运行，必须能读并执行这份运行时。官方 tar 解压出来是
+	# 0755，但 root 的 umask 若是 077 就会变成 0700，网关直接起不来。
+	chmod -R a+rX "$OC_NODE_GLOBAL_DIR" 2>/dev/null || true
+
+	# 让全局生效：/usr/bin/{node,npm,npx} -> $OC_NODE_GLOBAL_DIR/bin/*
+	for b in $(oc_node_global_bins); do
+		oc_node_link "$OC_NODE_GLOBAL_DIR/bin/$b" "/usr/bin/$b" \
+			|| die "无法创建符号链接 /usr/bin/$b（权限不足或只读文件系统）"
+	done
+	ilog "全局符号链接就绪: /usr/bin/node -> $OC_NODE_GLOBAL_DIR/bin/node（npm、npx 同）"
+	ilog "Node.js 就绪: $got  npm: $("$NODE_BIN" "$OC_NODE_GLOBAL_DIR/lib/node_modules/npm/bin/npm-cli.js" -v 2>/dev/null)"
+	case "$got" in
+		"$NODE_V"|"v${NODE_V#v}") ;;
+		*) ilog "WARN: 实际版本 $got 与请求版本 $NODE_V 不一致" ;;
+	esac
+}
+
 install_node() {
 	if [ "$USE_SYSTEM_NODE" = "1" ]; then
 		NODE_BIN="$(command -v node)"
 		NPM_BIN="$(command -v npm)"
 		[ -n "$NPM_BIN" ] || NPM_BIN="$(dirname "$NODE_BIN")/npm"
+		return 0
+	fi
+	if [ "$NODE_MODE" = "global" ]; then
+		install_node_global
 		return 0
 	fi
 	ilog "== 安装 Node.js $NODE_V =="
@@ -197,19 +330,7 @@ install_node() {
 			oc_need_space "$BASE_DIR" 200 || die "空间不足以下载 Node.js（需要约 200MB）"
 			oc_download "$url" "$dest" "下载 Node.js $NODE_V" 600 || die "Node.js 下载失败：$url"
 		fi
-		if oc_fetch "$base/$NODE_V/SHASUMS256.txt" "$OC_DL/SHASUMS256.txt" 60 2>/dev/null; then
-			local want got
-			want="$(grep "  *$tarball\$" "$OC_DL/SHASUMS256.txt" | awk '{print $1}')"
-			if [ -n "$want" ]; then
-				got="$(sha256sum "$dest" 2>/dev/null | awk '{print $1}')"
-				if [ -n "$got" ] && [ "$got" != "$want" ]; then
-					die "校验和不匹配（$tarball）：期望 $want 实际 $got"
-				fi
-				ilog "校验和 OK"
-			else
-				ilog "WARN: SHASUMS256.txt 中没有该文件的记录，跳过校验"
-			fi
-		fi
+		node_verify_sum "$base/$NODE_V" "$tarball" "$dest"
 		rm -rf "$NODE_DIR"
 		mkdir -p "$NODE_DIR"
 		ilog "解压中 ..."
@@ -275,7 +396,7 @@ install_openclaw() {
 			mkdir -p "$OC_DIR/bin"
 			cat >"$OC_DIR/bin/openclaw" <<EOF
 #!/bin/sh
-exec "$NODE_DIR/bin/node" "$target" "\$@"
+exec "$NODE_BIN" "$target" "\$@"
 EOF
 			chmod +x "$OC_DIR/bin/openclaw"
 		fi
@@ -361,6 +482,7 @@ finish() {
 	uci_set main.installed 1
 	uci_set main.oc_version "$OCV"
 	uci_set main.node_version "$NODE_V"
+	uci_set main.node_mode "$NODE_MODE"
 	uci_commit
 	chmod +x /etc/init.d/openclaw 2>/dev/null
 	/etc/init.d/openclaw enable >/dev/null 2>&1
