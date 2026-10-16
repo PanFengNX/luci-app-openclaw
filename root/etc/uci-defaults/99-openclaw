@@ -19,6 +19,12 @@ uci -q get openclaw.main >/dev/null 2>&1 || {
 [ -n "$(uci -q get openclaw.main.node_mode)" ] || uci -q set openclaw.main.node_mode=private
 [ -n "$(uci -q get openclaw.main.preinstall_providers)" ] || uci -q set openclaw.main.preinstall_providers=deepseek
 
+# 数据根目录（openclaw.json / .env / 会话 / 工作区都在它下面）。
+# 空字符串是**合法默认值**：表示沿用 <安装目录>/home/.openclaw 的历史行为。
+# 所以这里不能用上面那些 [ -n ] 写法 —— 空值会让判断永远为假，把"显式留空"
+# 和"键不存在"混为一谈；只有「键不存在」才需要写入默认值。
+uci -q get openclaw.main.state_dir >/dev/null 2>&1 || uci -q set openclaw.main.state_dir=""
+
 # pick the largest writable mount as the default base dir.
 # NOTE: /var was deliberately removed from the candidate list - on many
 # devices it is a tmpfs mount (RAM) AND oc_validate_base_dir() rejects it,

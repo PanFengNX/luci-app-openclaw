@@ -2,6 +2,10 @@ config main 'main'
 	option enabled '0'
 	option base_dir ''
 	option openclaw_dir ''
+	# 数据根目录：openclaw.json / .env / 会话 / 工作区都在它下面。
+	# 为空表示使用 <安装目录>/home/.openclaw（历史默认，与旧版本行为一致）；
+	# 非空时以它为准 —— 例如把数据放到大容量盘，或指向本机已有的 OpenClaw 数据目录。
+	option state_dir ''
 	option port '18789'
 	option bind 'lan'
 	option oc_version 'latest'

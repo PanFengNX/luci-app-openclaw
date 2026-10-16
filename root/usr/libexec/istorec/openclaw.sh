@@ -429,6 +429,16 @@ EOF
 	printf ']'
 }
 
+cmd_discover() {
+	# 只读：列出本机已有的 OpenClaw 安装 / 数据目录（JSON 数组）。
+	# 探测逻辑在 lib.sh 的 oc_discover_existing()，这里只负责把结果原样吐到
+	# stdout —— 该函数的日志一律走 stderr（oc_warn / oc_err），所以这里绝不能
+	# 用 oc_info，否则会往 JSON 前面插一行日志，LuCI 的 JSON.parse 直接报错。
+	# 不取锁、不过 require_safe：纯只读，且 discover 本身不做任何写入。
+	oc_discover_existing
+	printf '\n'
+}
+
 cmd_save() {
 	# save basic settings from uci-like key=value pairs
 	shift
@@ -590,6 +600,7 @@ case "${1:-}" in
 	restore)       cmd_restore "$@" ;;
 	run)           cmd_run "$@" ;;
 	mounts)        cmd_mounts ;;
+	discover)      cmd_discover ;;
 	save)          cmd_save "$@" ;;
 	port)          get_port; printf '\n' ;;
 	token)         get_token; printf '\n' ;;
@@ -634,6 +645,7 @@ Usage: openclaw.sh <command> [options]
   restore <file> [--no-safety]   validate, snapshot, then restore
   log [n] | tasklog [n]
   mounts                    candidate install targets with free space
+  discover                  JSON array of existing OpenClaw installs / data dirs
 
 Safety: install/start/restart/update/uninstall/repair refuse to run when the
 configured base_dir is a system path (/usr /etc /tmp /var /overlay /rom ...) or
