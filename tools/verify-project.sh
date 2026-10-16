@@ -231,11 +231,17 @@ elif [ -z "$PY" ]; then
 else
 	if "$PY" scripts/build_apk.py >/dev/null 2>&1; then
 		ok "build_apk.py 构建成功"
+		# 版本号从 Makefile 读，别在这里硬编码 —— 否则一改版本号
+		# 就会出现"构建成功但找不到产物"的假失败。
+		MKVER="$(sed -n 's/^PKG_VERSION:=\(.*\)$/\1/p' Makefile | head -1)"
+		MKREL="$(sed -n 's/^PKG_RELEASE:=\(.*\)$/\1/p' Makefile | head -1)"
+		[ -n "$MKVER" ] || MKVER="1.0.0"
+		[ -n "$MKREL" ] || MKREL="1"
 		APKS=()
 		for f in \
-			dist/luci-app-openclaw-1.0.0-r1.apk \
-			dist/luci-app-openclaw-1.0.0-r1-v2.apk \
-			dist/luci-app-openclaw_1.0.0_all.ipk
+			"dist/luci-app-openclaw-${MKVER}-r${MKREL}.apk" \
+			"dist/luci-app-openclaw-${MKVER}-r${MKREL}-v2.apk" \
+			"dist/luci-app-openclaw_${MKVER}_all.ipk"
 		do
 			[ -f "$f" ] && APKS+=("$f")
 		done

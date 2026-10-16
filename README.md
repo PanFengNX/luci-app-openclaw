@@ -295,7 +295,7 @@ libarchive 会把成员名的尾部空格或 `/` 规范化，所以这里用 Deb
 iStoreOS 25.12.x 基于 OpenWrt 25.12，包管理器是 **apk-tools v3**，请安装：
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.0.0-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.0.1-r1.apk
 ```
 
 **不要**装 `...-v2.apk` —— 那是 apk-tools 2.x / Alpine 的格式，不是 OpenWrt 25.12 的
@@ -320,18 +320,48 @@ apk del luci-app-openclawmgr
 
 本版本同时修正了 post-install 脚本首行缺少 `#!` 导致的 `execve: Exec format error`。
 
+### 9. 打包格式与可复现构建
+
+三种容器格式**都对齐过官方实际产物**（不是照印象写的）：
+
+| 产物 | 容器结构 | 对齐来源 |
+| --- | --- | --- |
+| `.ipk` | **`gzip(tar(./debian-binary, ./data.tar.gz, ./control.tar.gz))`** —— 注意**不是 ar 归档** | downloads.openwrt.org 的 23.05.5 / 24.10.0 包 |
+| `-v2.apk` | **纯 gzip 段拼接**（control 段 + data 段；有签名则前面多一段）—— **没有 ar 容器** | dl-cdn.alpinelinux.org 的 Alpine v3.20 包 |
+| `.apk` | ADB 容器（magic `ADB`，内含 `pckg` schema） | OpenWrt 25.12 官方包 |
+
+> ipk 常被当成"和 deb 一样是 ar" —— 那是 Debian 的布局，OpenWrt 的 ipk **不是**。
+> opkg 走 libarchive 两种都能读，但这里跟随上游。
+
+**版本号**：单一来源是 `Makefile` 的 `PKG_VERSION` / `PKG_RELEASE`，
+`build_apk.py` 会读取它们（`--version` / `--release` 仍可临时覆盖）。
+改版本只改 Makefile，不要在脚本默认值里另写一份。
+
+**可复现构建**：构建时使用 `SOURCE_DATE_EPOCH`
+（未设置则取 `root/` + `luasrc/` 下最新的 mtime），它会写入 APK v3 的 `builddate`、
+ipk control 的 `SourceDateEpoch:` 字段，以及所有 tar 成员的 mtime。
+因此**同样的源码构建两次，产物 hash 完全一致** —— 校验 MD5 才有意义。
+
+```sh
+# 固定时间戳（可复现）
+SOURCE_DATE_EPOCH=1700000000 python3 scripts/build_apk.py
+
+# 用源码最新 mtime（默认行为）
+python3 scripts/build_apk.py
+```
+
 ## 安装
 
 ### apk（OpenWrt 25.12+ / apk-tools 3.x）
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.0.0-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.0.1-r1.apk
 ```
 
 ### ipk（opkg）—— **OpenWrt 24.10 及更早、iStoreOS 等 opkg 系统**
 
 ```sh
-opkg install luci-app-openclaw_1.0.0_all.ipk
+opkg install luci-app-openclaw_1.0.1_all.ipk
 ```
 
 在 LuCI / iStore 界面里也可以直接「手动上传安装」这个 ipk。
@@ -355,7 +385,7 @@ opkg install luci-app-openclaw_1.0.0_all.ipk
 ### .run 自解压（无需包管理器）
 
 ```sh
-sh luci-app-openclaw-1.0.0.run
+sh luci-app-openclaw-1.0.1.run
 ```
 
 ### 集成到固件 / SDK 编译
@@ -370,7 +400,7 @@ make package/luci-app-openclaw/compile V=s
 ### 自行生成安装包（无需 SDK）
 
 ```sh
-python3 scripts/build_apk.py --version 1.0.0 --release 1 --sign
+python3 scripts/build_apk.py --version 1.0.1 --release 1 --sign
 python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 / ipk）
 ```
 

@@ -24,6 +24,7 @@ import gzip
 import hashlib
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -116,24 +117,24 @@ def dirs_for(items):
 
 
 # --------------------------------------------------------------------------- tar
-def add_dir(tf, name):
+def add_dir(tf, name, sde=0):
     ti = tarfile.TarInfo(name)
     ti.type = tarfile.DIRTYPE
     ti.mode = 0o755
     ti.uid = ti.gid = 0
-    ti.mtime = 0
+    ti.mtime = sde
     ti.uname = ti.gname = "root"
     ti.pax_headers = {"atime": "0", "ctime": "0"}
     tf.addfile(ti)
 
 
-def add_file(tf, path: Path, arc: str, mode: int):
+def add_file(tf, path: Path, arc: str, mode: int, sde=0):
     data = path.read_bytes()
     ti = tarfile.TarInfo(arc)
     ti.size = len(data)
     ti.mode = mode
     ti.uid = ti.gid = 0
-    ti.mtime = 0
+    ti.mtime = sde
     ti.uname = ti.gname = "root"
     ti.type = tarfile.REGTYPE
     ti.pax_headers = {
@@ -144,17 +145,17 @@ def add_file(tf, path: Path, arc: str, mode: int):
     tf.addfile(ti, io.BytesIO(data))
 
 
-def build_data_tar(items) -> bytes:
+def build_data_tar(items, sde: int = 0) -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
         for d in dirs_for(items):
-            add_dir(tf, d)
+            add_dir(tf, d, sde)
         for path, arc, mode in items:
-            add_file(tf, path, arc, mode)
+            add_file(tf, path, arc, mode, sde)
     return buf.getvalue()
 
 
-def build_control_tar(pkginfo: str, with_script: bool) -> bytes:
+def build_control_tar(pkginfo: str, with_script: bool, sde: int = 0) -> bytes:
     """tar *segment*: no trailing end-of-archive records."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
@@ -163,7 +164,7 @@ def build_control_tar(pkginfo: str, with_script: bool) -> bytes:
         ti.size = len(raw)
         ti.mode = 0o644
         ti.uid = ti.gid = 0
-        ti.mtime = 0
+        ti.mtime = sde
         ti.uname = ti.gname = "root"
         tf.addfile(ti, io.BytesIO(raw))
         if with_script:
@@ -172,7 +173,7 @@ def build_control_tar(pkginfo: str, with_script: bool) -> bytes:
             ti.size = len(raw)
             ti.mode = 0o755
             ti.uid = ti.gid = 0
-            ti.mtime = 0
+            ti.mtime = sde
             ti.uname = ti.gname = "root"
             tf.addfile(ti, io.BytesIO(raw))
     out = buf.getvalue()
@@ -224,7 +225,7 @@ def sign_control(control_gz: bytes, keydir: Path, keyname: str):
 
 
 # --------------------------------------------------------------------------- apk v3
-def build_apk_v3(items, pkgver, out: Path):
+def build_apk_v3(items, pkgver, out: Path, sde: int = 0):
     """APK v3 (ADB container) - the format apk-tools 3.x on OpenWrt 25.12 eats."""
     files = []
     for path, arc, mode in items:
@@ -248,7 +249,7 @@ def build_apk_v3(items, pkgver, out: Path):
         provides=(),
         files=files,
         scripts={apk3.SC_POSTINST: SCRIPTS},
-        build_time=int(time.time()),
+        build_time=sde,
     )
     apk3.build_apk3(str(out), adb_payload=payload, data_items=data_items)
     log(f"apk3 -> {out.name} (OpenWrt 25.12+, install: apk add --allow-untrusted {out.name})")
@@ -291,37 +292,60 @@ def build_ar_package(segments) -> bytes:
 
 
 # --------------------------------------------------------------------------- ipk
-def build_ipk(items, version, out: Path):
+def build_ipk(items, version, release, sde: int, out: Path):
+    """Classic opkg package (OpenWrt 24.10 and earlier).
+
+    Real OpenWrt ipks are **not** ar archives.  Verified against
+    downloads.openwrt.org (23.05.5 / 24.10.0): the file is a gzip'd tar holding
+
+        ./debian-binary      contents "2.0\n"
+        ./data.tar.gz        the payload
+        ./control.tar.gz     ./control + ./postinst
+
+    opkg reads it through libarchive, which would also accept the older
+    Debian-style ar layout, but we follow upstream so the package matches what
+    every opkg release was actually built to consume.
+    """
     size = sum(p.stat().st_size for p, _, _ in items)
     control = "\n".join([
         f"Package: {PKG_NAME}",
-        f"Version: {version}",
+        f"Version: {version}-r{release}",
         "Depends: libc, luci-base, luci-lua-runtime, luci-compat, curl, tar, jsonfilter",
         "Source: %s" % PKG_URL,
         "Section: luci",
         "Maintainer: openclaw",
-        f"Architecture: all",
+        "Architecture: all",
         f"Installed-Size: {(size + 1023) // 1024}",
+        f"SourceDateEpoch: {sde}",
         f"Description: {PKG_DESC}",
         "",
     ])
     ctl = io.BytesIO()
     with tarfile.open(fileobj=ctl, mode="w", format=tarfile.GNU_FORMAT) as tf:
-        for name, content, mode in (("control", control, 0o644), ("postinst", SCRIPTS, 0o755)):
+        for name, content, mode in (("control", control, 0o644),
+                                    ("postinst", SCRIPTS, 0o755)):
             raw = content.encode()
             ti = tarfile.TarInfo(f"./{name}")
             ti.size = len(raw)
             ti.mode = mode
-            ti.mtime = 0
+            ti.mtime = sde
             ti.uid = ti.gid = 0
+            ti.uname = ti.gname = "root"
             tf.addfile(ti, io.BytesIO(raw))
-    # ipk = ar(debian-binary, control.tar.gz, data.tar.gz).
-    # 早先这里只是把三段裸数据依次写进文件，没有 ar 容器，opkg 一律拒绝。
-    out.write_bytes(build_ar_package([
-        ("debian-binary", b"2.0\n"),
-        ("control.tar.gz", gz(ctl.getvalue())),
-        ("data.tar.gz", gz(build_data_tar(items))),
-    ]))
+
+    outer = io.BytesIO()
+    with tarfile.open(fileobj=outer, mode="w", format=tarfile.GNU_FORMAT) as tf:
+        for name, blob in (("./debian-binary", b"2.0\n"),
+                           ("./data.tar.gz", gz(build_data_tar(items, sde))),
+                           ("./control.tar.gz", gz(ctl.getvalue()))):
+            ti = tarfile.TarInfo(name)
+            ti.size = len(blob)
+            ti.mode = 0o644
+            ti.mtime = sde
+            ti.uid = ti.gid = 0
+            ti.uname = ti.gname = "root"
+            tf.addfile(ti, io.BytesIO(blob))
+    out.write_bytes(gz(outer.getvalue()))
     log(f"ipk  -> {out.name}")
 
 
@@ -356,17 +380,67 @@ echo "LuCI: 服务 -> OpenClaw 助手"
     log(f"run  -> {out.name}")
 
 
+# --------------------------------------------------------------------------- versions
+def read_makefile_versions() -> tuple:
+    """(version, release) from Makefile — the single source of truth.
+
+    早先版本号在 Makefile 和本脚本的 argparse 默认值里各写一份，容易不同步
+    （改了 Makefile 忘了改这里，打出来的包版本号就是错的）。
+    """
+    ver, rel = "0.0.0", "1"
+    mk = ROOT / "Makefile"
+    if mk.exists():
+        for line in mk.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\s*PKG_VERSION\s*:?=\s*(\S+)", line)
+            if m:
+                ver = m.group(1)
+            m = re.match(r"\s*PKG_RELEASE\s*:?=\s*(\S+)", line)
+            if m:
+                rel = m.group(1)
+    return ver, rel
+
+
+def source_date_epoch() -> int:
+    """Reproducible-build timestamp.
+
+    SOURCE_DATE_EPOCH if the caller set it (that is what OpenWrt itself uses),
+    otherwise the newest mtime among the packaged sources.  Without this every
+    rebuild produced a different builddate and therefore a different hash,
+    which made "check the MD5" useless for the user.
+    """
+    env = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if env.isdigit():
+        return int(env)
+    newest = 0
+    for sub in ("root", "luasrc"):
+        d = ROOT / sub
+        if not d.exists():
+            continue
+        for f in d.rglob("*"):
+            if f.is_file():
+                try:
+                    newest = max(newest, int(f.stat().st_mtime))
+                except OSError:
+                    pass
+    return newest or 0
+
+
 # --------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--version", default="1.0.0")
-    ap.add_argument("--release", default="1")
+    _ver, _rel = read_makefile_versions()
+    ap.add_argument("--version", default=_ver,
+                    help=f"package version (default: Makefile PKG_VERSION = {_ver})")
+    ap.add_argument("--release", default=_rel,
+                    help=f"package release (default: Makefile PKG_RELEASE = {_rel})")
     ap.add_argument("--sign", action="store_true", help="also produce an RSA signed apk")
     args = ap.parse_args()
 
     version = args.version
     pkgver = f"{version}-r{args.release}"
+    sde = source_date_epoch()
     DIST.mkdir(exist_ok=True)
+    log(f"version {pkgver}, SOURCE_DATE_EPOCH {sde}")
 
     items = collect_files()
     if not items:
@@ -376,7 +450,7 @@ def main():
 
     installed_size = sum(p.stat().st_size for p, _, _ in items)
 
-    data_tar = build_data_tar(items)
+    data_tar = build_data_tar(items, sde)
     data_gz = gz(data_tar)
     datahash = hashlib.sha256(data_gz).hexdigest()
 
@@ -387,7 +461,7 @@ def main():
         f"pkgver = {pkgver}",
         f"pkgdesc = {PKG_DESC}",
         f"url = {PKG_URL}",
-        f"builddate = {int(time.time())}",
+        f"builddate = {sde}",
         f"packager = openclaw builder",
         f"size = {installed_size}",
         f"arch = {PKG_ARCH}",
@@ -398,36 +472,30 @@ def main():
         "",
     ])
 
-    control_gz = gz(build_control_tar(pkginfo, with_script=True))
+    control_gz = gz(build_control_tar(pkginfo, with_script=True, sde=sde))
 
     # --- APK v3 (primary: OpenWrt 25.12 / apk-tools 3.x) -------------------
-    build_apk_v3(items, pkgver, DIST / f"{PKG_NAME}-{version}-r{args.release}.apk")
+    build_apk_v3(items, pkgver, DIST / f"{PKG_NAME}-{version}-r{args.release}.apk", sde)
 
-    # --- APK v2 (legacy: OpenWrt 24.10 and earlier) ------------------------
-    # APK v2 也是 ar 归档，同样需要 "!<arch>" 容器。
+    # --- APK v2 (apk-tools 2.x / Alpine) -----------------------------------
+    # APK v2 是**纯 gzip 段拼接**，没有 ar 容器：control 段 + data 段依次相连。
+    # 实测 Alpine v3.20 的 .apk 就是这个结构（有签名时前面多一段签名）。
+    # 早先误按 Debian 的 ar 布局生成，那是错的。
     apk_name = f"{PKG_NAME}-{version}-r{args.release}-v2.apk"
     apk_path = DIST / apk_name
-    apk_path.write_bytes(build_ar_package([
-        ("debian-binary", b"2.0\n"),
-        ("control.tar.gz", control_gz),
-        ("data.tar.gz", data_gz),
-    ]))
+    apk_path.write_bytes(control_gz + data_gz)
     log(f"apk2 -> {apk_name} (apk-tools 2.x / Alpine 专用；OpenWrt 请用 .ipk 或 v3 .apk)")
 
     if args.sign:
         keyname = f"openclaw-builder-{hashlib.sha1(PKG_NAME.encode()).hexdigest()[:8]}"
         sig_gz, pub = sign_control(control_gz, DIST / "keys", keyname)
         signed = DIST / apk_name.replace("-v2.apk", "-v2-signed.apk")
-        # apk-tools 约定：签名段是第一个 ar 成员，且签名包不带 debian-binary
-        signed.write_bytes(build_ar_package([
-            (f".SIGN.RSA.{keyname}.rsa.pub", sig_gz),
-            ("control.tar.gz", control_gz),
-            ("data.tar.gz", data_gz),
-        ]))
+        # 签名段在最前，其后仍是 control + data，三段依次拼接。
+        signed.write_bytes(sig_gz + control_gz + data_gz)
         shutil.copy(pub, DIST / pub.name)
         log(f"apk2 -> {signed.name} (signed; copy {pub.name} to /etc/apk/keys/)")
 
-    build_ipk(items, version, DIST / f"{PKG_NAME}_{version}_all.ipk")
+    build_ipk(items, version, args.release, sde, DIST / f"{PKG_NAME}_{version}_all.ipk")
     build_run(items, version, DIST / f"{PKG_NAME}-{version}.run")
 
     # sha256 file

@@ -11,6 +11,7 @@ ipk checks   : debian-binary, ./control, data members.
 
 Exit code 0 = looks installable.
 """
+import gzip
 import hashlib
 import io
 import struct
@@ -95,19 +96,47 @@ def check_ar(blob: bytes, rc: int):
 
 # --------------------------------------------------------------------------- v2
 def verify_v2(path: Path) -> int:
-    print(f"APK v2 (ar archive): {path.name}")
+    """APK v2 = concatenated gzip segments (no ar container).
+
+    Real Alpine .apk files are 2 segments (control + data) or 3 with a signature
+    in front; verified against dl-cdn.alpinelinux.org (v3.20).
+    """
+    print(f"APK v2 (concatenated gzip segments): {path.name}")
     rc = 0
     blob = path.read_bytes()
-    rc, mem = check_ar(blob, rc)
-    if mem is None:
-        return rc
+    if blob[:8] == b"!<arch>\n":
+        return bad("是 ar 归档 —— APK v2 不应有 ar 容器")
 
-    ctl_raw = mem["control.tar.gz"]
-    dat_raw = mem["data.tar.gz"]
+    segs, pos = [], 0
+    while pos < len(blob):
+        d = zlib.decompressobj(31)
+        try:
+            raw = d.decompress(blob[pos:])
+        except Exception as e:  # noqa: BLE001
+            return bad(f"第 {len(segs)} 段 gzip 解压失败：{e}")
+        used = len(blob) - pos - len(d.unused_data)
+        if used <= 0:
+            break
+        segs.append((pos, used, raw))
+        pos += used
+        if not d.unused_data:
+            break
+    ok(f"{len(blob)} 字节，{len(segs)} 个 gzip 段")
+    if len(segs) not in (2, 3):
+        return bad(f"应为 2（control+data）或 3（sig+control+data）段，实际 {len(segs)}")
 
-    tf = tarfile.open(fileobj=io.BytesIO(zlib.decompress(ctl_raw, 31)))
+    for i, (p, u, raw) in enumerate(segs):
+        try:
+            names = tarfile.open(fileobj=io.BytesIO(raw)).getnames()[:3]
+        except Exception as e:  # noqa: BLE001
+            names = f"<not tar: {e}>"
+        print(f"       段 {i}: 偏移={p} 长度={u} 条目={names}")
+
+    ctl_raw = segs[-2][2]
+    dat_raw = segs[-1][2]
+    tf = tarfile.open(fileobj=io.BytesIO(ctl_raw))
     if ".PKGINFO" not in tf.getnames():
-        return bad("control segment has no .PKGINFO")
+        return bad("control 段里没有 .PKGINFO")
     pk = tf.extractfile(".PKGINFO").read().decode()
     print("\n.PKGINFO:")
     print("\n".join("       " + l for l in pk.strip().splitlines()))
@@ -116,14 +145,14 @@ def verify_v2(path: Path) -> int:
     for line in pk.splitlines():
         if line.startswith("datahash = "):
             want = line.split("= ", 1)[1].strip()
-    got = hashlib.sha256(dat_raw).hexdigest()
+    got = hashlib.sha256(gzip.compress(dat_raw, 9, mtime=0)).hexdigest()
     if want == got:
         ok("datahash == sha256(data.tar.gz)")
     else:
         rc |= bad(f"datahash mismatch expected={want} actual={got}")
 
     nfiles = 0
-    dtf = tarfile.open(fileobj=io.BytesIO(zlib.decompress(dat_raw, 31)))
+    dtf = tarfile.open(fileobj=io.BytesIO(dat_raw))
     for m in dtf.getmembers():
         if not m.isfile():
             continue
@@ -262,38 +291,68 @@ def verify_v3(path: Path) -> int:
 
 # --------------------------------------------------------------------------- ipk
 def verify_ipk(path: Path) -> int:
-    print(f"ipk (opkg): {path.name}")
+    """Official OpenWrt ipk = gzip(tar(./debian-binary, ./data.tar.gz, ./control.tar.gz))."""
+    print(f"ipk (opkg, gzip'd tar): {path.name}")
     rc = 0
     blob = path.read_bytes()
-    rc, m = check_ar(blob, rc)
-    if m is None:
+    if blob[:2] != b"\x1f\x8b":
+        return bad(f"不是 gzip（开头 {blob[:4]!r}，应为 b'\\x1f\\x8b'）")
+    try:
+        outer = gzip.decompress(blob)
+    except Exception as e:  # noqa: BLE001
+        return bad(f"gzip 解压失败：{e}")
+    ok(f"{len(blob)} 字节 -> gunzip {len(outer)} 字节")
+
+    try:
+        tf = tarfile.open(fileobj=io.BytesIO(outer))
+        names = tf.getnames()
+    except Exception as e:  # noqa: BLE001
+        return bad(f"外层 tar 解析失败：{e}")
+    ok(f"外层 tar 成员：{names}")
+    for want in ("./debian-binary", "./data.tar.gz", "./control.tar.gz"):
+        if want not in names:
+            rc |= bad(f"缺少成员 {want}")
+    if rc:
         return rc
 
-    if m["debian-binary"] != b"2.0\n":
-        rc |= bad(f"debian-binary 内容应为 '2.0\\n'，实际 {m['debian-binary']!r}")
+    db = tf.extractfile("./debian-binary").read()
+    if db != b"2.0\n":
+        rc |= bad(f"debian-binary 内容应为 '2.0\\n'，实际 {db!r}")
     else:
         ok("debian-binary = 2.0")
 
-    ctl = tarfile.open(fileobj=io.BytesIO(zlib.decompress(m["control.tar.gz"], 31)))
+    ctl_raw = tf.extractfile("./control.tar.gz").read()
+    dat_raw = tf.extractfile("./data.tar.gz").read()
+    if ctl_raw[:2] != b"\x1f\x8b":
+        rc |= bad("control.tar.gz 不是 gzip")
+    if dat_raw[:2] != b"\x1f\x8b":
+        rc |= bad("data.tar.gz 不是 gzip")
+
+    ctl = tarfile.open(fileobj=io.BytesIO(gzip.decompress(ctl_raw)))
     if "./control" not in ctl.getnames():
-        rc |= bad("control tarball has no ./control")
+        rc |= bad("control.tar 里没有 ./control")
     else:
         txt = ctl.extractfile("./control").read().decode()
-        ok("control:\n" + "\n".join("       " + l for l in txt.strip().splitlines()))
-    data = tarfile.open(fileobj=io.BytesIO(zlib.decompress(m["data.tar.gz"], 31)))
+        ok("control://n" + "\n".join("       " + l for l in txt.strip().splitlines()))
+        for field in ("SourceDateEpoch:", "Version:", "Architecture:"):
+            if not any(l.startswith(field) for l in txt.splitlines()):
+                rc |= bad(f"control 缺少字段 {field}")
+    data = tarfile.open(fileobj=io.BytesIO(gzip.decompress(dat_raw)))
     ok(f"data members: {len(data.getnames())}")
     return rc
 
 
-def detect_ar_kind(path: Path) -> str:
-    """'apk2' or 'ipk' — 靠 control 段里的标志文件判断，不依赖文件名。"""
+def detect_gzip_kind(path: Path) -> str:
+    """'ipk' or 'apk2' — 两者都以 gzip 开头，靠第一段 tar 的标志文件区分。"""
     try:
-        mem = dict(ar_parse(path.read_bytes()))
-        ctl = zlib.decompress(mem["control.tar.gz"], 31)
-        names = tarfile.open(fileobj=io.BytesIO(ctl)).getnames()
+        blob = path.read_bytes()
+        inner = gzip.decompress(blob)
+        names = tarfile.open(fileobj=io.BytesIO(inner)).getnames()
+        if "./debian-binary" in names:
+            return "ipk"
+        return "apk2"
     except Exception:  # noqa: BLE001
         return "ipk"        # 交给 verify_ipk 报出具体错误
-    return "apk2" if ".PKGINFO" in names else "ipk"
 
 
 def main():
@@ -310,17 +369,16 @@ def main():
         head = p.read_bytes()[:8]
         if head[:3] == b"ADB":
             rc |= verify_v3(p)
-        elif head == b"!<arch>\n":
-            # ipk 与 APK v2 都是 ar 归档 —— 这里必须按容器判断。
-            # 早先的版本用 "开头是 2.0\n" 认 ipk、"开头是 gzip 魔数" 认 v2，
-            # 等于把"没有 ar 容器"当成了正常特征，于是坏包一路全绿。
-            if detect_ar_kind(p) == "apk2":
-                rc |= verify_v2(p)
-            else:
+        elif head[:2] == b"\x1f\x8b":
+            # ipk 与 APK v2 现在都是 gzip 开头的（官方格式），按内容区分：
+            # 外层 tar 里有 ./debian-binary 的是 ipk，否则是 APK v2 的 control 段。
+            if detect_gzip_kind(p) == "ipk":
                 rc |= verify_ipk(p)
+            else:
+                rc |= verify_v2(p)
         else:
             print(f"  FAIL {p.name}: 不是有效的包 —— 既不是 ADB 容器，"
-                  f"也不是 ar 归档（开头 {head[:4]!r}，应为 b'!<arch>' 或 b'ADB'）")
+                  f"也不是 gzip（开头 {head[:4]!r}，应为 b'ADB' 或 b'\\x1f\\x8b'）")
             rc |= 1
         print()
     print("RESULT:", "PASS" if rc == 0 else "FAIL")
