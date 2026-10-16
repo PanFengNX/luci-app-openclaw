@@ -513,6 +513,365 @@ cmd_link() {
 		"$kind" "$(oc_json_str "$base_dir")" "$(oc_json_str "$state_dir")"
 }
 
+# ---------------------------------------------------------------- migrate
+# migrate <dir> : 把本机已有的 OpenClaw 安装「迁移」到本插件的默认目录。
+#
+# 与 link 的区别：link 只改 UCI 指过去（零拷贝，两边共享同一份文件）；
+# migrate 是真的把文件复制过来 —— 之后两边完全独立，源目录保持原样，
+# 用户确认无误后可以自行删除。
+#
+# 原子性：先把内容 cp -a 到「与目标同一分区」的暂存目录，校验关键文件通过后
+# 才用 mv 换入（同分区 rename，不会留下复制到一半的目标）。换入前若目标已有
+# 数据，先走 backup.sh 的安全快照；任何一步失败都只清理暂存目录，已存在的
+# 目标数据保持原样。
+#
+# 目标布局：<安装目录>/{home/.openclaw,openclaw,node}（可用 main.state_dir /
+# main.openclaw_dir 覆盖，但必须仍在 <安装目录> 之下 —— 否则一次 mv 无法原子
+# 完成，这里会明确拒绝，而不是留下一半新一半旧的状态）。
+#
+# stdout 只允许 JSON（前端直接 JSON.parse）：日志一律走 stderr，不用 oc_info。
+
+MIG_STAGE=""
+MIG_OLD=""
+MIG_DST=""
+MIG_MOVED=0
+MIG_LOCKED=0
+
+oc_mig_exit() {
+	mig_cleanup
+	mig_unlock
+}
+
+mig_log() {
+	# 与 backup.sh 的 blog() 同一约定：进度走 stderr，stdout 只留给 JSON
+	printf '%s [INFO] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
+}
+
+mig_cleanup() {
+	# 兜底：删掉暂存目录；旧目录已移开而新目录尚未就位时，把它放回原位。
+	# 递归删除一律用 find -depth -delete：不跟随符号链接，也不会删到目录之外。
+	if [ -n "${MIG_STAGE:-}" ] && [ -d "$MIG_STAGE" ]; then
+		find "$MIG_STAGE" -depth -delete 2>/dev/null || true
+		MIG_STAGE=""
+	fi
+	if [ -n "${MIG_OLD:-}" ] && [ -d "$MIG_OLD" ]; then
+		if [ "${MIG_MOVED:-0}" = "1" ] && [ -n "${MIG_DST:-}" ] && [ ! -e "$MIG_DST" ]; then
+			mv "$MIG_OLD" "$MIG_DST" 2>/dev/null || true
+			MIG_MOVED=0
+		else
+			oc_warn "迁移中断：原目录保留在 $MIG_OLD（确认后可自行删除）"
+		fi
+	fi
+	return 0
+}
+
+mig_unlock() {
+	# oc_lock_release 是无条件删除锁目录的：没持锁时调用会释放别人的锁，
+	# 让 install/repair 与本操作并发。所以必须用 MIG_LOCKED 守住。
+	[ "${MIG_LOCKED:-0}" = "1" ] || return 0
+	MIG_LOCKED=0
+	oc_lock_release
+}
+
+mig_fail() {
+	# mig_fail <message> [rc] : 清理现场 + 输出错误 JSON + 退出（stdout 只有这一行）
+	local msg="$1" rc="${2:-1}"
+	oc_err "migrate: $msg"
+	mig_cleanup
+	mig_unlock
+	printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "$msg")"
+	exit "$rc"
+}
+
+mig_fs_dev() {
+	# mig_fs_dev <path> -> 所在文件系统的设备名（路径不存在时回溯到最近的存在祖先）
+	local p="$1"
+	[ -n "$p" ] || return 1
+	while [ ! -e "$p" ] && [ "$p" != "/" ]; do
+		p="$(dirname "$p")"
+	done
+	df -P "$p" 2>/dev/null | awk 'NR==2{print $1}'
+}
+
+mig_rand() {
+	# 暂存/旧目录名的随机后缀（oc_rand_hex 不可用时退回 $$，仍然是唯一的名字）
+	local r
+	r="$(oc_rand_hex 2>/dev/null | cut -c1-12)"
+	[ -n "$r" ] || r="$$"
+	printf '%s' "$r"
+}
+
+cmd_migrate() {
+	# migrate <dir> : 见本节开头的说明。成功输出
+	# {"ok":true,"from":..,"to":..,"kind":..}，失败输出 {"ok":false,"error":..}
+	local dir="${2:-}" kind src_root base state ocdir nodedir
+	local rel_state rel_oc rel_node
+	local src_data src_prog src_node
+	local dst swap_parent stage old full=1 need have_data before snap dev_stage dev_dst
+
+	# ---- 1) 参数与前置校验（此时未持锁、未写任何文件）----
+	if [ -z "$dir" ]; then
+		oc_err "migrate: 缺少目录参数"
+		printf '{"ok":false,"error":"缺少目录参数"}\n'
+		return 2
+	fi
+	# 归一化：去掉尾随斜杠（"/" 单独保留，交给下面的探测去拒绝）
+	dir="${dir%/}"
+	[ -n "$dir" ] || dir="/"
+
+	if [ ! -d "$dir" ]; then
+		oc_err "migrate: 目录不存在：$dir"
+		printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "目录不存在：$dir")"
+		return 2
+	fi
+
+	kind="$(oc_probe_openclaw_dir "$dir")"
+	if [ -z "$kind" ]; then
+		oc_err "migrate: 不是有效的 OpenClaw 安装：$dir"
+		printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "不是有效的 OpenClaw 安装：$dir")"
+		return 2
+	fi
+
+	# 源目录可能是符号链接，而 cp -a 隐含 -d（不跟随链接）：直接复制会把
+	# "链接本身"搬过去，目标里得到一个指向源目录的链接 —— 看起来迁移成功，
+	# 实际两边仍共享同一份文件，且链接可能指到目标目录之外。先物理解析。
+	src_root="$(oc_canonical_dir "$dir" 2>/dev/null)"
+	[ -n "$src_root" ] || src_root="$dir"
+
+	base="$(oc_base_dir)"
+	state="$(oc_state_dir)"
+	ocdir="$(oc_oc_dir)"
+	nodedir="$(oc_node_dir)"
+
+	# ---- 2) 目标可用性 ----
+	oc_validate_base_dir "$base" || mig_fail "拒绝迁移：本插件安装目录不安全（$base）" 2
+	oc_validate_base_dir "$state" || mig_fail "拒绝迁移：数据目录不安全（$state）" 2
+	oc_validate_base_dir "$ocdir" || mig_fail "拒绝迁移：程序目录不安全（$ocdir）" 2
+
+	if [ "$src_root" = "$base" ]; then
+		mig_fail "源目录就是本插件的安装目录，无需迁移：$dir" 2
+	fi
+	case "$base" in
+		"$src_root"/*) mig_fail "拒绝迁移：目标目录位于源目录之内（$base）" 2 ;;
+	esac
+	case "$src_root" in
+		"$base"/*) mig_fail "拒绝迁移：源目录位于目标目录之内（$dir）" 2 ;;
+	esac
+
+	# 目标必须落在 base_dir 之下：暂存目录建在 base 的同级，只有这样才能用
+	# 一次 mv 原子换入。自定义到 base 之外的数据/程序目录无法一次搬完，
+	# 明确拒绝而不是做一次可能半途失败的多次移动。
+	rel_state="${state#"$base"/}"
+	if [ -z "$rel_state" ] || [ "$rel_state" = "$state" ]; then
+		mig_fail "拒绝迁移：数据目录 $state 不在安装目录 $base 之下，请先清空 main.state_dir" 2
+	fi
+	rel_oc="${ocdir#"$base"/}"
+	if [ -z "$rel_oc" ] || [ "$rel_oc" = "$ocdir" ]; then
+		mig_fail "拒绝迁移：程序目录 $ocdir 不在安装目录 $base 之下，请先清空 main.openclaw_dir" 2
+	fi
+	rel_node=""
+	if [ "$(oc_node_mode)" = "private" ]; then
+		rel_node="${nodedir#"$base"/}"
+		[ "$rel_node" = "$nodedir" ] && rel_node=""
+	fi
+
+	# ---- 3) 源侧的三块内容 ----
+	src_data="$(oc_probe_data_dir "$src_root" "$kind")"
+	if [ -z "$src_data" ] || [ ! -d "$src_data" ]; then
+		mig_fail "拒绝迁移：源数据目录不存在（$kind 布局）：$dir" 2
+	fi
+	src_prog=""
+	src_node=""
+	case "$kind" in
+		ours)
+			if [ -f "$src_root/openclaw/bin/openclaw" ]; then
+				src_prog="$src_root/openclaw"
+			elif [ -f "$src_root/bin/openclaw" ]; then
+				# 程序目录就是源目录本身（main.openclaw_dir 被设成安装目录的布局）
+				src_prog="$src_root"
+			fi
+			[ -d "$src_root/node" ] && src_node="$src_root/node"
+			;;
+		istore)
+			[ -d "$src_root/data/openclaw" ] && src_prog="$src_root/data/openclaw"
+			[ -d "$src_root/data/node" ] && src_node="$src_root/data/node"
+			;;
+		data) ;;
+	esac
+
+	# ---- 4) 取锁（与 install / repair / restore 互斥）----
+	if ! oc_lock_acquire; then
+		oc_err "migrate: 另一个操作正在运行"
+		printf '{"ok":false,"error":"另一个操作正在运行，请稍后再试"}\n'
+		return 2
+	fi
+	MIG_LOCKED=1
+	# oc_lock_acquire 自己装了 EXIT/INT/TERM/HUP 的解锁 trap，这里必须把它
+	# 合并进我们的清理函数，否则会把解锁那段顶掉（中断后锁残留）。
+	trap 'oc_mig_exit' EXIT
+	trap 'oc_mig_exit; exit 1' INT TERM HUP
+
+	# ---- 5) 目标位置与空间检查 ----
+	if [ -n "$src_prog" ]; then
+		# 源目录是一份完整安装（程序 + 数据 [+ 私有运行时]）→ 整体替换安装目录
+		full=1
+		dst="$base"
+	else
+		# 源目录只有数据 → 只替换数据目录，目标已有的程序/运行时保持不动
+		full=0
+		dst="$base/$rel_state"
+	fi
+	MIG_DST="$dst"
+	swap_parent="$(dirname "$base")"
+	mkdir -p "$swap_parent" 2>/dev/null || mig_fail "无法创建目标父目录：$swap_parent"
+
+	# 暂存目录必须与目标同分区，mv 才是 rename（原子）；base 本身是挂载点根时
+	# 二者会落在不同文件系统上，此时 mv 退化为跨设备复制，拒绝而不是硬做。
+	dev_stage="$(mig_fs_dev "$swap_parent")"
+	dev_dst="$(mig_fs_dev "$dst")"
+	if [ -n "$dev_stage" ] && [ -n "$dev_dst" ] && [ "$dev_stage" != "$dev_dst" ]; then
+		mig_fail "拒绝迁移：目标 $dst 与暂存目录 $swap_parent 不在同一文件系统，无法原子换入（请把安装目录设为挂载点下的子目录）"
+	fi
+
+	need="$(oc_dir_size_mb "$src_root")"
+	case "$need" in ''|*[!0-9]*) need=0 ;; esac
+	if [ "$need" -gt 0 ] && ! oc_need_space "$swap_parent" "$((need + 32))"; then
+		mig_fail "目标分区空间不足：复制约需 ${need}MB（暂存于 $swap_parent）"
+	fi
+
+	# ---- 6) 复制到暂存目录 ----
+	# 优先 mktemp -d：名字不可预测且是 0700，避免共享挂载点上有人预先把
+	# .oc-migrate.* 造成符号链接，让 root 的 cp 写到别处。
+	stage=""
+	if command -v mktemp >/dev/null 2>&1; then
+		stage="$(mktemp -d "$swap_parent/.oc-migrate.XXXXXX" 2>/dev/null)" || stage=""
+	fi
+	if [ -z "$stage" ]; then
+		stage="$swap_parent/.oc-migrate.$(mig_rand)"
+		if [ -L "$stage" ] || [ -e "$stage" ]; then
+			mig_fail "暂存路径已被占用，请稍后重试：$stage"
+		fi
+		mkdir "$stage" 2>/dev/null || mig_fail "无法创建暂存目录：$stage"
+	fi
+	MIG_STAGE="$stage"
+
+	if [ "$full" = "1" ]; then
+		mkdir -p "$stage/$(dirname "$rel_state")" "$stage/$(dirname "$rel_oc")" 2>/dev/null
+		cp -a "$src_data" "$stage/$rel_state" 2>/dev/null \
+			|| mig_fail "复制数据目录失败：$src_data"
+		if [ "$src_prog" = "$src_root" ]; then
+			# 程序目录 == 源目录本身：只取程序本体，否则会把数据目录一起套进去
+			mkdir -p "$stage/$rel_oc" 2>/dev/null
+			for sub in bin lib package.json; do
+				if [ -e "$src_root/$sub" ]; then
+					cp -a "$src_root/$sub" "$stage/$rel_oc/$sub" 2>/dev/null \
+						|| mig_fail "复制程序本体失败：$src_root/$sub"
+				fi
+			done
+		else
+			cp -a "$src_prog" "$stage/$rel_oc" 2>/dev/null \
+				|| mig_fail "复制程序目录失败：$src_prog"
+		fi
+		if [ -n "$src_node" ] && [ -n "$rel_node" ]; then
+			mkdir -p "$stage/$(dirname "$rel_node")" 2>/dev/null
+			cp -a "$src_node" "$stage/$rel_node" 2>/dev/null \
+				|| mig_fail "复制 Node 运行时失败：$src_node"
+		fi
+		# 源根下的 workspace 一并带走（可能是用户数据）；logs/cache/npm-cache
+		# 是可再生的，不迁。
+		if [ -d "$src_root/workspace" ]; then
+			cp -a "$src_root/workspace" "$stage/workspace" 2>/dev/null \
+				|| oc_warn "workspace 复制失败，已跳过"
+		fi
+	else
+		# 只迁数据：暂存目录本身就是"新的数据目录"
+		cp -a "$src_data/." "$stage/" 2>/dev/null \
+			|| mig_fail "复制数据目录失败：$src_data"
+	fi
+
+	# ---- 7) 校验暂存结果：关键文件必须存在，否则不换入 ----
+	if [ "$full" = "1" ]; then
+		[ -f "$stage/$rel_state/openclaw.json" ] \
+			|| mig_fail "复制校验失败：缺少 $rel_state/openclaw.json"
+		[ -x "$stage/$rel_oc/bin/openclaw" ] \
+			|| mig_fail "复制校验失败：缺少可执行的 $rel_oc/bin/openclaw"
+	else
+		[ -f "$stage/openclaw.json" ] \
+			|| mig_fail "复制校验失败：缺少 openclaw.json"
+	fi
+
+	# ---- 8) 目标已有数据 → 先做安全快照（复用 backup.sh，不另写一套）----
+	have_data=0
+	if [ "$full" = "1" ]; then
+		[ -f "$base/$rel_state/openclaw.json" ] && have_data=1
+	else
+		[ -f "$dst/openclaw.json" ] && have_data=1
+	fi
+	if [ "$have_data" = "1" ]; then
+		before="$(sh "$OC_BACKUP" create --name "pre-migrate" 2>/dev/null)"
+		snap=""
+		case "$before" in
+			*'"ok":true'*)
+				snap="$(printf '%s' "$before" | sed -n 's/.*"file":"\([^"]*\)".*/\1/p')"
+				;;
+		esac
+		if [ -n "$snap" ]; then
+			mig_log "已创建迁移前快照：$snap"
+		else
+			oc_warn "未能创建迁移前快照，继续（源目录 $dir 仍完整保留）"
+		fi
+	fi
+
+	# ---- 9) 原子换入 ----
+	old="$swap_parent/.oc-migrate-old.$(mig_rand)"
+	if [ -L "$old" ] || [ -e "$old" ]; then
+		mig_fail "旧目录暂存路径已被占用：$old"
+	fi
+	MIG_OLD="$old"
+	if [ -e "$dst" ]; then
+		mv "$dst" "$old" 2>/dev/null \
+			|| mig_fail "无法移开现有目录：$dst（目标未改动）"
+		MIG_MOVED=1
+	fi
+	mkdir -p "$(dirname "$dst")" 2>/dev/null
+	mv "$stage" "$dst" 2>/dev/null || mig_fail "换入目标位置失败：$dst"
+	MIG_STAGE=""
+	MIG_MOVED=0
+
+	# 安全快照写在 <安装目录>/backups 里，整树替换时必须先把它带回新目录，
+	# 再清理旧目录 —— 顺序反了快照就随旧目录一起没了。
+	if [ "$full" = "1" ] && [ -d "$old/backups" ]; then
+		mkdir -p "$base/backups" 2>/dev/null
+		cp -a "$old/backups/." "$base/backups/" 2>/dev/null \
+			|| oc_warn "旧备份未能带入新安装目录（仍保留在 $old）"
+	fi
+	if [ -d "$old" ]; then
+		if find "$old" -depth -delete 2>/dev/null; then
+			MIG_OLD=""
+		else
+			oc_warn "旧目录清理失败，请手动删除：$old"
+		fi
+	else
+		MIG_OLD=""
+	fi
+
+	# ---- 10) 权限与提示 ----
+	oc_fix_perms >/dev/null 2>&1 || oc_warn "权限修复未完全成功，请检查 $base"
+
+	if [ "$full" = "0" ]; then
+		oc_warn "源目录只有数据、没有程序本体：迁移后仍需在本插件内安装一次 OpenClaw"
+	elif [ "$(oc_node_mode)" = "private" ]; then
+		[ -n "$src_node" ] || oc_warn "源目录没有私有 Node 运行时（node/），迁移后可能需要在插件内重新安装运行时"
+	else
+		oc_warn "当前为 global 模式，未迁移 Node 运行时（使用系统运行时）"
+	fi
+
+	# to 报安装目录：那才是"本插件的默认目录"（数据/程序都在它下面）
+	printf '{"ok":true,"from":"%s","to":"%s","kind":"%s"}\n' \
+		"$(oc_json_str "$dir")" "$(oc_json_str "$base")" "$kind"
+	return 0
+}
+
 cmd_save() {
 	# save basic settings from uci-like key=value pairs
 	shift
@@ -676,6 +1035,7 @@ case "${1:-}" in
 	mounts)        cmd_mounts ;;
 	discover)      cmd_discover ;;
 	link)          cmd_link "$@" ;;
+	migrate)       cmd_migrate "$@" ;;
 	save)          cmd_save "$@" ;;
 	port)          get_port; printf '\n' ;;
 	token)         get_token; printf '\n' ;;
@@ -723,6 +1083,8 @@ Usage: openclaw.sh <command> [options]
   discover                  JSON array of existing OpenClaw installs / data dirs
   link <dir>                point the config at an existing install (UCI only,
                             nothing is copied: base_dir / state_dir per layout)
+  migrate <dir>             copy an existing install into this plugin's default
+                            dirs (cp -a + atomic mv; the source is left as-is)
 
 Safety: install/start/restart/update/uninstall/repair refuse to run when the
 configured base_dir is a system path (/usr /etc /tmp /var /overlay /rom ...) or
