@@ -36,6 +36,9 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "channels"},  call("api_channels")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "log"},       call("api_log")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "mounts"},    call("api_mounts")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "discover"},  call("api_discover")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "link"},      call("api_link")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "migrate"},   call("api_migrate")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "doctor"},    call("api_doctor")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "providers"}, call("api_providers")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "repair"},    call("api_repair")).leaf = true
@@ -271,6 +274,54 @@ end
 function api_mounts()
 	local r = sh(SH .. " mounts")
 	out({ ok = true, data = r })
+end
+
+-- ------------------------------------------------- 已有安装：发现 / 关联 / 迁移
+-- 这三条走 openclaw.sh 自己的子命令（discover / link / migrate），不是 openclaw
+-- CLI，所以 api_run 的白名单帮不上忙，必须单独开端点。
+--   discover 只读；link 只改 UCI；migrate 会复制文件（重操作，前端二次确认）。
+-- 三者的 stdout 都是 JSON（helper 的日志一律走 stderr），控制器原样透传给前端。
+
+local function oc_dir_arg(s)
+	-- 目录参数形状校验。真正的安全判断在 shell 侧（oc_probe_openclaw_dir /
+	-- oc_validate_base_dir），这里只挡掉三类明显无意义或有害的输入：
+	--   * 空值与相对路径 —— helper 只接受绝对路径
+	--   * 非 "/" 开头 —— 前导 "-" 会被 helper 的 case 当成选项而不是参数
+	--   * 控制字符（换行等）—— 即使 q() 会转义，也不该出现在路径里
+	-- 注意：q() 仍然必须使用，因为路径里的空格 / 引号 / $ 都要靠它隔离。
+	if not s or s == "" or #s > 4096 then return nil end
+	if s:sub(1, 1) ~= "/" then return nil end
+	if s:find("%c") then return nil end
+	return s
+end
+
+function api_discover()
+	-- 只读探测。可能较慢（每个候选目录一次 du，helper 内部有 timeout 封顶），
+	-- 所以前端必须异步调用、失败或空结果时安静隐藏卡片。
+	local r = sh(SH .. " discover")
+	out({ ok = true, data = r })
+end
+
+function api_link()
+	local dir = oc_dir_arg(http.formvalue("dir"))
+	if not dir then
+		out({ ok = false, error = "目录参数无效" })
+		return
+	end
+	local r = sh(SH .. " link " .. q(dir))
+	out({ ok = r:find('"ok":true') ~= nil, data = r })
+end
+
+function api_migrate()
+	local dir = oc_dir_arg(http.formvalue("dir"))
+	if not dir then
+		out({ ok = false, error = "目录参数无效" })
+		return
+	end
+	-- 同步执行：migrate 自己取锁、自己校验目标，失败时返回 {"ok":false,"error":..}。
+	-- 前端在请求期间显示"进行中"，完成后按 data 里的结果提示。
+	local r = sh(SH .. " migrate " .. q(dir))
+	out({ ok = r:find('"ok":true') ~= nil, data = r })
 end
 
 function api_doctor()

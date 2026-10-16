@@ -58,6 +58,18 @@ button:disabled{background:#aaa;cursor:not-allowed}
   </div>
 </div>
 
+<div class="oc-card" id="oc-disc-card" style="display:none">
+  <h3>检测到已有 OpenClaw 安装</h3>
+  <div class="oc-hint">
+    在本机其它位置发现了可用的 OpenClaw 安装 / 数据目录。两种处理方式：<br>
+    <b>关联</b>：只把本插件配置指向它，<b>不复制任何文件</b>（两边共用同一份数据）。<br>
+    <b>迁移</b>：把内容复制到本插件目录，<b>源目录保持不动</b>，确认无误后可自行删除。<br>
+    体积一栏是<b>数据目录</b>的大小，不含程序本体与 Node 运行时；迁移所需空间会比它更大。
+  </div>
+  <div id="oc-disc-list" style="margin-top:10px"></div>
+  <div id="oc-disc-log" class="oc-log" style="display:none;height:auto;max-height:180px;margin-top:10px"></div>
+</div>
+
 <div class="oc-card">
   <h3>安装 / 修复运行环境</h3>
   <div class="oc-row">
@@ -176,6 +188,9 @@ var API = {
   service: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","service")%>',
   save: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","save")%>',
   mounts: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","mounts")%>',
+  discover: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","discover")%>',
+  link: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","link")%>',
+  migrate: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate")%>',
   doctor: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>',
   repair: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","repair")%>',
   diag_run: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_run")%>',
@@ -188,24 +203,39 @@ var API = {
   backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
   restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>'
 };
-var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null };
+var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, disc:null };
 
 function $(id){ return document.getElementById(id); }
+// 回调只允许触发一次：readyState==4 与 onerror 在某些浏览器上会同时到达，
+// 没有这个守卫时同一次请求会把按钮禁用/恢复跑两遍。
+function once(cb){
+  var done = false;
+  return function(v){ if (done) return; done = true; cb(v); };
+}
 function post(url, data, cb){
   var body = [];
   for (var k in data) body.push(encodeURIComponent(k)+'='+encodeURIComponent(data[k]));
   var x = new XMLHttpRequest();
   x.open('POST', url, true);
   x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+  var fin = once(cb);
   x.onreadystatechange = function(){
-    if (x.readyState == 4) { try { cb(JSON.parse(x.responseText)); } catch(e){ cb({ok:false}); } }
+    if (x.readyState == 4) { try { fin(JSON.parse(x.responseText)); } catch(e){ fin({ok:false}); } }
   };
+  // 连接被重置 / 请求超时：readyState 可能根本不到 4，回调就永远不来，
+  // 发起方（例如备份、迁移）会永久卡在 disabled。用 net:true 标记，
+  // 让轮询类调用方知道"这次没拿到数据"而不是"服务端说失败了"。
+  x.onerror   = function(){ fin({ok:false, net:true}); };
+  x.ontimeout = function(){ fin({ok:false, net:true}); };
   x.send(body.join('&'));
 }
 function get(url, cb){
   var x = new XMLHttpRequest();
   x.open('GET', url, true);
-  x.onreadystatechange = function(){ if (x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({ok:false});} } };
+  var fin = once(cb);
+  x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
+  x.onerror   = function(){ fin({ok:false, net:true}); };
+  x.ontimeout = function(){ fin({ok:false, net:true}); };
   x.send();
 }
 function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }
@@ -264,6 +294,9 @@ function loadInfo(){
     state.savedOcdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
     // 当前版本已知，结合（可能更晚到达的）版本列表决定是否提示更新 Node
     renderNodeUpdate();
+    // 已有安装列表要按"当前安装目录"过滤，而 discover 可能比 info 先返回；
+    // 两边都重绘一次，谁后到谁生效。
+    renderDiscover(state.disc || []);
   });
 }
 
@@ -564,6 +597,9 @@ function diagStop() {
 
 function diagPoll(name) {
   post(API.diag_poll, { name: name }, function(r){
+    // 网络抖动时保留已有输出，等下一次轮询即可；把它当成"服务端返回空"
+    // 会瞬间清空诊断结果。
+    if (r && r.net) return;
     var d = r.data ? jp(r.data, null) : {};
     if (!d || d.error) { $('diag-state').textContent = '失败'; diagStop(); return; }
     $('diag-out').textContent = d.output || '';
@@ -797,8 +833,148 @@ $('btn-bk-upload').onclick = function(){
 
 loadBackups();
 
+// ------------------------------------------- 已有 OpenClaw 安装：关联 / 迁移
+// 后端 openclaw.sh discover 输出 JSON 数组，元素形如
+//   {path,kind,has_program,has_node,has_data,size_mb}
+// kind 只有 ours / istore / data 三种取值，这里统一翻成中文说明。
+var DISC_KIND = {
+  ours:   '本插件布局（程序 + 数据）',
+  istore: 'iStoreOS OpenClawMgr 布局（数据在 data/.openclaw）',
+  data:   '仅数据目录（.openclaw，不含程序本体）'
+};
+
+function discSay(msg, bad){
+  var box = $('oc-disc-log');
+  if (!box) return;
+  box.style.display = '';
+  box.textContent = msg;                     // 服务端数据只进 textContent
+  box.style.color = bad ? '#ffb4b4' : '';
+}
+
+// 可做的操作 / 内容摘要：把 has_program / has_node / has_data 说人话。
+function discCaps(e){
+  var caps = [];
+  if (e.has_program) caps.push('含程序本体');
+  if (e.has_node)    caps.push('含私有 Node 运行时');
+  if (e.has_data)    caps.push('含数据');
+  var s = caps.length ? caps.join(' / ') : '内容未知';
+  if (!e.has_program) s += '（不含程序本体，关联或迁移后仍需在本插件内安装一次）';
+  return s;
+}
+
+function discRow(e){
+  var wrap = document.createElement('div');
+  wrap.style.cssText = 'border:1px solid #eee;border-radius:4px;padding:10px 12px;margin-bottom:8px';
+
+  var path = document.createElement('div');
+  path.style.cssText = 'font-family:monospace;font-size:13px;word-break:break-all;color:#222';
+  path.textContent = e.path;                 // 服务端数据只进 textContent
+  wrap.appendChild(path);
+
+  var meta = document.createElement('div');
+  meta.className = 'oc-hint';
+  meta.textContent = '类型：' + (DISC_KIND[e.kind] || e.kind || '未知')
+    + '　数据体积：' + (e.size_mb || 0) + ' MB　' + discCaps(e);
+  wrap.appendChild(meta);
+
+  var acts = document.createElement('div');
+  acts.style.marginTop = '8px';
+
+  var bLink = document.createElement('button');
+  bLink.textContent = '关联';
+  bLink.className = 'oc-btn gray';
+  bLink.onclick = function(){ doLink(e, bLink); };
+  acts.appendChild(bLink);
+  acts.appendChild(document.createTextNode(' '));
+
+  var bMig = document.createElement('button');
+  bMig.textContent = '迁移';
+  bMig.onclick = function(){ doMigrate(e); };
+  acts.appendChild(bMig);
+
+  wrap.appendChild(acts);
+  return wrap;
+}
+
+function renderDiscover(arr){
+  var card = $('oc-disc-card'), host = $('oc-disc-list');
+  if (!card || !host) return;
+  var cur = ((state.info && state.info.base_dir) || '').replace(/\/$/, '');
+  // 本插件自己当前的安装目录不算"检测到的已有安装"，列出来只会让人误点迁移
+  // （后端也会以"源目录就是本插件的安装目录"拒绝）。
+  var items = (arr || []).filter(function(e){
+    if (!e || !e.path) return false;
+    return !(cur && String(e.path).replace(/\/$/, '') === cur);
+  });
+  host.innerHTML = '';
+  if (!items.length){ card.style.display = 'none'; return; }
+  items.forEach(function(e){ host.appendChild(discRow(e)); });
+  card.style.display = '';
+}
+
+function loadDiscover(){
+  get(API.discover, function(r){
+    // 失败 / 解析不出数组 / 没有结果：安静隐藏整张卡片，不弹窗、不报错。
+    if (!r || r.ok === false || r.net){ state.disc = []; renderDiscover([]); return; }
+    state.disc = jp(r.data || '[]', []);
+    renderDiscover(state.disc);
+  });
+}
+
+function doLink(e, btn){
+  if (btn) btn.disabled = true;
+  discSay('正在关联 ' + e.path + ' …（只改配置，不复制文件）');
+  post(API.link, { dir: e.path }, function(r){
+    if (btn) btn.disabled = false;
+    var d = jp((r && r.data) || '{}', {});
+    if (!r || r.ok === false || !d.ok){
+      discSay('关联失败：' + (d.error || (r && r.error) || '服务无响应，请重试'), true);
+      return;
+    }
+    discSay('已关联 ' + e.path
+      + (d.base_dir ? '\n安装目录 → ' + d.base_dir : '')
+      + (d.state_dir ? '\n数据目录 → ' + d.state_dir : '')
+      + '\n若状态页显示的目录没有变化，请到「基本设置」检查安装目录 / 程序目录是否残留了旧值。');
+    // 关联只改 UCI：刷新状态卡与安装目录下拉，稍后再重新探测一次
+    loadInfo();
+    loadMounts();
+    setTimeout(loadDiscover, 800);
+  });
+}
+
+function doMigrate(e){
+  if (!confirm('将把\n\n  ' + e.path + '\n\n的内容复制到本插件的安装目录。\n'
+             + '· 源目录保持不动，确认无误后你可以自行删除；\n'
+             + '· 目标已有的数据会先自动做一次安全快照；\n'
+             + '· 大目录可能需要数分钟，期间请勿关闭页面。\n\n继续？')) return;
+
+  // 重操作：先禁用卡片上所有按钮，避免并发点击（后端也会取锁拒绝）
+  var btns = $('oc-disc-list').getElementsByTagName('button');
+  for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
+  discSay('正在迁移 ' + e.path + ' → 本插件目录 …\n（复制 + 原子换入，可能需要数分钟，请勿关闭页面）');
+
+  post(API.migrate, { dir: e.path }, function(r){
+    var d = jp((r && r.data) || '{}', {});
+    if (!r || r.ok === false || !d.ok){
+      discSay('迁移失败：' + (d.error || (r && r.error) || '服务无响应，请重试')
+        + '\n源目录 ' + e.path + ' 未被改动，可稍后重试。', true);
+    } else {
+      discSay('迁移完成：' + (d.from || e.path) + ' → ' + (d.to || '本插件目录')
+        + '\n源目录保持原样，确认无误后可自行删除。');
+    }
+    for (var j = 0; j < btns.length; j++) btns[j].disabled = false;
+    loadInfo();
+    loadMounts();
+    setTimeout(loadDiscover, 1500);
+  });
+}
+
 loadInfo();
 loadMounts();
 loadVersions(false);
+// discover 会扫描挂载点、可能很慢，而且 uhttpd 的 Lua 请求是串行的：
+// 放到最后并延后一点发起，先让状态卡 / 安装卡 / 版本列表的请求排出去，
+// 慢扫描就不会把首屏渲染挤在后面。
+setTimeout(loadDiscover, 600);
 </script>
 <%+footer%>
