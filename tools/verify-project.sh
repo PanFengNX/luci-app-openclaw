@@ -164,6 +164,37 @@ scan_forbid "无未引用的 run 参数拼接"        'run " \.\. cmd'
 scan_forbid "无 --token 出现在命令行"        '\-\-token "\$token"'
 scan_forbid "无 curl 管道执行"              '\(curl\|wget\)[^|]*\|\s*\(sh\|bash\|ash\)'
 
+# CRLF 会让 shell 的 shebang 变成 "#!/bin/sh\r"（找不到解释器），
+# 也会让 LuCI 模板解析报 "unfinished string"。全项目必须是纯 LF。
+# 之前用 Python 批量改代码时踩过：Windows 上 write_text() 默认把 \n 转成 \r\n。
+# 注意用 Python 而不是 `find -exec grep {} +`：后者在 MSYS 上会对干净文件误报。
+crlf_hits=""
+if [ -n "$PY" ]; then
+	crlf_hits="$("$PY" -c '
+import pathlib
+bad = []
+for t in ("root", "luasrc", "scripts", "tools", "Makefile", "README.md"):
+    p = pathlib.Path(t)
+    fs = [p] if p.is_file() else [f for f in p.rglob("*") if f.is_file()]
+    for f in fs:
+        if f.suffix == ".pyc" or "__pycache__" in f.parts:
+            continue
+        try:
+            if b"\r" in f.read_bytes():
+                bad.append(str(f))
+        except OSError:
+            pass
+for b in bad[:5]:
+    print(b)
+' 2>/dev/null)"
+fi
+if [ -n "$crlf_hits" ]; then
+	bad "无 CRLF 行尾（shebang / LuCI 模板会失效）"
+	printf '%s\n' "$crlf_hits" | sed 's/^/        /'
+else
+	ok "无 CRLF 行尾"
+fi
+
 # --------------------------------------------------------------------------
 head_ "7. 安全不变量回归测试（路径/端口/URL/JSON 转义）"
 if [ -f tools/tests/path-validate.sh ]; then
