@@ -29,7 +29,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -256,41 +255,6 @@ def build_apk_v3(items, pkgver, out: Path, sde: int = 0):
     return out
 
 
-# --------------------------------------------------------------------------- ar
-# ipk 和 APK v2 都是**普通 ar 归档**：必须以 "!<arch>\n" 开头，每个成员前面
-# 有 60 字节的 ASCII 头（名字/时间/uid/gid/权限/大小/魔数），成员数据按 2 字节
-# 对齐。少了这层容器，opkg / apk 会直接报 "file format is invalid or inconsistent"。
-def ar_member(name: str, data: bytes) -> bytes:
-    """One ar(5) member: 60-byte header + data + even-byte padding."""
-    nm = name.encode()
-    if len(nm) > 16:
-        raise ValueError(f"ar member name too long ({len(nm)}): {name}")
-    hdr = (
-        nm.ljust(16, b" ")                      # name (BSD form: space padded)
-        + b"0".ljust(12, b" ")                  # mtime
-        + b"0".ljust(6, b" ")                   # uid
-        + b"0".ljust(6, b" ")                   # gid
-        + b"100644".ljust(8, b" ")              # mode
-        + str(len(data)).encode().ljust(10, b" ")   # size
-        + b"\x60\n"                             # header magic "`\n"
-    )
-    if len(hdr) != 60:
-        raise AssertionError(f"ar header must be 60 bytes, got {len(hdr)}")
-    out = hdr + data
-    if len(data) % 2:
-        out += b"\n"                            # members are 2-byte aligned
-    return out
-
-
-def build_ar_package(segments) -> bytes:
-    """Wrap [(name, payload), ...] into a complete ar archive."""
-    buf = io.BytesIO()
-    buf.write(b"!<arch>\n")
-    for name, data in segments:
-        buf.write(ar_member(name, data))
-    return buf.getvalue()
-
-
 # --------------------------------------------------------------------------- ipk
 def build_ipk(items, version, release, sde: int, out: Path):
     """Classic opkg package (OpenWrt 24.10 and earlier).
@@ -350,8 +314,10 @@ def build_ipk(items, version, release, sde: int, out: Path):
 
 
 # --------------------------------------------------------------------------- run
-def build_run(items, version, out: Path):
-    payload = gzip.compress(build_data_tar(items), 9)
+def build_run(items, version, out: Path, sde: int = 0):
+    # 必须走 gz()：gzip.compress 默认会把当前时间写进 gzip 头，
+    # 那样每次重建 .run 的 hash 都不同。
+    payload = gz(build_data_tar(items, sde))
     import base64
     b64 = base64.b64encode(payload).decode()
     lines = [b64[i:i + 100] for i in range(0, len(b64), 100)]
@@ -375,7 +341,9 @@ rm -f /tmp/luci-indexcache
 echo "installed {PKG_NAME} {version}"
 echo "LuCI: 服务 -> OpenClaw 助手"
 """
-    out.write_text(script)
+    # 二进制写入：Windows 上 write_text() 会把 \n 转成 \r\n，
+    # 那样 shebang 就成了 "#!/bin/sh\r"，设备上直接跑不起来。
+    out.write_bytes(script.encode("utf-8"))
     out.chmod(0o755)
     log(f"run  -> {out.name}")
 
@@ -496,7 +464,7 @@ def main():
         log(f"apk2 -> {signed.name} (signed; copy {pub.name} to /etc/apk/keys/)")
 
     build_ipk(items, version, args.release, sde, DIST / f"{PKG_NAME}_{version}_all.ipk")
-    build_run(items, version, DIST / f"{PKG_NAME}-{version}.run")
+    build_run(items, version, DIST / f"{PKG_NAME}-{version}.run", sde)
 
     # sha256 file
     sums = []

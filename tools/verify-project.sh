@@ -256,6 +256,17 @@ else
 		else
 			bad "缺少构建产物（找到 ${#APKS[@]}/3）"
 		fi
+
+		# 产物也要查行尾：.run 是文本脚本，CRLF 会让它的 shebang 失效。
+		# （源码树的行尾由第 7 节的检查覆盖，但 dist/ 是构建产物，需要单独查。）
+		run_file="dist/${PKG_NAME}-${MKVER}.run"
+		if [ -f "$run_file" ]; then
+			if head -c 10 "$run_file" | grep -q $'\r'; then
+				bad "产物行尾：$run_file 含 CR（shebang 会失效）"
+			else
+				ok "产物行尾：.run 为纯 LF"
+			fi
+		fi
 	else
 		bad "build_apk.py 构建失败"
 		"$PY" scripts/build_apk.py 2>&1 | tail -15 | sed 's/^/        /'

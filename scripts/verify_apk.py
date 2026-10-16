@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """verify_apk.py - structural self-check for the packages produced by build_apk.py.
 
-  python3 scripts/verify_apk.py dist/luci-app-openclaw-1.0.0-r1.apk        # APK v3
-  python3 scripts/verify_apk.py dist/luci-app-openclaw-1.0.0-r1-v2.apk     # APK v2
-  python3 scripts/verify_apk.py dist/luci-app-openclaw_1.0.0_all.ipk       # ipk
+  python3 scripts/verify_apk.py dist/luci-app-openclaw-<ver>-r<rel>.apk        # APK v3
+  python3 scripts/verify_apk.py dist/luci-app-openclaw-<ver>-r<rel>-v2.apk     # APK v2
+  python3 scripts/verify_apk.py dist/luci-app-openclaw_<ver>_all.ipk       # ipk
 
 APK v2 checks: gzip segment layout, .PKGINFO fields, datahash, per file SHA1.
 APK v3 checks: ADB container, block order, object graph, PKGINFO HASHES.

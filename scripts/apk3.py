@@ -28,9 +28,7 @@ and against a real OpenWrt 25.12 package):
 """
 
 import hashlib
-import os
 import posixpath
-import stat
 import struct
 import zlib
 
