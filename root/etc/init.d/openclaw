@@ -80,6 +80,21 @@ oc_oc_dir() {
 	[ -n "$d" ] || d="/"
 	printf '%s' "$d"
 }
+oc_state_dir() {
+	# 必须与 lib.sh 的 oc_state_dir() 保持一致。本文件不 source lib.sh
+	# （lib.sh 在加载期就会建私有 rundir、装 trap，对 init 脚本太重），
+	# 所以只能各留一份 —— 与上面 oc_base_dir/oc_node_mode/oc_oc_dir 同一套路，
+	# 全部复用本文件已有的 uci_get()，不另起一套配置读取。
+	#
+	# 默认 <安装目录>/home/.openclaw（历史行为）；main.state_dir 非空时以它为准。
+	local d
+	d="$(uci_get main.state_dir '')"
+	[ -n "$d" ] || d="$(oc_base_dir)/home/.openclaw"
+	d="${d%/}"
+	[ -n "$d" ] || d="/"
+	printf '%s' "$d"
+}
+
 oc_home()     { printf '%s/home' "$(oc_base_dir)"; }
 
 _find_entry() {
@@ -108,8 +123,8 @@ _env_args() {
 }
 
 start_service() {
-	local base nodedir globaldir home entry node_bin
-	local port bind token json_port json_bind json_token cfg
+	local base nodedir globaldir home state_dir entry node_bin
+	local port bind token json_port json_bind json_token cfg envfile
 	local force_opt="" user_opt="" env_args=""
 
 	config_load "$OC_UCI"
@@ -120,9 +135,13 @@ start_service() {
 	nodedir="$(oc_node_dir)"
 	globaldir="$(oc_oc_dir)"
 	home="$(oc_home)"
+	# 数据根：默认 $home/.openclaw，main.state_dir 可指向别处（已有安装/大容量盘）。
+	# 必须用同一个值推导 cfg 与 .env —— 否则服务会从一个目录启动、从另一个目录
+	# 读 token，直接 Refuse to start。
+	state_dir="$(oc_state_dir)"
 	# 解释器路径跟随 node_mode（global 模式是 /usr/bin/node）
 	node_bin="$(oc_node_bin)"
-	cfg="${home}/.openclaw/openclaw.json"
+	cfg="${state_dir}/openclaw.json"
 
 	[ "$enabled" -eq 1 ] || return 0
 
