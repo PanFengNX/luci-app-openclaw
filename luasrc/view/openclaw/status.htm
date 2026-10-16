@@ -26,7 +26,7 @@ button:disabled{background:#aaa;cursor:not-allowed}
   <div class="oc-grid">
     <div class="oc-kv"><b>服务状态</b><span id="st-badge">加载中…</span></div>
     <div class="oc-kv"><b>OpenClaw 版本</b><span id="st-oc">-</span></div>
-    <div class="oc-kv"><b>Node.js</b><span id="st-node">-</span></div>
+    <div class="oc-kv"><b>Node.js</b><span id="st-node">-</span><span id="st-node-mode" class="oc-hint" style="display:block"></span></div>
     <div class="oc-kv"><b>端口 / 绑定</b><span id="st-port">-</span></div>
     <div class="oc-kv"><b>安装目录</b><span id="st-dir">-</span></div>
     <div class="oc-kv"><b>程序目录</b><span id="st-ocdir">-</span></div>
@@ -43,6 +43,10 @@ button:disabled{background:#aaa;cursor:not-allowed}
     <button id="btn-doctor-fix" class="oc-btn gray">doctor 一键修复</button>
     <button id="btn-repair" class="oc-btn" style="background:#1a7f37">一键修复</button>
     <button id="btn-refresh" class="oc-btn gray">刷新</button>
+  </div>
+  <div id="node-update" class="oc-hint" style="display:none;margin-top:10px">
+    <span id="node-update-text"></span>
+    <button id="btn-node-update" class="oc-btn" style="margin-left:8px">更新 Node</button>
   </div>
   <div id="diag-box" style="display:none;margin-top:12px">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
@@ -220,6 +224,13 @@ function loadInfo(){
     badge.appendChild(bspan);
     $('st-oc').textContent   = d.openclaw || '-';
     $('st-node').textContent = d.node || '-';
+    // 安装模式（private / global）由后端 info 的 node_mode 字段给出；
+    // 老版本后端可能没有该字段，缺失时留空即可，不影响其它信息。
+    var nmode = d.node_mode || '';
+    $('st-node-mode').textContent = nmode === 'global'
+      ? '安装模式：全局 global（/usr/lib/nodejs，全系统可用）'
+      : (nmode === 'private' ? '安装模式：私有 private（仅本插件使用）'
+                             : (nmode ? '安装模式：' + nmode : ''));
     $('st-port').textContent = (d.port||'-') + ' / ' + (d.bind||'-');
     $('st-dir').textContent  = d.base_dir || '-';
     $('st-ocdir').textContent = (d.openclaw_dir || '-')
@@ -251,6 +262,8 @@ function loadInfo(){
     if (d.oc_dir_custom && !state.ocdirTouched) $('in-ocdir-custom').value = d.openclaw_dir || '';
     // 记住服务端当前保存的配置值，用于在安装前判断"程序目录是否被改动"
     state.savedOcdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
+    // 当前版本已知，结合（可能更晚到达的）版本列表决定是否提示更新 Node
+    renderNodeUpdate();
   });
 }
 
@@ -344,6 +357,8 @@ function loadVersions(refresh){
       var o = document.createElement('option'); o.value='latest'; o.textContent='latest（在线获取失败，将使用最新稳定版）'; sel.appendChild(o);
     }
     renderNodeOptions();
+    // 版本列表可能比 info 更晚返回；两处都调用，先到的那次不满足条件时安静不显示。
+    renderNodeUpdate();
   });
 }
 
@@ -380,6 +395,85 @@ function renderNodeOptions(){
   hint.appendChild(document.createTextNode('　低于该要求的版本已被禁用。'));
 }
 
+// --------------------------------------------------- Node.js 更新提示
+// 复用已有 helpers：fields() 解析版本号，engineOK() 判断是否满足 engines.node。
+function cmpVer(a, b){
+  var x = fields(a), y = fields(b);
+  for (var i = 0; i < 3; i++){ if (x[i] !== y[i]) return x[i] > y[i] ? 1 : -1; }
+  return 0;
+}
+
+function nodeUpdateCandidate(){
+  var d = state.info;
+  if (!d) return null;
+  var cur = String(d.node || '').replace(/^v/, '');
+  if (!cur) return null;                       // 未装运行时：没有可比较的版本
+  if (!state.nodeList || !state.nodeList.length) return null;   // 离线/解析失败：安静降级
+
+  // 候选版本必须满足当前已装 OpenClaw 的 engines.node，否则提示了也装不上。
+  var engines = '';
+  var ocv = d.openclaw || '';
+  if (ocv){
+    state.ocList.forEach(function(x){ if (x.version === ocv) engines = x.engines || ''; });
+  }
+  // 已装版本不在列表里（被下架 / 列表是缓存）时退回当前所选版本的 engines，
+  // 拿不到就当作无要求，由后端 verify_node_version 兜底。
+  if (!engines) engines = currentEngines();
+
+  var best = null;
+  state.nodeList.forEach(function(n){
+    var num = String(n.num || n.version || '').replace(/^v/, '');
+    if (!num) return;
+    if (engines && !engineOK(num, engines)) return;
+    if (!best || cmpVer(num, best) > 0) best = num;
+  });
+  if (!best) return null;
+  if (cmpVer(best, cur) <= 0) return null;     // 已是最新
+  return { latest: best, current: cur, engines: engines };
+}
+
+function renderNodeUpdate(){
+  var box = $('node-update');
+  if (!box) return;
+  var c = nodeUpdateCandidate();
+  if (!c){ box.style.display = 'none'; return; }
+  // 服务端数据只进 textContent，绝不拼 HTML
+  $('node-update-text').textContent = '发现更新的 Node.js：v' + c.latest
+    + '（当前 v' + c.current + '）'
+    + (c.engines ? '，满足 OpenClaw 要求 ' + c.engines : '');
+  box.style.display = '';
+}
+
+function startNodeUpdate(){
+  var c = nodeUpdateCandidate();
+  if (!c){ renderNodeUpdate(); return; }
+  if (!confirm('将把 Node.js 更新到 v' + c.latest + '（当前 v' + c.current + '），'
+             + '并重新安装 OpenClaw 程序。过程中网关会短暂停止。继续？')) return;
+
+  // 复用现有安装端点：oc_version 传"当前已装版本"，避免顺带把 OpenClaw 升级。
+  var d = state.info || {};
+  var dir   = d.base_dir || $('in-dir-custom').value.trim() || $('in-dir').value;
+  var ocdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
+  // 只有形如 1.2.3 的正式版本才回填；预发布/带后缀的版本（如 1.2.3-dev）不可靠，
+  // 传下去会变成 npm 的固定版本约束，宁可回退到 latest。
+  var oc    = /^v?\d+\.\d+\.\d+$/.test(String(d.openclaw || '')) ? d.openclaw : 'latest';
+  if (!dir){ alert('未获取到安装目录，请先刷新状态'); return; }
+
+  $('btn-node-update').disabled = true;
+  $('in-log').textContent = '正在更新 Node.js 到 v' + c.latest + ' …（进度见下方安装日志）\n';
+  post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc,
+                      node_version: 'v' + c.latest }, function(r){
+    if (!r || r.ok === false){
+      $('btn-node-update').disabled = false;
+      $('in-log').textContent = 'Node.js 更新启动失败：'
+        + ((r && (r.data || r.error)) || '服务无响应，请重试') + '\n';
+      return;
+    }
+    $('in-log').textContent = 'Node.js 更新已启动，日志如下：\n';
+    startLogPoll();
+  });
+}
+
 function startLogPoll(){
   if (state.logTimer) clearInterval(state.logTimer);
   state.logTimer = setInterval(function(){
@@ -389,6 +483,8 @@ function startLogPoll(){
       if (d.state === 'done' || d.state === 'failed'){
         clearInterval(state.logTimer); state.logTimer = null;
         $('btn-install').disabled = false;
+        // 「更新 Node」复用同一轮流程，结束时也必须恢复，否则按钮永久禁用。
+        if ($('btn-node-update')) $('btn-node-update').disabled = false;
         $('in-log').textContent += '\n=== 安装' + (d.state==='done'?'完成':'失败') + ' ===';
         loadInfo(); loadMounts();
       }
@@ -453,6 +549,7 @@ $('btn-start').onclick   = function(){ post(API.service, {action:'start'},   fun
 $('btn-stop').onclick    = function(){ post(API.service, {action:'stop'},    function(){ setTimeout(loadInfo, 1500); }); };
 $('btn-restart').onclick = function(){ post(API.service, {action:'restart'}, function(){ setTimeout(loadInfo, 3000); }); };
 $('btn-refresh').onclick = function(){ loadInfo(); loadMounts(); };
+$('btn-node-update').onclick = startNodeUpdate;
 // ---- asynchronous diagnostics -------------------------------------------
 // doctor / repair run detached on the router; we poll for partial output so a
 // slow run never hits the HTTP request timeout.
