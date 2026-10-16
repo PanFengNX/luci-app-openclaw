@@ -37,63 +37,6 @@ def warn(msg):
     print(f"  warn {msg}")
 
 
-# --------------------------------------------------------------------------- ar
-def ar_parse(blob: bytes):
-    """Parse a Unix ar(5) archive -> [(name, payload), ...].
-
-    ipk 和 APK v2 都是 ar 归档，**校验容器本身**才是重点。早先这个脚本只把
-    文件当成连续的 gzip 段来拆，于是"三段裸拼接、没有 ar 头"的坏包也能全绿，
-    而 opkg 会直接报 file format is invalid or inconsistent。
-    """
-    if not blob.startswith(b"!<arch>\n"):
-        raise ValueError("missing ar magic '!<arch>\\n'")
-    out = []
-    off = 8
-    while off + 60 <= len(blob):
-        hdr = blob[off:off + 60]
-        if hdr[58:60] != b"\x60\n":
-            raise ValueError(f"bad member header magic at offset {off}: {hdr[58:60]!r}")
-        name = hdr[0:16].decode("ascii", "replace").rstrip()
-        if name.endswith("/"):          # GNU ar form
-            name = name[:-1]
-        try:
-            size = int(hdr[48:58].decode().strip())
-        except ValueError:
-            raise ValueError(f"bad size field at offset {off}: {hdr[48:58]!r}")
-        data = blob[off + 60: off + 60 + size]
-        if len(data) != size:
-            raise ValueError(f"truncated member {name!r}: want {size}, got {len(data)}")
-        out.append((name, data))
-        off += 60 + size
-        if size % 2:                    # members are 2-byte aligned
-            off += 1
-    if off != len(blob):
-        raise ValueError(f"trailing garbage: parsed {off} of {len(blob)} bytes")
-    if not out:
-        raise ValueError("archive has no members")
-    return out
-
-
-def check_ar(blob: bytes, rc: int):
-    """Shared ar-container assertion for ipk / APK v2.
-
-    Returns (rc, {name: payload}) — the dict is None when the container is broken,
-    so callers must bail out instead of falling back to gzip sniffing.
-    """
-    try:
-        ms = ar_parse(blob)
-    except ValueError as e:  # noqa: BLE001
-        return rc | bad(f"ar 容器无效：{e}"), None
-    names = [n for n, _ in ms]
-    ok(f"ar 容器 OK：{len(blob)} 字节，{len(ms)} 个成员 {names}")
-    if names[0] != "debian-binary":
-        rc |= bad(f"第一个成员应为 debian-binary，实际 {names[0]}")
-    for want in ("control.tar.gz", "data.tar.gz"):
-        if want not in names:
-            rc |= bad(f"缺少成员 {want}")
-    return rc, dict(ms)
-
-
 # --------------------------------------------------------------------------- v2
 def verify_v2(path: Path) -> int:
     """APK v2 = concatenated gzip segments (no ar container).

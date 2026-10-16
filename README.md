@@ -264,32 +264,6 @@ openclaw.sh backup-path
 openclaw.sh restore <文件名> [--no-safety]
 ```
 
-### 8. 打包格式修复：ipk / APK v2 的 ar 容器
-
-**问题**：`ipk` 与 APK v2 都是 **ar 归档**（`!<arch>\n` + 60 字节成员头 + 成员数据），
-但生成代码只把 `debian-binary` / `control.tar.gz` / `data.tar.gz` 三段内容**裸拼接**，
-完全没有写 ar 容器。文件以 `2.0\n` 开头，opkg（走 libarchive）无法识别为 ar 归档，
-报 `file format is invalid or inconsistent` / `Unrecognized archive format`，**装不上**。
-
-**为什么自检没发现**：`verify_apk.py` 把整个文件当作**连续的 gzip 段**来拆，
-只看里面的 tar 内容；格式判定还写成"开头是 `2.0\n` 就是 ipk、开头是 gzip 魔数就是 v2"——
-等于把"没有 ar 容器"当成了正常特征，于是坏包一路全绿。
-
-**修复**：
-
-- `build_apk.py` 新增 `ar_member()` / `build_ar_package()`，按 ar(5) 规范写
-  `!<arch>\n` 全局头、60 字节成员头（名字/时间/uid/gid/权限/大小/`` `\n ``）、
-  成员数据 2 字节对齐；ipk、APK v2、签名版三处都改为走它。
-- `verify_apk.py` 新增 `ar_parse()`，**严格校验容器**：magic、每个成员头的魔数、
-  size 字段、截断检测、尾部多余字节检测；格式判定改为"以 `!<arch>` 开头即为 ar 归档"，
-  再用 control 段里是 `.PKGINFO`（→ APK v2）还是 `./control`（→ ipk）自动区分，
-  不再依赖文件开头的"内容特征"。
-- 删掉因此失效的 `members()`（裸 gzip 拆解），避免以后又走回老路。
-
-opkg 侧确认：`libopkg/opkg_archive.c` 用 libarchive 的
-`archive_read_support_format_ar` 读外层、按名字取 `control.tar.gz` / `data.tar.gz`；
-libarchive 会把成员名的尾部空格或 `/` 规范化，所以这里用 Debian 惯用的空格填充形式即可。
-
 ### 8. iStoreOS 25.12.5 / OpenWrt 25.12 安装注意事项
 
 iStoreOS 25.12.x 基于 OpenWrt 25.12，包管理器是 **apk-tools v3**，请安装：
@@ -337,16 +311,23 @@ apk del luci-app-openclawmgr
 `build_apk.py` 会读取它们（`--version` / `--release` 仍可临时覆盖）。
 改版本只改 Makefile，不要在脚本默认值里另写一份。
 
-**可复现构建**：构建时使用 `SOURCE_DATE_EPOCH`
-（未设置则取 `root/` + `luasrc/` 下最新的 mtime），它会写入 APK v3 的 `builddate`、
-ipk control 的 `SourceDateEpoch:` 字段，以及所有 tar 成员的 mtime。
-因此**同样的源码构建两次，产物 hash 完全一致** —— 校验 MD5 才有意义。
+**可复现构建（有前提）**：构建时间戳统一取自 `SOURCE_DATE_EPOCH`，它会写入 APK v3 的
+`builddate`、ipk control 的 `SourceDateEpoch:` 字段，以及所有 tar 成员的 mtime。
+**只有同时满足下列条件**，同一份源码两次构建才会得到逐字节一致的产物：
+
+- **设置了 `SOURCE_DATE_EPOCH`**（固定时间戳）。未设置时会退化为取 `root/` + `luasrc/`
+  下最新的文件 mtime —— 该值随文件修改时间变化，**跨克隆、换机器、重新 checkout 都不成立**。
+- **不加 `--sign`**。签名走 RSA，`openssl genrsa` 每次都会生成新密钥，因此签名版
+  `-v2-signed.apk` 天然不可复现；要复现签名产物，必须复用已存在的 `dist/keys/`。
+- **相同的 Python / tarfile / zlib 版本**：tar 元数据与 gzip 压缩结果由它们决定。
+
+满足以上条件时，产物 hash 才稳定，校验 MD5 / SHA256 才有意义。
 
 ```sh
-# 固定时间戳（可复现）
+# 固定时间戳（可复现，推荐）
 SOURCE_DATE_EPOCH=1700000000 python3 scripts/build_apk.py
 
-# 用源码最新 mtime（默认行为）
+# 用源码最新 mtime（默认行为，跨环境不可复现）
 python3 scripts/build_apk.py
 ```
 

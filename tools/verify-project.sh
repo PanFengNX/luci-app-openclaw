@@ -235,8 +235,10 @@ else
 		# 就会出现"构建成功但找不到产物"的假失败。
 		MKVER="$(sed -n 's/^PKG_VERSION:=\(.*\)$/\1/p' Makefile | head -1)"
 		MKREL="$(sed -n 's/^PKG_RELEASE:=\(.*\)$/\1/p' Makefile | head -1)"
+		PKGNAME="$(sed -n 's/^PKG_NAME:=\(.*\)$/\1/p' Makefile | head -1)"
 		[ -n "$MKVER" ] || MKVER="1.0.0"
 		[ -n "$MKREL" ] || MKREL="1"
+		[ -n "$PKGNAME" ] || PKGNAME="luci-app-openclaw"
 		APKS=()
 		for f in \
 			"dist/luci-app-openclaw-${MKVER}-r${MKREL}.apk" \
@@ -259,7 +261,7 @@ else
 
 		# 产物也要查行尾：.run 是文本脚本，CRLF 会让它的 shebang 失效。
 		# （源码树的行尾由第 7 节的检查覆盖，但 dist/ 是构建产物，需要单独查。）
-		run_file="dist/${PKG_NAME}-${MKVER}.run"
+		run_file="dist/${PKGNAME}-${MKVER}.run"
 		if [ -f "$run_file" ]; then
 			if head -c 10 "$run_file" | grep -q $'\r'; then
 				bad "产物行尾：$run_file 含 CR（shebang 会失效）"

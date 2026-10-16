@@ -176,10 +176,14 @@ def build_control_tar(pkginfo: str, with_script: bool, sde: int = 0) -> bytes:
             ti.uname = ti.gname = "root"
             tf.addfile(ti, io.BytesIO(raw))
     out = buf.getvalue()
-    # cut the two 512-byte end records (abuild-tar --cut)
-    if out.endswith(b"\0" * 1024):
-        out = out[:-1024]
-    return out
+    # abuild-tar --cut: drop every trailing all-zero block.  tarfile pads the
+    # archive up to a 10240-byte blocking factor, so chopping the final 1024
+    # bytes alone still leaves thousands of zero bytes behind.  Scan block-wise
+    # from the end and stop at the first all-zero block (content blocks kept).
+    end = len(out)
+    while end >= 512 and out[end - 512:end] == b"\0" * 512:
+        end -= 512
+    return out[:end]
 
 
 def gz(data: bytes) -> bytes:
@@ -469,7 +473,7 @@ def main():
     # sha256 file
     sums = []
     for p in sorted(DIST.glob("*")):
-        if p.is_file() and p.suffix != ".sha256":
+        if p.is_file() and p.name != "sha256sums.txt":
             sums.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")
     (DIST / "sha256sums.txt").write_text("\n".join(sums) + "\n")
     log("dist/ ready")
