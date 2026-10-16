@@ -439,6 +439,80 @@ cmd_discover() {
 	printf '\n'
 }
 
+cmd_link() {
+	# link <dir> : 把本机已有的 OpenClaw 安装「关联」到本插件。
+	#
+	# 只改 UCI（main.base_dir / main.state_dir）指向它 —— 不复制文件、不建目录、
+	# 不 chown、不取锁，所以这里不调 require_safe：它校验的是「当前」的 base_dir
+	# 与端口，而 link 的目的恰恰是把它们指到别处。
+	#
+	# stdout 只允许出现 JSON（前端直接 JSON.parse）：日志一律走 oc_err（stderr），
+	# 与 cmd_discover 同一条约定 —— 谁在这里加一行 oc_info，谁的 JSON 就坏掉。
+	#
+	# 已知缺口：kind=ours 时若 UCI 里残留 main.state_dir / main.openclaw_dir，
+	# 它们优先于 base_dir 推导出的默认值，关联可能「报成功但不生效」。这里有意
+	# 不静默清空 —— 那会把用户自定义的数据目录改回一份旧副本，代价更大。
+	local dir="${2:-}" kind target="" base_dir="" state_dir=""
+
+	[ -n "$dir" ] || {
+		oc_err "link: 缺少目录参数"
+		printf '{"ok":false,"error":"缺少目录参数"}\n'
+		return 2
+	}
+	# 归一化：去掉尾随斜杠（"/" 单独保留，交给下面的探测/校验去拒绝）
+	dir="${dir%/}"
+	[ -n "$dir" ] || dir="/"
+
+	if [ ! -d "$dir" ]; then
+		oc_err "link: 目录不存在：$dir"
+		printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "目录不存在：$dir")"
+		return 2
+	fi
+
+	kind="$(oc_probe_openclaw_dir "$dir")"
+	case "$kind" in
+		ours)
+			# 本插件布局：base_dir 会被 oc_fix_perms 递归 chown/chmod，
+			# 数据默认在 <dir>/home/.openclaw
+			target="$dir"
+			base_dir="$dir"
+			;;
+		istore)
+			# iStoreOS luci-app-openclawmgr 布局：数据在 <dir>/data/.openclaw
+			target="$dir/data/.openclaw"
+			state_dir="$target"
+			;;
+		data)
+			# 只有数据：<dir>/.openclaw
+			target="$dir/.openclaw"
+			state_dir="$target"
+			;;
+		*)
+			oc_err "link: 不是有效的 OpenClaw 安装：$dir"
+			printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "不是有效的 OpenClaw 安装：$dir")"
+			return 2
+			;;
+	esac
+
+	# 要写入的路径都要过同一套校验：base_dir 会被递归 chown/chmod，
+	# state_dir 会被备份/还原整体移动或删除 —— 系统路径一律拒绝，且不写入。
+	if ! oc_validate_base_dir "$target"; then
+		oc_err "link: 拒绝关联不安全的路径：$target（需为绝对路径，且不能是 / /etc /tmp /var 等系统路径）"
+		printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "拒绝关联不安全的路径：$target")"
+		return 2
+	fi
+
+	case "$kind" in
+		ours) uci_set main.base_dir "$dir" ;;
+		*)    uci_set main.state_dir "$state_dir" ;;
+	esac
+	uci_commit
+
+	# 未设置的字段给空字符串，保持结构稳定
+	printf '{"ok":true,"kind":"%s","base_dir":"%s","state_dir":"%s"}\n' \
+		"$kind" "$(oc_json_str "$base_dir")" "$(oc_json_str "$state_dir")"
+}
+
 cmd_save() {
 	# save basic settings from uci-like key=value pairs
 	shift
@@ -601,6 +675,7 @@ case "${1:-}" in
 	run)           cmd_run "$@" ;;
 	mounts)        cmd_mounts ;;
 	discover)      cmd_discover ;;
+	link)          cmd_link "$@" ;;
 	save)          cmd_save "$@" ;;
 	port)          get_port; printf '\n' ;;
 	token)         get_token; printf '\n' ;;
@@ -646,6 +721,8 @@ Usage: openclaw.sh <command> [options]
   log [n] | tasklog [n]
   mounts                    candidate install targets with free space
   discover                  JSON array of existing OpenClaw installs / data dirs
+  link <dir>                point the config at an existing install (UCI only,
+                            nothing is copied: base_dir / state_dir per layout)
 
 Safety: install/start/restart/update/uninstall/repair refuse to run when the
 configured base_dir is a system path (/usr /etc /tmp /var /overlay /rom ...) or
