@@ -15,8 +15,8 @@ uci -q get openclaw.main >/dev/null 2>&1 || {
 [ -n "$(uci -q get openclaw.main.bind)" ]     || uci -q set openclaw.main.bind=lan
 [ -n "$(uci -q get openclaw.main.oc_version)" ]   || uci -q set openclaw.main.oc_version=latest
 [ -n "$(uci -q get openclaw.main.node_version)" ] || uci -q set openclaw.main.node_version=auto
-# Node.js 部署方式：private（默认，运行时在安装目录内）| global（/usr/lib/nodejs + /usr/bin 链接）
-[ -n "$(uci -q get openclaw.main.node_mode)" ] || uci -q set openclaw.main.node_mode=private
+# Node.js 部署方式：global（默认，/usr/lib/nodejs + /usr/bin 链接）| private（运行时在安装目录内）
+[ -n "$(uci -q get openclaw.main.node_mode)" ] || uci -q set openclaw.main.node_mode=global
 [ -n "$(uci -q get openclaw.main.preinstall_providers)" ] || uci -q set openclaw.main.preinstall_providers=deepseek
 
 # 数据根目录（openclaw.json / .env / 会话 / 工作区都在它下面）。

@@ -439,6 +439,16 @@ cmd_discover() {
 	printf '\n'
 }
 
+cmd_node_existing() {
+	# 只读：列出本机已有的 node 运行时（JSON 数组，每项 path/version/source/usable）。
+	# 探测逻辑在 lib.sh 的 oc_probe_node_runtimes()，这里只把结果原样吐到 stdout ——
+	# 与 cmd_discover 同一条约定：该函数的日志一律走 stderr（oc_warn / oc_err），
+	# 所以这里绝不能用 oc_info，否则会往 JSON 前面插一行日志，LuCI 的 JSON.parse 直接报错。
+	# 不取锁、不过 require_safe：纯只读，且它不写任何文件、不改 UCI。
+	oc_probe_node_runtimes
+	printf '\n'
+}
+
 cmd_link() {
 	# link <dir> : 把本机已有的 OpenClaw 安装「关联」到本插件。
 	#
@@ -1034,6 +1044,7 @@ case "${1:-}" in
 	run)           cmd_run "$@" ;;
 	mounts)        cmd_mounts ;;
 	discover)      cmd_discover ;;
+	node-existing) cmd_node_existing ;;
 	link)          cmd_link "$@" ;;
 	migrate)       cmd_migrate "$@" ;;
 	save)          cmd_save "$@" ;;
@@ -1052,7 +1063,7 @@ Usage: openclaw.sh <command> [options]
           [--openclaw-dir <dir>] [--node-mode <private|global>] [--no-start]
           --openclaw-dir relocates the program itself (default <base-dir>/openclaw)
           --node-mode global installs Node.js into /usr/lib/nodejs and links it
-          into /usr/bin (system-wide); private (default) keeps it under <base-dir>
+          into /usr/bin (system-wide, default); private keeps it under <base-dir>
   install-bg ...            same, detached; poll with install-status
   install-status            {"state":"running|done|failed"}
   update  [install options] reinstall / upgrade OpenClaw
@@ -1081,6 +1092,8 @@ Usage: openclaw.sh <command> [options]
   log [n] | tasklog [n]
   mounts                    candidate install targets with free space
   discover                  JSON array of existing OpenClaw installs / data dirs
+  node-existing             JSON array of node runtimes already on this device
+                            (path / version / source / usable; read-only, installs nothing)
   link <dir>                point the config at an existing install (UCI only,
                             nothing is copied: base_dir / state_dir per layout)
   migrate <dir>             copy an existing install into this plugin's default

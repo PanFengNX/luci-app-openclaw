@@ -719,6 +719,199 @@ EOF
 	printf ']'
 }
 
+# ---------------------------------------------------------------- node runtime probe
+# 「安装前先看看本机是不是已经有能用的 Node」的只读探测层。
+# 与上一节同一条约定：oc_probe_node_runtimes() 的输出会被直接当成 JSON 响应体，
+# 所以这一节里**只能往 stdout 写结果**，日志一律走 oc_warn / oc_err（stderr）。
+# 谁在这里加一行 oc_info，谁的 JSON 就坏掉。
+#
+# 候选是固定列表 + oc_mounts() 给出的挂载点（每个挂载点只看 5 个固定名字），
+# 绝不做全盘遍历：几 TB 的盘上 find / 会跑到天荒地老，而这个函数要给 UI 同步调用。
+#
+# source 取值（调用方据此区分「这份 node 是谁的」）：
+#   system         发行版带的 / 用户自己装的（/usr/bin、/usr/local/bin、/opt/...）
+#   plugin-global  本插件的全局目录 /usr/lib/nodejs（含指向它的 /usr/bin/node 链接）
+#   plugin-private 本插件 private 模式的运行时 <安装目录>/node
+#   mount          从挂载点上探测到的
+
+oc_node_engines_spec() {
+	# 当前 OpenClaw 的 engines.node 要求；取不到时无输出并返回 1。
+	# 离线解析：versions.sh 已把 npm 文档里的 engines 落盘成 oc-versions.tsv，
+	# 这里只读缓存 —— 探测必须是纯本地、快、无副作用，绝不发起网络请求。
+	local dir ocv e
+	dir="${OC_CACHE_DIR:-${OC_RUNDIR:-/tmp/.openclaw}/cache}"
+	ocv="$(uci_get main.oc_version latest)"
+	[ -n "$ocv" ] || ocv="latest"
+	case "$ocv" in
+		latest|stable|extended-stable|beta)
+			if [ -f "$dir/oc-tags.tsv" ]; then
+				ocv="$(awk -F'\t' -v x="$ocv" '$1==x{printf "%s", $2; exit}' "$dir/oc-tags.tsv" 2>/dev/null)"
+			fi
+			;;
+	esac
+	[ -n "$ocv" ] || return 1
+	[ -f "$dir/oc-versions.tsv" ] || return 1
+	e="$(awk -F'\t' -v x="$ocv" '$1==x{printf "%s", $2; exit}' "$dir/oc-versions.tsv" 2>/dev/null)"
+	[ -n "$e" ] || return 1
+	printf '%s' "$e"
+}
+
+oc_node_rt_candidates() {
+	# oc_node_rt_candidates [base_dir] -> 每行 "source<TAB>path"
+	local bd m free fst rel
+	bd="${1:-$(oc_base_dir)}"
+	printf 'system\t%s\n' /usr/bin/node
+	printf 'system\t%s\n' /usr/local/bin/node
+	printf 'system\t%s\n' /opt/bin/node
+	printf 'system\t%s\n' /opt/node/bin/node
+	printf 'plugin-global\t%s/bin/node\n' "$OC_NODE_GLOBAL_DIR"
+	if [ -n "$bd" ]; then
+		printf 'plugin-private\t%s/node/bin/node\n' "$bd"
+	fi
+	# 挂载点范围复用 oc_mounts()（与「关联本机已有安装」同一份口径），
+	# 每个挂载点只试下面几个固定名字。
+	while IFS="$(printf '\t')" read -r m free fst; do
+		[ -n "$m" ] || continue
+		for rel in bin/node node/bin/node nodejs/bin/node usr/bin/node openclaw/node/bin/node; do
+			printf 'mount\t%s/%s\n' "$m" "$rel"
+		done
+	done <<EOF
+$(oc_mounts)
+EOF
+}
+
+oc_node_rt_num() {
+	# oc_node_rt_num <"v24.16.0-xxx"> -> "24.16.0"；解析不出数字版本时返回 1。
+	# 只做"去掉非数字尾巴"这一件事，比较交给 ver_cmp/engines_match，不另写一套 semver。
+	local nv="${1#v}"
+	case "$nv" in
+		*[!0-9.]*) nv="$(printf '%s' "$nv" | sed 's/[^0-9.].*$//')" ;;
+	esac
+	case "$nv" in
+		*[0-9]*) ;;
+		*) return 1 ;;
+	esac
+	printf '%s' "$nv"
+}
+
+oc_node_rt_perm_ok() {
+	# oc_node_rt_perm_ok <real-path> -> 0 = 允许执行它
+	# 候选里包含挂载盘上的 node（U 盘 / 外置盘常被挂成普通用户可写），而这个探测会被
+	# install.sh 以 root 调用 —— 以 root 执行一个"谁都改得动"的二进制等于把 root 交出去。
+	# 所以组/他人可写的候选一律不执行（只报 usable=false）。
+	# 取不到 mode 时不做限制（fail open）：fail closed 会让没有 `stat -c` 的极端
+	# busybox 上整个探测失效，代价比这点残余风险更大。
+	local m g o
+	m="$(stat -c %a "$1" 2>/dev/null)"
+	case "$m" in ''|*[!0-7]*) return 0 ;; esac
+	# 去掉 setuid/setgid/sticky 位，只留 rwx 三位
+	while [ "${#m}" -gt 3 ]; do m="${m#?}"; done
+	o="${m#??}"            # 第 3 位：other
+	g="${m#?}"; g="${g%?}" # 第 2 位：group
+	case "$g" in 2|3|6|7) return 1 ;; esac
+	case "$o" in 2|3|6|7) return 1 ;; esac
+	return 0
+}
+
+oc_node_rt_version() {
+	# oc_node_rt_version <node-binary> -> "vX.Y.Z"（跑不出来时无输出）
+	# timeout 封顶：候选里可能混进坏链接或自解压脚本，绝不能让探测挂住。
+	local b="$1" v
+	if command -v timeout >/dev/null 2>&1; then
+		v="$(timeout 5 "$b" -v 2>/dev/null)"
+	else
+		v="$("$b" -v 2>/dev/null)"
+	fi
+	printf '%s' "$v"
+}
+
+oc_node_rt_probe() {
+	# oc_node_rt_probe [engines_spec] [base_dir]
+	#   -> 每行 "source<TAB>path<TAB>version<TAB>usable"
+	# 内部共用接口：JSON 版（oc_probe_node_runtimes）和 install.sh 的提示版
+	# （oc_node_runtime_other_usable）都走这里，免得在 shell 里解析 JSON。
+	local spec="${1:-}" bd="${2:-}" src p v nv usable real seen
+	[ -n "$bd" ] || bd="$(oc_base_dir)"
+	seen=""
+	while IFS="$(printf '\t')" read -r src p; do
+		[ -n "$p" ] || continue
+		# 同一个文件可能被多条候选命中（显式路径 / 挂载点 / 符号链接），按路径去重
+		case "$seen" in *"|$p|"*) continue ;; esac
+		seen="$seen|$p|"
+		[ -e "$p" ] || continue
+		real="$(readlink -f "$p" 2>/dev/null)" || real=""
+		[ -n "$real" ] || real="$p"
+		case "$seen" in *"|$real|"*) continue ;; esac
+		seen="$seen|$real|"
+		# 解析后落在本插件全局目录里的（典型：我们建的 /usr/bin/node 链接）归为
+		# plugin-global —— 调用方据此判断"这是我自己的运行时，不是别人的"。
+		case "$real" in "$OC_NODE_GLOBAL_DIR"/*) src="plugin-global" ;; esac
+		v=""
+		usable=false
+		if [ -x "$p" ] && oc_node_rt_perm_ok "$real"; then
+			v="$(oc_node_rt_version "$p")"
+		fi
+		if [ -n "$v" ]; then
+			nv="$(oc_node_rt_num "$v")" || nv=""
+			if [ -n "$nv" ]; then
+				if [ -n "$spec" ]; then
+					engines_match "$nv" "$spec" && usable=true
+				else
+					# engines 未知（缓存没建起来 / 离线）：只能按"跑得起来"判定，
+					# 由调用方决定要不要采信（oc_probe_node_runtimes 会 warn）
+					usable=true
+				fi
+			fi
+		fi
+		printf '%s\t%s\t%s\t%s\n' "$src" "$p" "$v" "$usable"
+	done <<EOF
+$(oc_node_rt_candidates "$bd")
+EOF
+}
+
+oc_probe_node_runtimes() {
+	# oc_probe_node_runtimes [engines_spec] [base_dir] -> JSON 数组，每项
+	#   {"path":"..","version":"..","source":"..","usable":true|false}
+	# 只往 stdout 写 JSON；日志走 stderr（oc_warn / oc_err）。
+	local spec="${1:-}" bd="${2:-}" src p v usable first=1
+	[ -n "$bd" ] || bd="$(oc_base_dir)"
+	if [ -z "$spec" ]; then
+		spec="$(oc_node_engines_spec)"
+		[ -n "$spec" ] || oc_warn "无法确定 OpenClaw 的 engines.node（版本缓存未生成或设备离线），本次只按「可执行 + 能跑出 -v」判定 node 是否可用"
+	fi
+	printf '['
+	while IFS="$(printf '\t')" read -r src p v usable; do
+		[ -n "$p" ] || continue
+		[ "$first" = "1" ] || printf ','
+		first=0
+		# source 只可能是上面四个固定词，path/version 是外部数据，必须转义
+		printf '{"path":"%s","version":"%s","source":"%s","usable":%s}' \
+			"$(oc_json_str "$p")" "$(oc_json_str "$v")" "$src" "$usable"
+	done <<EOF
+$(oc_node_rt_probe "$spec" "$bd")
+EOF
+	printf ']'
+}
+
+oc_node_runtime_other_usable() {
+	# oc_node_runtime_other_usable [engines_spec] [base_dir]
+	#   -> 打印第一个「可用、且不属于本插件全局目录」的运行时 "path<TAB>version"；
+	#      没有时返回 1。
+	# 给 install.sh 的安装日志提示用（在 shell 里解析 JSON 太脆，所以走内部接口）。
+	local spec="${1:-}" bd="${2:-}" src p v usable
+	[ -n "$bd" ] || bd="$(oc_base_dir)"
+	[ -n "$spec" ] || spec="$(oc_node_engines_spec)"
+	while IFS="$(printf '\t')" read -r src p v usable; do
+		[ "$usable" = "true" ] || continue
+		[ "$src" = "plugin-global" ] && continue
+		printf '%s\t%s\n' "$p" "$v"
+		return 0
+	done <<EOF
+$(oc_node_rt_probe "$spec" "$bd")
+EOF
+	return 1
+}
+
 oc_rand_hex() {
 	# 32 bytes hex
 	if [ -r /dev/urandom ]; then

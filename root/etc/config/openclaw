@@ -10,7 +10,11 @@ config main 'main'
 	option bind 'lan'
 	option oc_version 'latest'
 	option node_version 'auto'
-	option node_mode 'private'
+	# Node.js 部署方式（默认 global）：
+	#   global  解压到 /usr/lib/nodejs 并链接到 /usr/bin/node|npm|npx，全系统可用
+	#   private 解压到 <安装目录>/node，只有本插件使用，不占用 overlay、不动系统目录
+	# 空间不足时安装会明确报错并提示改用 private（global 落在 overlay 上，装不下会连带影响配置落盘）。
+	option node_mode 'global'
 	option npm_registry ''
 	option node_mirror ''
 	option http_proxy ''

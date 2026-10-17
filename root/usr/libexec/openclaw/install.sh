@@ -33,8 +33,8 @@ Usage: install.sh [--oc-version <ver|latest|extended-stable|beta>]
                   [--base-dir <path>] [--openclaw-dir <path>]
                   [--force] [--no-start]
 
-  --node-mode private  Node.js 解压到 <安装目录>/node（默认，不动系统目录）
-  --node-mode global   解压到 /usr/lib/nodejs 并链接到 /usr/bin/node|npm|npx
+  --node-mode global   解压到 /usr/lib/nodejs 并链接到 /usr/bin/node|npm|npx（默认）
+  --node-mode private  Node.js 解压到 <安装目录>/node（不动系统目录）
 EOF
 }
 
