@@ -1054,6 +1054,495 @@ cmd_restore() {
 	sh "$OC_BACKUP" restore "$@"
 }
 
+# ---------------------------------------------------------------- export
+# 诊断导出：把排查问题需要的日志 / 系统信息 / 配置打成一个 tar.gz。
+#
+# 只读操作，不取锁。stdout 只允许一行 JSON（cmd_export 末尾），
+# 所有进度与告警一律走 stderr —— lib.sh 的 oc_info() 是写 stdout 的，
+# 在这条路径上用一次就会把 JSON 契约破坏掉。
+#
+# 脱敏是本功能的核心。除了对 openclaw.json / .env / uci show 做结构化脱敏，
+# 还会把提取到的真实密钥值对日志、doctor 输出再做一次全文替换：日志里回显的
+# token、doctor 打印的配置摘要、进程列表里的 argv 都属于同一批秘密。
+export_note() { printf '%s [INFO] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
+
+export_fail() {
+	printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "${1:-unknown error}")"
+	return 1
+}
+
+export_timeout() {
+	# export_timeout <seconds> <cmd...>
+	# busybox 的 timeout 在部分老版本里没有；缺失时退化为直接执行。
+	local t="$1"; shift
+	if command -v timeout >/dev/null 2>&1; then
+		timeout "$t" "$@"
+	else
+		"$@"
+	fi
+}
+
+export_stage_cleanup() {
+	# 只删自己建的暂存目录：先删文件再自底向上 rmdir（不新增递归强制删除）
+	if [ -n "${EXPORT_STAGE:-}" ] && [ -d "$EXPORT_STAGE" ]; then
+		find "$EXPORT_STAGE" -type f -exec rm -f {} \; 2>/dev/null
+		find "$EXPORT_STAGE" -depth -type d -exec rmdir {} \; 2>/dev/null
+	fi
+	EXPORT_STAGE=""
+	[ -n "${EXPORT_SECRETS:-}" ] && rm -f "$EXPORT_SECRETS" "$EXPORT_SECRETS.uniq" 2>/dev/null
+	[ -n "${EXPORT_TMPERR:-}" ] && rm -f "$EXPORT_TMPERR" 2>/dev/null
+	EXPORT_SECRETS=""
+	EXPORT_TMPERR=""
+	return 0
+}
+
+export_redact_env() {
+	# export_redact_env <src> <dst> <secrets>
+	#
+	# 逐行只输出 NAME=***：
+	#   * 注释行 / 空行直接丢弃 —— 注释里同样可能贴过密钥
+	#   * 只按第一个 = 切分，值里再出现 = 不影响变量名
+	#   * export NAME=... / CRLF / 带引号的值都能处理
+	#   * 变量名不合法的行一律丢弃，绝不原样输出
+	# 同时把"名字看起来是密钥"的真实值记到密钥表，供后续全文脱敏使用。
+	local src="$1" dst="$2" sec="$3"
+	if [ ! -f "$src" ]; then
+		: >"$dst"
+		return 0
+	fi
+	awk -v sec="$sec" -v sq="'" '
+		function add(name, v) {
+			gsub(/^[ \t]+/, "", v); gsub(/[ \t]+$/, "", v)
+			if (length(v) < 6) return
+			# 只收集密钥类变量：把 BASE_URL 之类也当密钥全文替换会毁掉诊断信息
+			if (toupper(name) ~ /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|CREDENTIAL)/)
+				print v >> sec
+		}
+		{
+			line = $0
+			sub(/\r$/, "", line)
+			if (line ~ /^[ \t]*$/) next
+			if (line ~ /^[ \t]*#/) next
+			rest = line
+			sub(/^[ \t]+/, "", rest)
+			prefix = ""
+			if (rest ~ /^export[ \t]+/) {
+				prefix = "export "
+				sub(/^export[ \t]+/, "", rest)
+			}
+			eq = index(rest, "=")
+			if (eq <= 1) next
+			name = substr(rest, 1, eq - 1)
+			gsub(/[ \t]+$/, "", name)
+			if (name !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next
+			v = substr(rest, eq + 1)
+			c1 = substr(v, 1, 1); c2 = substr(v, length(v), 1)
+			if (length(v) >= 2 && ((c1 == "\"" && c2 == "\"") || (c1 == sq && c2 == sq)))
+				v = substr(v, 2, length(v) - 2)
+			add(name, v)
+			print prefix name "=***"
+		}
+	' "$src" >"$dst"
+}
+
+export_redact_json() {
+	# export_redact_json <src> <dst> <secrets>
+	#
+	# 逐行重写 "key": "value" 形式的键值对。键名归一化（小写、去掉 _ -）后
+	# 命中敏感词才替换，所以 "mode": "token" 不会被误伤，而 apiKey / api_key /
+	# authToken / refresh_token / clientSecret 都能覆盖。
+	# jsonfilter 只能查询不能改写，sed 在 BRE 下做不了大小写不敏感的键名匹配；
+	# 这里用 busybox 自带的 awk，没有引入新依赖。
+	local src="$1" dst="$2" sec="$3"
+	if [ ! -f "$src" ]; then
+		return 1
+	fi
+	awk -v sec="$sec" '
+		function sensitive(k,   x) {
+			x = tolower(k)
+			gsub(/[_-]/, "", x)
+			if (x == "key" || x == "apikey" || x == "token" || x == "secret" ||
+			    x == "password" || x == "passwd" || x == "authorization" ||
+			    x == "credential" || x == "credentials" || x == "privatekey" ||
+			    x == "accesskey" || x == "secretkey" || x == "bearer" ||
+			    x ~ /token$/ || x ~ /secret$/ || x ~ /apikey$/ ||
+			    x ~ /password$/ || x ~ /credential$/)
+				return 1
+			return 0
+		}
+		function add(v) {
+			if (length(v) >= 6) print v >> sec
+		}
+		{
+			line = $0
+			out = ""
+			while (match(line, /"[^"]*"[ \t]*:[ \t]*"[^"]*"/)) {
+				pair = substr(line, RSTART, RLENGTH)
+				out = out substr(line, 1, RSTART - 1)
+				line = substr(line, RSTART + RLENGTH)
+				c = index(pair, ":")
+				key = substr(pair, 1, c - 1)
+				val = substr(pair, c + 1)
+				kk = key; gsub(/^[ \t]*"/, "", kk); gsub(/"[ \t]*$/, "", kk)
+				vv = val; gsub(/^[ \t]*"/, "", vv); gsub(/"[ \t]*$/, "", vv)
+				if (sensitive(kk)) {
+					add(vv)
+					out = out key ": \"***\""
+				} else {
+					out = out pair
+				}
+			}
+			print out line
+		}
+	' "$src" >"$dst"
+}
+
+export_redact_uci() {
+	# export_redact_uci <dst> <secrets>   (uci show 的输出从 stdin 读)
+	# 只替换 option 名命中敏感词的值；其余行原样保留。
+	local dst="$1" sec="$2"
+	awk -v sec="$sec" -v sq="'" '
+		function sensitive(k,   x) {
+			x = tolower(k)
+			gsub(/[_-]/, "", x)
+			if (x == "key" || x == "apikey" || x == "token" || x == "secret" ||
+			    x == "password" || x == "passwd" || x == "authorization" ||
+			    x == "credential" || x == "credentials" || x == "privatekey" ||
+			    x == "accesskey" || x == "secretkey" || x == "bearer" ||
+			    x ~ /token$/ || x ~ /secret$/ || x ~ /apikey$/ ||
+			    x ~ /password$/ || x ~ /credential$/)
+				return 1
+			return 0
+		}
+		function add(v) {
+			if (length(v) >= 6) print v >> sec
+		}
+		{
+			line = $0
+			eq = index(line, "=")
+			if (eq > 0) {
+				left = substr(line, 1, eq - 1)
+				val = substr(line, eq + 1)
+				k = left
+				sub(/^.*\./, "", k)
+				v = val
+				if (length(v) >= 2 && substr(v, 1, 1) == sq && substr(v, length(v), 1) == sq)
+					v = substr(v, 2, length(v) - 2)
+				if (sensitive(k)) {
+					add(v)
+					print left "=" sq "***" sq
+					next
+				}
+			}
+			print line
+		}
+	' >"$dst"
+}
+
+export_scrub_file() {
+	# export_scrub_file <file> <secrets>
+	# 用真实密钥值做全文替换（长值优先），再兜底常见密钥形态与 URL 凭据。
+	local f="$1" sec="$2" tmp
+	[ -f "$f" ] || return 0
+	tmp="$f.scrub.$$"
+	awk -v secfile="$sec" '
+		BEGIN {
+			n = 0
+			if (secfile != "") {
+				while ((getline v < secfile) > 0) {
+					if (length(v) >= 6) { n++; s[n] = v }
+				}
+				close(secfile)
+			}
+			for (i = 1; i <= n; i++)
+				for (j = i + 1; j <= n; j++)
+					if (length(s[j]) > length(s[i])) { t = s[i]; s[i] = s[j]; s[j] = t }
+		}
+		{
+			line = $0
+			for (i = 1; i <= n; i++) {
+				v = s[i]
+				p = index(line, v)
+				while (p > 0) {
+					line = substr(line, 1, p - 1) "***" substr(line, p + length(v))
+					p = index(line, v)
+				}
+			}
+			while (match(line, /sk-[A-Za-z0-9_-]+/)) {
+				if (RLENGTH < 12) break
+				line = substr(line, 1, RSTART - 1) "sk-***" substr(line, RSTART + RLENGTH)
+			}
+			while (match(line, /[Bb]earer[ \t]+[A-Za-z0-9._~+\/-]+/)) {
+				if (RLENGTH < 20) break
+				line = substr(line, 1, RSTART - 1) "Bearer ***" substr(line, RSTART + RLENGTH)
+			}
+			gsub(/\/\/[^\/@ \t]+:[^\/@ \t]+@/, "//***@", line)
+			print line
+		}
+	' "$f" >"$tmp" 2>/dev/null && mv "$tmp" "$f"
+	return 0
+}
+
+export_verify_stage() {
+	# export_verify_stage <stage> <secrets>
+	# 打包前自证：拿真实密钥值反向扫描暂存区，任何一个还能匹配到就中止。
+	# 另外单独校验 .env 输出只剩 NAME=***。
+	local stage="$1" sec="$2" v n=0 leak=0
+	if [ -f "$stage/config/env.txt" ]; then
+		if ! awk 'length($0) > 0 && $0 !~ /^(export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=\*\*\*$/ { bad = 1 } END { exit bad ? 1 : 0 }' "$stage/config/env.txt"; then
+			export_note "脱敏自检失败：config/env.txt 中存在未脱敏的行"
+			return 1
+		fi
+	fi
+	[ -f "$sec" ] || return 0
+	sort -u "$sec" >"$sec.uniq" 2>/dev/null || cp "$sec" "$sec.uniq" 2>/dev/null || return 1
+	while IFS= read -r v; do
+		[ -n "$v" ] || continue
+		[ "${#v}" -ge 6 ] || continue
+		n=$((n + 1))
+		if grep -rFq -e "$v" "$stage" 2>/dev/null; then
+			leak=$((leak + 1))
+			export_note "脱敏自检：打包内容中仍能匹配到第 $n 个密钥值"
+		fi
+	done <"$sec.uniq"
+	rm -f "$sec.uniq" 2>/dev/null
+	if [ "$leak" -ne 0 ]; then
+		return 1
+	fi
+	export_note "脱敏自检通过：$n 个已知密钥值均未出现在打包内容中"
+	return 0
+}
+
+cmd_export() {
+	# export [输出路径]
+	local out ts stage outdir sec terr size mode
+	local base state ocdir home envf envf2 f
+
+	shift
+	if [ "$#" -gt 1 ]; then
+		export_fail "用法：openclaw.sh export [输出路径]"
+		return 1
+	fi
+	out="${1:-}"
+	case "$out" in
+		-*) export_fail "未知参数：$out"; return 1 ;;
+	esac
+	if [ -z "$out" ]; then
+		ts="$(date +%Y%m%d-%H%M%S)"
+		out="/tmp/luci-app-openclaw-diag-${ts}.tar.gz"
+	fi
+	case "$out" in
+		/*) ;;
+		*) out="$(pwd)/$out" ;;
+	esac
+	case "$out" in
+		*/) export_fail "输出路径不能是目录：$out"; return 1 ;;
+	esac
+	# 不跟随符号链接、不覆盖已有文件：tar 以 root 打开目标，预置的链接
+	# 会把归档写到任意位置。
+	if [ -e "$out" ] || [ -L "$out" ]; then
+		export_fail "输出文件已存在：$out"
+		return 1
+	fi
+	outdir="$(dirname "$out")"
+	if [ ! -d "$outdir" ]; then
+		export_fail "输出目录不存在：$outdir"
+		return 1
+	fi
+	if [ ! -w "$outdir" ]; then
+		export_fail "输出目录不可写：$outdir"
+		return 1
+	fi
+	command -v tar >/dev/null 2>&1 || { export_fail "缺少 tar，无法打包"; return 1; }
+
+	umask 077
+
+	base="$(oc_base_dir)"
+	state="$(oc_state_dir)"
+	ocdir="$(oc_oc_dir)"
+	home="$(oc_home_dir)"
+
+	# 暂存目录放在输出文件同目录：避免把大日志先复制进 /tmp（tmpfs）吃内存，
+	# 也保证 tar 的目标与暂存处于同一个文件系统。
+	stage="$outdir/.openclaw-diag.$$"
+	EXPORT_STAGE="$stage"
+	trap 'export_stage_cleanup' EXIT
+	trap 'export_stage_cleanup; exit 130' INT TERM HUP
+	if ! mkdir -m 700 "$stage" 2>/dev/null; then
+		EXPORT_STAGE=""
+		export_fail "无法创建暂存目录：$stage"
+		return 1
+	fi
+	if ! mkdir -p "$stage/logs" "$stage/system" "$stage/config" 2>/dev/null; then
+		export_stage_cleanup
+		export_fail "无法创建暂存子目录"
+		return 1
+	fi
+
+	# 密钥表：只在本进程内使用，放在私有 rundir（700），不参与打包。
+	sec="$OC_RUNDIR/diag-secrets.$$"
+	EXPORT_SECRETS="$sec"
+	if ! : >"$sec" 2>/dev/null; then
+		sec="$stage/.secrets"
+		EXPORT_SECRETS="$sec"
+		: >"$sec" 2>/dev/null || true
+	fi
+	chmod 600 "$sec" 2>/dev/null
+
+	export_note "收集元信息与配置"
+	{
+		printf 'created=%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+		printf 'plugin=luci-app-openclaw\n'
+		printf 'hostname=%s\n' "$(uname -n 2>/dev/null)"
+		printf 'system=%s\n' "$(oc_sys_version 2>/dev/null)"
+		printf 'arch=%s\n' "$(oc_arch 2>/dev/null)"
+		printf 'base_dir=%s\n' "$base"
+		printf 'openclaw_dir=%s\n' "$ocdir"
+		printf 'state_dir=%s\n' "$state"
+		printf 'log_file=%s\n' "$OC_LOGFILE"
+		printf 'task_log=%s\n' "$OC_TASKLOG"
+		printf 'install_log=%s\n' "$OC_INSTALLLOG"
+	} >"$stage/meta.txt"
+
+	# uci：完整输出，按 option 名脱敏
+	if command -v uci >/dev/null 2>&1; then
+		uci show openclaw 2>/dev/null | export_redact_uci "$stage/config/uci-show.txt" "$sec"
+	else
+		printf '# uci 不可用\n' >"$stage/config/uci-show.txt"
+	fi
+
+	# openclaw.json
+	if [ -f "$(oc_conf)" ]; then
+		if ! export_redact_json "$(oc_conf)" "$stage/config/openclaw.json" "$sec"; then
+			printf '# 读取 %s 失败\n' "$(oc_conf)" >"$stage/config/openclaw.json"
+		fi
+	else
+		printf '# 不存在：%s\n' "$(oc_conf)" >"$stage/config/openclaw.json"
+	fi
+
+	# .env：models.sh 写的是 $HOME/.openclaw/.env（HOME=oc_home_dir），
+	# lib.sh 的 oc_env_file 用的是 $(oc_data_dir)/.env。state_dir 被覆盖时
+	# 两者不是同一个文件，所以两个位置都收，绝不漏掉真正的那份。
+	envf="$(oc_data_dir)/.env"
+	export_redact_env "$envf" "$stage/config/env.txt" "$sec"
+	envf2="$home/.openclaw/.env"
+	if [ "$envf2" != "$envf" ] && [ -f "$envf2" ]; then
+		export_redact_env "$envf2" "$stage/config/env-home.txt" "$sec"
+	fi
+
+	export_note "收集日志"
+	if [ -f "$OC_LOGFILE" ]; then
+		cat "$OC_LOGFILE" >"$stage/logs/openclaw.log" 2>/dev/null || : >"$stage/logs/openclaw.log"
+	else
+		printf '# 不存在：%s\n' "$OC_LOGFILE" >"$stage/logs/openclaw.log"
+	fi
+	if [ -f "$OC_TASKLOG" ]; then
+		cat "$OC_TASKLOG" >"$stage/logs/openclaw-task.log" 2>/dev/null || : >"$stage/logs/openclaw-task.log"
+	else
+		printf '# 不存在：%s\n' "$OC_TASKLOG" >"$stage/logs/openclaw-task.log"
+	fi
+	if [ -f "$OC_INSTALLLOG" ]; then
+		cat "$OC_INSTALLLOG" >"$stage/logs/openclaw-install.log" 2>/dev/null || : >"$stage/logs/openclaw-install.log"
+	fi
+
+	export_note "收集系统信息"
+	uname -a >"$stage/system/uname.txt" 2>&1 || true
+	df -h >"$stage/system/df.txt" 2>&1 || true
+	if command -v free >/dev/null 2>&1; then
+		free >"$stage/system/free.txt" 2>&1 || true
+	else
+		printf '(free 不可用)\n' >"$stage/system/free.txt"
+	fi
+	if [ -r /proc/mounts ]; then
+		# 用 index() 做字面匹配：base_dir 里出现正则元字符时不会失效。
+		# 长度为 1 或 "/" 的路径不参与，否则会把所有挂载都打进来。
+		awk -v a="$base" -v b="$state" -v c="$ocdir" -v d="$home" '
+			{
+				hit = 0
+				if (length(a) > 1 && index($0, a)) hit = 1
+				if (!hit && length(b) > 1 && index($0, b)) hit = 1
+				if (!hit && length(c) > 1 && index($0, c)) hit = 1
+				if (!hit && length(d) > 1 && index($0, d)) hit = 1
+				if (!hit && index(tolower($0), "openclaw")) hit = 1
+				if (hit) print
+			}' /proc/mounts >"$stage/system/mounts.txt" 2>/dev/null || true
+	else
+		printf '(/proc/mounts 不可用)\n' >"$stage/system/mounts.txt"
+	fi
+	{
+		printf 'openclaw --version:\n'
+		if installed; then
+			( HOME="$home" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+				export_timeout 30 "$(oc_oc_bin)" --version 2>&1 | head -n 5 )
+		else
+			printf '(未安装)\n'
+		fi
+		printf '\nnode -v:\n'
+		if [ -x "$(oc_node_bin)" ]; then
+			export_timeout 15 "$(oc_node_bin)" -v 2>&1
+		elif command -v node >/dev/null 2>&1; then
+			export_timeout 15 node -v 2>&1
+		else
+			printf '(未找到 node)\n'
+		fi
+	} >"$stage/system/versions.txt" 2>&1
+	{
+		if ps w >/dev/null 2>&1; then ps w 2>/dev/null; else ps 2>/dev/null; fi
+	} | awk 'NR == 1 || index(tolower($0), "openclaw")' >"$stage/system/processes.txt" 2>/dev/null || true
+
+	export_note "运行 doctor（timeout 120s，失败不影响打包）"
+	{
+		if installed; then
+			( HOME="$home" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+				export_timeout 120 "$(oc_oc_bin)" doctor 2>&1 )
+		else
+			printf '(openclaw 未安装，跳过 doctor)\n'
+		fi
+	} >"$stage/doctor.txt" 2>&1 || true
+
+	# 值级二次脱敏：日志/doctor/uci/进程列表里回显的密钥一并清掉
+	export_note "脱敏与自检"
+	for f in "$stage/logs/openclaw.log" "$stage/logs/openclaw-task.log" \
+		"$stage/logs/openclaw-install.log" "$stage/config/openclaw.json" \
+		"$stage/config/uci-show.txt" "$stage/doctor.txt" "$stage/meta.txt" \
+		"$stage/system/uname.txt" "$stage/system/df.txt" "$stage/system/free.txt" \
+		"$stage/system/mounts.txt" "$stage/system/versions.txt" \
+		"$stage/system/processes.txt"; do
+		export_scrub_file "$f" "$sec"
+	done
+
+	if ! export_verify_stage "$stage" "$sec"; then
+		export_stage_cleanup
+		export_fail "脱敏自检失败：检测到明文密钥，已中止导出"
+		return 1
+	fi
+	# 密钥表绝不能进归档（正常情况下它在 rundir，这里兜底）
+	rm -f "$stage/.secrets" 2>/dev/null
+
+	EXPORT_TMPERR="$OC_RUNDIR/diag-tar.$$.err"
+	if ! tar -czf "$out" -C "$stage" . 2>"$EXPORT_TMPERR"; then
+		terr="$(head -n 1 "$EXPORT_TMPERR" 2>/dev/null)"
+		export_stage_cleanup
+		rm -f "$out" 2>/dev/null
+		export_fail "打包失败：${terr:-tar 返回非 0}"
+		return 1
+	fi
+
+	chmod 600 "$out" 2>/dev/null
+	mode="$(stat -c %a "$out" 2>/dev/null)"
+	case "$mode" in
+		600|400) ;;
+		'')  export_note "警告：无法确认归档权限，请手动执行 chmod 600 $out" ;;
+		*)   export_note "警告：归档权限为 $mode（期望 600），请手动执行 chmod 600 $out" ;;
+	esac
+	size="$(wc -c <"$out" 2>/dev/null | tr -d ' ')"
+	case "$size" in ''|*[!0-9]*) size=0 ;; esac
+
+	export_stage_cleanup
+	printf '{"ok":true,"path":"%s","size":%s}\n' "$(oc_json_str "$out")" "$size"
+	return 0
+}
+
 case "${1:-}" in
 	status)        cmd_status ;;
 	start)         cmd_start ;;
@@ -1080,6 +1569,7 @@ case "${1:-}" in
 	backup-delete) cmd_backup_delete "$@" ;;
 	backup-path)   sh "$OC_BACKUP" path ;;
 	restore)       cmd_restore "$@" ;;
+	export)        cmd_export "$@" ;;
 	run)           cmd_run "$@" ;;
 	mounts)        cmd_mounts ;;
 	discover)      cmd_discover ;;
@@ -1129,6 +1619,9 @@ Usage: openclaw.sh <command> [options]
   backup-path               print the backup directory
   restore <file> [--no-safety]   validate, snapshot, then restore
   log [n] | tasklog [n]
+  export [path]             diagnostic bundle: full logs + system info + redacted
+                            openclaw.json / .env / uci (default
+                            /tmp/luci-app-openclaw-diag-<ts>.tar.gz, mode 600)
   mounts                    candidate install targets with free space
   discover                  JSON array of existing OpenClaw installs / data dirs
   node-existing             JSON array of node runtimes already on this device
