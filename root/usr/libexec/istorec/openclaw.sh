@@ -25,6 +25,13 @@ INITD="/etc/init.d/openclaw"
 DIAG_PREFIX="${OC_RUNDIR:-/tmp/.openclaw}/diag"
 OC_INST_RC="${OC_RUNDIR:-/tmp/.openclaw}/install.rc"
 OC_INST_DONE="${OC_RUNDIR:-/tmp/.openclaw}/install.done"
+# pid of the running install.sh (written by install-bg) and the time install-bg
+# was launched. The latter only covers the fork -> exec window: for a few
+# milliseconds the pid is alive but its cmdline does not mention install.sh yet,
+# and without it a status poll right after install-bg would report "lost".
+OC_INST_PID="${OC_RUNDIR:-/tmp/.openclaw}/install.pid"
+OC_INST_START="${OC_RUNDIR:-/tmp/.openclaw}/install.start"
+OC_INST_START_GRACE=15
 
 installed() {
 	[ -x "$(oc_oc_bin)" ] && [ -x "$(oc_node_bin)" ]
@@ -242,25 +249,121 @@ cmd_install_bg() {
 		oc_err "另一个操作正在运行，请稍后再试"
 		exit 2
 	fi
-	rm -f "$OC_INSTALLLOG" "$OC_INST_DONE"
+	# install.sh takes the lock only after it has been forked, so oc_locked
+	# alone leaves a window where two clicks both get through. The pid-based
+	# check closes it (and also covers a foreground `install`).
+	if oc_inst_alive; then
+		oc_err "已有安装进程在运行，请稍后再试"
+		exit 2
+	fi
+	rm -f "$OC_INSTALLLOG" "$OC_INST_DONE" "$OC_INST_RC" "$OC_INST_PID" 2>/dev/null || true
 	mkdir -p "$OC_LOGDIR" "$(dirname "$OC_INST_RC")" 2>/dev/null || true
-	( sh "$OC_INSTALL" "$@" >"$OC_INSTALLLOG" 2>&1; \
-		printf '%s' "$?" >"$OC_INST_RC"; \
-		touch "$OC_INST_DONE" ) &
+	date +%s >"$OC_INST_START" 2>/dev/null || true
+	(
+		# Record install.sh's own pid, not the subshell's: a forked shell keeps
+		# the parent's cmdline (openclaw.sh install-bg ...), which does not
+		# contain install.sh, so the liveness check would never match it.
+		sh "$OC_INSTALL" "$@" >"$OC_INSTALLLOG" 2>&1 &
+		inst_pid=$!
+		printf '%s' "$inst_pid" >"$OC_INST_PID" 2>/dev/null || true
+		wait "$inst_pid"
+		inst_rc=$?
+		printf '%s' "$inst_rc" >"$OC_INST_RC"
+		touch "$OC_INST_DONE"
+	) &
 	# OC_INSTALLLOG may contain quotes after the user picked a custom path
 	printf '{"started":true,"log":"%s"}\n' "$(oc_json_str "$OC_INSTALLLOG")"
 }
 
+# ---------------------------------------------------------------- install status
+# Liveness is decided from /proc/<pid>/cmdline (argv, NUL separated) only -
+# never `pgrep -f install.sh`, which also matches an editor, a `tail -f` or a
+# grep and cannot tell a recycled pid from the real install. Same convention
+# as oc_gateway_pids() in lib.sh.
+oc_inst_cmdline_ok() {
+	# True when <pid> is alive AND its argv is `<shell> <install.sh> ...`.
+	# Both halves matter:
+	#   * the pid alone is not enough - pids get recycled, and the next process
+	#     to inherit the number would look like a running install forever;
+	#   * a plain substring match on the whole cmdline would also hit an editor
+	#     (`vi install.sh`), a grep, or a `sh -c '... install.sh ...'` wrapper.
+	# So one argv token must equal $OC_INSTALL exactly, and argv[0] must be a
+	# shell. Newlines cannot occur in either (fixed path, shell name).
+	local p="$1"
+	case "$p" in ''|*[!0-9]*) return 1 ;; esac
+	[ -d "/proc/$p" ] || return 1
+	tr '\0' '\n' <"/proc/$p/cmdline" 2>/dev/null | awk -v want="$OC_INSTALL" '
+		NR == 1 { a0 = $0; sub(/.*\//, "", a0) }
+		$0 == want { hit = 1 }
+		END { exit (hit && a0 ~ /^(sh|ash|bash|dash|busybox)$/) ? 0 : 1 }
+	'
+}
+
+oc_inst_pid_alive() {
+	local pid
+	pid="$(cat "$OC_INST_PID" 2>/dev/null)"
+	oc_inst_cmdline_ok "$pid"
+}
+
+oc_inst_scan_pid() {
+	# Fallback for pid files left by an older version (or lost on reboot):
+	# find the install.sh process by argv instead of trusting a pid.
+	local d pid
+	for d in /proc/[0-9]*; do
+		[ -d "$d" ] || continue
+		pid="${d#/proc/}"
+		if oc_inst_cmdline_ok "$pid"; then
+			printf '%s' "$pid"
+			return 0
+		fi
+	done
+	return 1
+}
+
+oc_inst_alive() {
+	oc_inst_pid_alive && return 0
+	oc_inst_scan_pid >/dev/null 2>&1
+}
+
+oc_inst_starting() {
+	# install-bg forks first and install.sh gets its own cmdline a moment
+	# later; treat the first OC_INST_START_GRACE seconds as "starting" so a
+	# poll in that window is not reported as lost.
+	local ts now
+	[ -f "$OC_INST_START" ] || return 1
+	ts="$(cat "$OC_INST_START" 2>/dev/null)"
+	case "$ts" in ''|*[!0-9]*) return 1 ;; esac
+	now="$(date +%s)"
+	[ $((now - ts)) -le "$OC_INST_START_GRACE" ]
+}
+
 cmd_install_status() {
-	local rc state
+	local rc state msg done_at
 	if [ -f "$OC_INST_DONE" ]; then
 		rc="$(cat "$OC_INST_RC" 2>/dev/null)"
 		case "$rc" in ''|*[!0-9]*) rc="" ;; esac
 		[ "$rc" = "0" ] && state=done || state=failed
+		# mtime of the marker, for the UI; an old marker does NOT change the
+		# state (a 24h+ result is still a result).
+		done_at="$(stat -c %Y "$OC_INST_DONE" 2>/dev/null)"
+		case "$done_at" in
+			''|*[!0-9]*) done_at="$(date -r "$OC_INST_DONE" +%s 2>/dev/null)" ;;
+		esac
+		case "$done_at" in ''|*[!0-9]*) done_at="" ;; esac
 	else
-		state=running
+		rc=""
+		if oc_inst_alive || oc_inst_starting; then
+			state=running
+		else
+			# No completion marker and no process: the install was killed
+			# (OOM, manual kill, shell exit). Saying "running" forever is
+			# what made the UI look hung.
+			state=lost
+			msg="后台安装进程已退出，但没有留下完成标记，可能被系统杀死或磁盘写满；请重试安装。"
+		fi
 	fi
-	printf '{"state":"%s","rc":"%s","log":"%s"}\n' "$state" "${rc:-}" "$(oc_json_str "$OC_INSTALLLOG")"
+	printf '{"state":"%s","rc":"%s","log":"%s","msg":"%s","done_at":"%s"}\n' \
+		"$state" "${rc:-}" "$(oc_json_str "$OC_INSTALLLOG")" "$(oc_json_str "$msg")" "$done_at"
 }
 
 cmd_update() {
@@ -1706,7 +1809,7 @@ Usage: openclaw.sh <command> [options]
           --node-mode global installs Node.js into /usr/lib/nodejs and links it
           into /usr/bin (system-wide, default); private keeps it under <base-dir>
   install-bg ...            same, detached; poll with install-status
-  install-status            {"state":"running|done|failed"}
+  install-status            {"state":"running|done|failed|lost","rc":..,"log":..,"msg":..,"done_at":..}
   update  [install options] reinstall / upgrade OpenClaw
   uninstall                 remove runtimes, keep config data
   start | stop | restart
