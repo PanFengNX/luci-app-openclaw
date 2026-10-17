@@ -2,44 +2,39 @@
 <style>
 .oc-card{border:1px solid #ddd;border-radius:6px;padding:14px 16px;margin-bottom:14px;background:#fff}
 .oc-card h3{margin:0 0 10px 0;font-size:15px}
+.oc-head{margin-bottom:8px}
+.oc-head h3{display:inline-block;margin:0 8px 0 0;font-size:15px;vertical-align:middle}
 .oc-hint{font-size:12px;color:#888;margin-top:4px;line-height:1.7}
+.oc-note{font-size:12px;color:#a15c00;margin-top:6px;line-height:1.7}
+.oc-row{margin-bottom:10px}
+.oc-row label{display:inline-block;width:150px;font-size:13px;color:#555;vertical-align:top}
+.oc-tag{display:inline-block;background:#eef4ff;color:#2a5db0;border-radius:8px;padding:1px 8px;font-size:11px;margin-left:4px;vertical-align:middle;white-space:nowrap}
+.oc-tag.ok{background:#e8f6ec;color:#1a7f37}
+.oc-tag.warn{background:#fff4e5;color:#a15c00}
+.oc-tag.off{background:#f0f0f0;color:#777}
+.oc-actions{margin-top:12px}
 button,.oc-btn{background:#0069d9;color:#fff;border:0;border-radius:4px;padding:6px 14px;cursor:pointer;margin-right:6px}
+button:disabled{background:#aaa;cursor:not-allowed}
 .oc-btn.gray{background:#6c757d}
 .oc-out{background:#1e1e1e;color:#eaeaea;font-family:monospace;font-size:12px;padding:10px;border-radius:4px;white-space:pre-wrap;max-height:400px;overflow:auto}
-input[type=text]{padding:4px 6px;min-width:260px}
+input[type=text],input[type=password]{padding:4px 6px;min-width:260px}
 </style>
 
 <h2><a id="content" name="content">消息渠道</a></h2>
 
 <div class="oc-card">
-  <h3>微信</h3>
-  <div class="oc-hint">
-    使用官方插件 <code>@tencent-weixin/openclaw-weixin-cli</code> 安装。安装前会自动检查 python3、目录权限与
-    <code>ilinkai.weixin.qq.com</code> 连通性。若提示缺少 python3，OpenWrt 24.10+ 执行
-    <code>apk add python3-light</code>，更早版本执行 <code>opkg update &amp;&amp; opkg install python3-light</code>。
-  </div>
+  <h3>渠道</h3>
+  <div class="oc-hint" id="ch-summary">正在读取渠道列表…</div>
   <div style="margin-top:10px">
-    <button id="btn-wx-install">安装 / 重新安装插件</button>
-    <button id="btn-wx-login" class="oc-btn gray">登录账号（生成二维码链接）</button>
+    <button id="btn-refresh" class="oc-btn gray">刷新列表</button>
   </div>
-  <div class="oc-hint">扫码流程：点击「登录账号」→ 打开输出的链接 → 微信扫一扫 → 页面提示成功后重启网关 → 给网关发一条消息测试。</div>
+  <div class="oc-hint">
+    渠道、参数与状态全部来自 <code>channels.sh channels-list</code>；凭据只通过 POST 提交，
+    由控制器写入 0600 临时文件后交给 <code>channels.sh config --key-file</code>，页面不回填任何明文。
+  </div>
 </div>
 
-<div class="oc-card">
-  <h3>其他渠道（Telegram / 飞书 / Discord / Slack …）</h3>
-  <div class="oc-row">
-    <label>渠道登录命令</label>
-    <input type="text" id="ch-cmd" placeholder="channels login --channel telegram" style="min-width:340px">
-    <button id="btn-ch-run">执行</button>
-  </div>
-  <div class="oc-hint">常用：<code>channels login --channel telegram</code>、<code>channels login --channel feishu</code>、<code>channels login --channel discord</code>。也可在「命令行」页执行任意 openclaw 子命令。</div>
-</div>
-
-<div class="oc-card">
-  <h3>已配置渠道</h3>
-  <button id="btn-ch-list" class="oc-btn gray">刷新</button>
-  <div class="oc-out" id="ch-out">（点击刷新）</div>
-</div>
+<div id="ch-cards"></div>
 
 <div class="oc-card">
   <h3>执行结果</h3>
@@ -48,51 +43,264 @@ input[type=text]{padding:4px 6px;min-width:260px}
 
 <script>
 var API = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","channels")%>';
-var RUN = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","run")%>';
+var EMPTY_MSG = '未检测到可用渠道，请先安装 OpenClaw 运行环境。';
+var ACTION_LABEL = { install: '启用', login: '登录', status: '查询状态', config: '保存配置' };
+
 function $(id){ return document.getElementById(id); }
+
+function el(tag, cls, text){
+  var n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = String(text);
+  return n;
+}
+
+function clearNode(n){ while (n.firstChild) n.removeChild(n.firstChild); }
+
+function isArray(v){ return Object.prototype.toString.call(v) === '[object Array]'; }
+
+function setOut(text){
+  var s = (text == null) ? '' : String(text);
+  $('out').textContent = (s === '') ? '(无输出)' : s;
+}
+
+function get(url, cb){
+  var x = new XMLHttpRequest();
+  x.open('GET', url, true);
+  x.onreadystatechange = function(){
+    if (x.readyState !== 4) return;
+    var r = null;
+    try { r = JSON.parse(x.responseText); } catch (e) { r = null; }
+    cb(r);
+  };
+  x.send();
+}
+
 function post(url, data, cb){
-  var body=[]; for (var k in data) body.push(encodeURIComponent(k)+'='+encodeURIComponent(data[k]));
-  var x=new XMLHttpRequest(); x.open('POST',url,true);
-  x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
-  x.onreadystatechange=function(){ if(x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({});} } };
+  var body = [];
+  for (var k in data) body.push(encodeURIComponent(k) + '=' + encodeURIComponent(data[k]));
+  var x = new XMLHttpRequest();
+  x.open('POST', url, true);
+  x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+  x.onreadystatechange = function(){
+    if (x.readyState !== 4) return;
+    var r = null;
+    try { r = JSON.parse(x.responseText); } catch (e) { r = null; }
+    cb(r);
+  };
   x.send(body.join('&'));
 }
-function get(url, cb){ var x=new XMLHttpRequest(); x.open('GET',url,true); x.onreadystatechange=function(){ if(x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({});} } }; x.send(); }
 
-$('btn-wx-install').onclick = function(){
-  $('out').textContent = '正在安装微信插件，请稍候…';
-  post(API, { action: 'weixin_install' }, function(r){ $('out').textContent = r.output || '(无输出)'; });
-};
-$('btn-wx-login').onclick = function(){
-  $('out').textContent = '正在生成登录链接…';
-  post(API, { action: 'weixin_login' }, function(r){
-    var o = r.output || '(无输出)';
-    // Linkify without innerHTML: the login output is produced by the channel
-    // plugin, so treat it as untrusted text and build nodes instead.
-    var m = o.match(/https?:\/\/\S+/);
-    var host = $('out');
-    host.innerHTML = '';
-    if (m) {
-      var at = o.indexOf(m[0]);
-      host.appendChild(document.createTextNode(o.slice(0, at)));
-      var a = document.createElement('a');
-      a.href = m[0]; a.target = '_blank'; a.rel = 'noopener noreferrer';
-      a.style.color = '#7fd1ff'; a.textContent = m[0];
-      host.appendChild(a);
-      host.appendChild(document.createTextNode(o.slice(at + m[0].length)));
-    } else {
-      host.textContent = o;
+/* 控制器把 channels-list 的 JSON 原样放在 data 字符串里，这里再解析一次。 */
+function parseList(r){
+  if (!r || r.ok !== true || typeof r.data !== 'string') return null;
+  var list = null;
+  try { list = JSON.parse(r.data); } catch (e) { list = null; }
+  return isArray(list) ? list : null;
+}
+
+function isSecret(p){
+  if (p.secret === true) return true;
+  return /token|secret|key|password/i.test(String(p.name || ''));
+}
+
+/* 密码框永不回填：占位符只说明后端状态，configuredKnown=false 时不谎报「未设置」。 */
+function placeholderFor(ch){
+  if (ch.configuredKnown === false) return '无法判断是否已设置（留空则不修改）';
+  if (ch.configured === true) return '已设置（留空则不修改）';
+  return '未设置';
+}
+
+/* 短参数名在部分渠道（feishu / dingtalk / qq）没有已知配置键，
+ * channels.sh 会以「参数名未知」拒绝；这类参数必须提交完整键
+ * channels.<channelId>.<name>（控制器 ch_key_ok 允许该前缀）。 */
+function paramKey(ch, p){
+  if (p.configKeyKnown === true && typeof p.configKey === 'string' && p.configKey !== '') {
+    return p.configKey;
+  }
+  if (typeof ch.configKey === 'string' && ch.configKey !== '') {
+    return ch.configKey + '.' + String(p.name);
+  }
+  return String(p.name);
+}
+
+function buildCard(ch){
+  var card = el('div', 'oc-card');
+
+  var head = el('div', 'oc-head');
+  head.appendChild(el('h3', null, ch.name || ch.id || '(未命名渠道)'));
+  head.appendChild(el('span', 'oc-tag ' + (ch.enabled === true ? 'ok' : 'off'),
+    ch.enabled === true ? '已启用' : '未启用'));
+  if (ch.configuredKnown === false) {
+    head.appendChild(el('span', 'oc-tag warn', '配置：无法判断'));
+  } else {
+    head.appendChild(el('span', 'oc-tag ' + (ch.configured === true ? 'ok' : 'warn'),
+      ch.configured === true ? '已配置' : '未配置'));
+  }
+  card.appendChild(head);
+
+  var meta = el('div', 'oc-hint');
+  meta.appendChild(document.createTextNode('渠道 ID：'));
+  meta.appendChild(el('code', null, ch.id || '-'));
+  if (typeof ch.channelId === 'string' && ch.channelId !== '' && ch.channelId !== ch.id) {
+    meta.appendChild(document.createTextNode(' · OpenClaw 渠道：'));
+    meta.appendChild(el('code', null, ch.channelId));
+  }
+  card.appendChild(meta);
+
+  if (typeof ch.note === 'string' && ch.note !== '') {
+    card.appendChild(el('div', 'oc-note', ch.note));
+  }
+
+  var fields = [];
+  var params = isArray(ch.params) ? ch.params : [];
+  if (params.length > 0) {
+    var form = el('div', 'oc-form');
+    form.style.marginTop = '10px';
+    for (var i = 0; i < params.length; i++) {
+      var p = params[i];
+      if (!p || typeof p.name !== 'string' || p.name === '') continue;
+      var row = el('div', 'oc-row');
+      row.appendChild(el('label', null, (p.label || p.name) + (p.required === true ? ' *' : '')));
+      var inp = document.createElement('input');
+      inp.type = isSecret(p) ? 'password' : 'text';
+      inp.value = '';                       /* 后端不返回明文，永不回填 */
+      inp.placeholder = placeholderFor(ch);
+      inp.autocomplete = 'new-password';
+      row.appendChild(inp);
+      form.appendChild(row);
+      fields.push({ key: paramKey(ch, p), input: inp });
     }
+    card.appendChild(form);
+  } else {
+    card.appendChild(el('div', 'oc-hint', '该渠道没有可在页面填写的参数（凭据由登录流程保存）。'));
+  }
+
+  /* actions 由后端声明：没声明 login 的渠道不显示「登录」。
+   * 旧版本没有 actions 字段时退回最小集合，避免整张卡片没有按钮。 */
+  var acts = isArray(ch.actions) ? ch.actions : ['install', 'status', 'config'];
+  var bar = el('div', 'oc-actions');
+  var order = ['install', 'login', 'status', 'config'];
+  for (var j = 0; j < order.length; j++) {
+    var act = order[j];
+    if (acts.indexOf(act) < 0) continue;      /* 后端没声明该动作就不显示 */
+    var btn = el('button', act === 'install' ? '' : 'oc-btn', ACTION_LABEL[act] || act);
+    btn.type = 'button';
+    if (act === 'install' && ch.enabled === true) {
+      btn.title = '该渠道已启用；点击会重新写入配置并重启网关';
+    }
+    if (act === 'config' && fields.length === 0) {
+      /* 没有可写参数（如微信，凭据由 login 保存）：保留按钮但禁用 */
+      btn.disabled = true;
+      btn.title = '该渠道没有可在页面填写的参数';
+    }
+    btn.onclick = (function (action) {
+      return function () {
+        if (action === 'config') saveConfig(ch, fields, btn);
+        else runAction(ch, action, btn);
+      };
+    })(act);
+    bar.appendChild(btn);
+  }
+  if (bar.firstChild) card.appendChild(bar);
+  else card.appendChild(el('div', 'oc-hint', '该渠道未声明可执行动作。'));
+
+  return card;
+}
+
+function runAction(ch, action, btn){
+  var label = ACTION_LABEL[action] || action;
+  var name = String(ch.name || ch.id || '');
+  btn.disabled = true;
+  setOut('正在' + label + '：' + name + ' …');
+  post(API, { action: action, channel: String(ch.id || '') }, function (r) {
+    btn.disabled = false;
+    if (!r) { setOut(label + '失败：控制器无响应，或返回内容无法解析。'); return; }
+    var txt = (typeof r.output === 'string') ? r.output : '';
+    if (r.ok === false) {
+      var reason = (typeof r.error === 'string' && r.error !== '') ? r.error : (label + '未成功');
+      setOut(reason + (txt !== '' ? '\n' + txt : ''));
+      return;
+    }
+    setOut(txt !== '' ? txt : (label + '完成（无输出）。'));
+    if (action === 'install') loadList();     /* 启用状态来自后端，重新读取 */
   });
-};
-$('btn-ch-list').onclick = function(){
-  get(API + '?action=list', function(r){ $('ch-out').textContent = r.output || '(未配置渠道)'; });
-};
-$('btn-ch-run').onclick = function(){
-  var c = $('ch-cmd').value.trim();
-  if (!c) return;
-  $('out').textContent = '执行中…';
-  post(RUN, { cmd: c }, function(r){ $('out').textContent = r.output || '(无输出)'; });
-};
+}
+
+function saveConfig(ch, fields, btn){
+  /* Object.create(null)：参数名来自后端，用无原型对象避免 __proto__ 之类的键
+   * 改写原型链。留空的字段不提交 —— 留空表示「不修改」。 */
+  var values = Object.create(null);
+  var n = 0;
+  for (var i = 0; i < fields.length; i++) {
+    var v = fields[i].input.value;
+    if (v === '') continue;
+    values[fields[i].key] = v;
+    n++;
+  }
+  if (n === 0) {
+    setOut('没有填写任何配置项：输入框不会回填已有凭据，请先输入要更新的值。');
+    return;
+  }
+  var payload;
+  try { payload = JSON.stringify(values); } catch (e) { payload = ''; }
+  if (payload === '' || payload === '{}') { setOut('配置内容无法序列化。'); return; }
+
+  var name = String(ch.name || ch.id || '');
+  btn.disabled = true;
+  setOut('正在保存配置：' + name + ' …');
+  post(API, { action: 'config', channel: String(ch.id || ''), values: payload }, function (r) {
+    btn.disabled = false;
+    if (!r) { setOut('保存配置失败：控制器无响应，或返回内容无法解析。'); return; }
+    var txt = (typeof r.output === 'string') ? r.output : '';
+    if (r.ok === false) {
+      setOut('保存配置失败：' + (r.error || '未知错误') + (txt !== '' ? '\n' + txt : ''));
+      return;
+    }
+    /* 成功后立刻清空输入框，避免凭据长期停留在 DOM 里。 */
+    for (var i = 0; i < fields.length; i++) fields[i].input.value = '';
+    setOut('配置已保存。' + (txt !== '' ? '\n' + txt : ''));
+    loadList();                                /* 状态以 channels-list 为准 */
+  });
+}
+
+function showEmpty(msg){
+  var host = $('ch-cards');
+  clearNode(host);
+  var card = el('div', 'oc-card');
+  card.appendChild(el('div', 'oc-hint', msg));
+  host.appendChild(card);
+}
+
+function loadList(){
+  $('ch-summary').textContent = '正在读取渠道列表…';
+  get(API + '?action=channels_list', function (r) {
+    var list = parseList(r);
+    if (!list) {
+      $('ch-summary').textContent = '渠道列表不可用。';
+      showEmpty(EMPTY_MSG + ((r && r.error) ? '（' + r.error + '）' : ''));
+      return;
+    }
+    if (list.length === 0) {
+      $('ch-summary').textContent = '渠道列表为空。';
+      showEmpty(EMPTY_MSG);
+      return;
+    }
+    var host = $('ch-cards');
+    clearNode(host);
+    var shown = 0;
+    for (var i = 0; i < list.length; i++) {
+      var ch = list[i];
+      if (!ch || typeof ch !== 'object') continue;
+      host.appendChild(buildCard(ch));
+      shown++;
+    }
+    if (shown === 0) { $('ch-summary').textContent = '渠道列表为空。'; showEmpty(EMPTY_MSG); return; }
+    $('ch-summary').textContent = '共 ' + shown + ' 个渠道；状态读取自 OpenClaw 配置文件。';
+  });
+}
+
+$('btn-refresh').onclick = loadList;
+loadList();
 </script>
 <%+footer%>
