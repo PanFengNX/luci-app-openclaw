@@ -164,7 +164,13 @@ var API = {
   backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
   restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>'
 };
-var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, disc:null, nodeExisting:[], nodeBusy:false };
+var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, disc:null, nodeExisting:[], nodeBusy:false,
+  // istatSeq：页面初始化时那次 install-status 请求的序号。用户一旦自己点了安装，
+  // 就把序号 +1 作废它 —— 否则迟到的响应会把刚写下的「安装已启动」日志覆盖掉。
+  istatSeq: 0,
+  // logHeader：轮询期间固定在日志区顶部的提示行（例如"已自动接管进度显示"）。
+  // 日志每 2 秒整段重写，必须由这里带上，否则第一轮刷新就被冲掉。
+  logHeader: '' };
 
 function $(id){ return document.getElementById(id); }
 // 回调只允许触发一次：readyState==4 与 onerror 在某些浏览器上会同时到达，
@@ -430,24 +436,108 @@ function renderNodeOptions(){
   hint.appendChild(document.createTextNode('　低于该要求的版本已被禁用。'));
 }
 
+// 安装与「更新 Node」共用同一条后端安装流程（install-bg），按钮必须一起恢复，
+// 否则其中一个会永久停在 disabled。「更新 Node」在本页并不存在（在状态页），
+// 用存在性判断保持兼容。
+function setInstallButtons(disabled){
+  $('btn-install').disabled = disabled;
+  if ($('btn-node-update')) $('btn-node-update').disabled = disabled;
+}
+
+function logSay(text){
+  $('in-log').textContent = text;
+  $('in-log').scrollTop = $('in-log').scrollHeight;
+}
+
+// 安装结束后把「仍在进行」的接管提示从日志顶部摘掉：提示本身是页面加载时
+// 写进去的，光清 state.logHeader 不会让它从已经渲染的文本里消失。
+function dropLogHeader(){
+  var h = state.logHeader;
+  state.logHeader = '';
+  if (!h) return;
+  var t = $('in-log').textContent || '';
+  if (t.indexOf(h + '\n') === 0) $('in-log').textContent = t.slice(h.length + 1);
+  else if (t === h) $('in-log').textContent = '';
+}
+
+// 安装日志可能很长（node_modules 阶段），done 只需要一个尾巴。
+function tailLines(s, n){
+  var a = String(s || '').replace(/\s+$/, '').split('\n');
+  if (a.length <= n) return a.join('\n');
+  return '…（仅显示最后 ' + n + ' 行）\n' + a.slice(a.length - n).join('\n');
+}
+
 function startLogPoll(onDone){
   if (state.logTimer) clearInterval(state.logTimer);
   state.logTimer = setInterval(function(){
-    get(API.ilog, function(r){ $('in-log').textContent = r.log || '（暂无输出）'; $('in-log').scrollTop = $('in-log').scrollHeight; });
+    get(API.ilog, function(r){
+      $('in-log').textContent = (state.logHeader ? state.logHeader + '\n' : '') + (r.log || '（暂无输出）');
+      $('in-log').scrollTop = $('in-log').scrollHeight;
+    });
     get(API.istatus, function(r){
       var d = jp(r.data||'{}', {});
       if (d.state === 'done' || d.state === 'failed'){
         clearInterval(state.logTimer); state.logTimer = null;
-        $('btn-install').disabled = false;
-        // 「更新 Node」复用同一轮流程，结束时也必须恢复，否则按钮永久禁用。
-        if ($('btn-node-update')) $('btn-node-update').disabled = false;
+        // 已到终态，「仍在进行」的接管提示不应继续留在顶部。
+        dropLogHeader();
+        setInstallButtons(false);
         $('in-log').textContent += '\n=== 安装' + (d.state==='done'?'完成':'失败') + ' ===';
         loadInfo(); loadMounts();
         // 调用方（如「使用它」复用本机 Node）可在这里恢复自己的按钮 / 重新探测。
         if (onDone) onDone(d.state);
       }
+      // state=lost 说明后台进程已消失且没有完成标记：同样必须停止轮询并恢复按钮，
+      // 否则界面会永远显示"正在安装"，用户既看不到原因也无法重试。
+      else if (d.state === 'lost'){
+        clearInterval(state.logTimer); state.logTimer = null;
+        state.logHeader = '';
+        setInstallButtons(false);
+        logSay('=== 后台安装异常终止 ===\n' + (d.msg || '后端未返回具体原因。')
+             + '\n请重新点击「安装」按钮。');
+        if (onDone) onDone(d.state);
+      }
     });
   }, 2000);
+}
+
+// 页面初始化时查一次后台状态：安装可能是上一次启动的（用户刷新过页面、或从别的
+// 菜单进来），不接管就永远停在「（尚未开始）」，看起来像根本没在装。
+function checkInstallStatusOnLoad(){
+  var seq = ++state.istatSeq;
+  get(API.istatus, function(r){
+    if (seq !== state.istatSeq) return;              // 用户已手动开始安装，放弃这次结果
+    if (!r || r.ok === false || !r.data) return;      // 拿不到状态：保持初始文本
+    var d = jp(r.data||'{}', {});
+    var st = d.state || '';
+    var log = d.log || '';
+
+    if (st === 'running'){
+      // 日志每 2 秒整段重写，提示必须放进 logHeader 才会一直留在顶部。
+      state.logHeader = '检测到后台安装仍在进行，已自动接管进度显示';
+      logSay(state.logHeader);
+      setInstallButtons(false);                       // 接管期间按钮可点，重复提交由后端拒绝
+      startLogPoll();
+      return;
+    }
+
+    if (st !== 'done' && st !== 'failed' && st !== 'lost') return;
+
+    state.logHeader = '';
+    setInstallButtons(false);                         // 终态必须显式恢复（bfcache 会带回 disabled）
+    if (st === 'done'){
+      var ts = parseInt(d.done_at, 10);
+      var when = (ts > 0) ? '（' + fmtTime(ts) + '）' : '';
+      logSay('=== 上次安装已完成' + when + ' ===\n'
+           + (log ? tailLines(log, 40) : '（日志为空或已被清理）'));
+    } else if (st === 'failed'){
+      var rc = (d.rc === undefined || d.rc === null || d.rc === '') ? '未知' : String(d.rc);
+      logSay('=== 上次安装失败（rc=' + rc + '）===\n'
+           + (log || '（日志为空或已被清理）'));
+    } else {
+      logSay('=== 后台安装异常终止 ===\n' + (d.msg || '后端未返回具体原因。')
+           + '\n请重新点击「安装」按钮。');
+    }
+  });
 }
 
 $('in-oc').onchange = renderNodeOptions;
@@ -491,6 +581,9 @@ $('btn-install').onclick = function(){
       return;
     }
     $('btn-install').disabled = true;
+    // 本次是用户主动发起的安装：作废页面初始化时那次状态查询（迟到的响应
+    // 不能覆盖下面的「安装已提交」），并清掉可能残留的接管提示。
+    state.istatSeq++; state.logHeader = '';
     $('in-log').textContent = '安装已提交，正在准备…\n';
     post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: nd }, function(r){
       if (!r || r.ok === false){
@@ -706,6 +799,9 @@ $('btn-bk-upload').onclick = function(){
 loadBackups();
 
 loadInfo();
+// 安装可能是上一次启动的（刷新页面 / 从别的菜单进来）：必须主动接管进度，
+// 否则日志区会一直停在「（尚未开始）」，看起来像根本没在装。
+checkInstallStatusOnLoad();
 loadMounts();
 loadVersions(false);
 </script>

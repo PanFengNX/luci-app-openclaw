@@ -65,6 +65,15 @@ oc_lock_acquire || exit 2
 [ -n "$NODE_V" ] || NODE_V="$(uci_get main.node_version auto)"
 [ -n "$NODE_V" ] || NODE_V="auto"
 
+# npm install 的硬超时（秒）。默认 30 分钟：正常安装几分钟内完成，
+# 卡住时不能无限期占着安装锁。环境变量优先，其次 UCI，非法值回退默认。
+NPM_INSTALL_TIMEOUT_DEFAULT=1800
+NPM_INSTALL_TIMEOUT="${NPM_INSTALL_TIMEOUT:-$(uci_get main.npm_install_timeout "$NPM_INSTALL_TIMEOUT_DEFAULT")}"
+case "$NPM_INSTALL_TIMEOUT" in
+	''|*[!0-9]*) NPM_INSTALL_TIMEOUT="$NPM_INSTALL_TIMEOUT_DEFAULT" ;;
+esac
+[ "$NPM_INSTALL_TIMEOUT" -gt 0 ] 2>/dev/null || NPM_INSTALL_TIMEOUT="$NPM_INSTALL_TIMEOUT_DEFAULT"
+
 # 运行时的部署方式。命令行优先，其次 UCI，最后默认 private。
 [ -n "$NODE_MODE" ] || NODE_MODE="$(uci_get main.node_mode private)"
 [ -n "$NODE_MODE" ] || NODE_MODE="private"
@@ -95,6 +104,28 @@ ilog() { printf '%s\n' "$*" | tee -a "$OC_INSTALLLOG"; }
 die() {
 	ilog "ERROR: $*"
 	exit 1
+}
+
+# run_with_timeout <seconds> <cmd...>
+# 系统有 timeout（GNU 或 busybox 均可）时用它兜底；没有时退化为直接执行，
+# 由调用方负责用 ilog 说明「本次不设超时上限」。
+run_with_timeout() {
+	local secs="$1"; shift
+	if command -v timeout >/dev/null 2>&1; then
+		timeout "$secs" "$@"
+	else
+		"$@"
+	fi
+}
+
+# append_tail <file> <lines> <label>
+# 把某份独立日志的最后 N 行追加进主日志。只在失败路径调用：成功时保持主日志精简。
+append_tail() {
+	local f="$1" n="$2" label="$3"
+	[ -s "$f" ] || return 0
+	ilog "---- $label 最后 $n 行（完整日志：$f） ----"
+	tail -n "$n" "$f" >>"$OC_INSTALLLOG" 2>/dev/null || true
+	ilog "---- $label 结束 ----"
 }
 
 # The program dir is user-configurable, so it needs its own safety check:
@@ -359,7 +390,7 @@ NODE_DIR_bin() { "$NODE_DIR/bin/node" -v 2>/dev/null; }
 # ---------------------------------------------------------------- openclaw
 install_openclaw() {
 	ilog "== 安装 OpenClaw $OCV（官方 npm 包） =="
-	local reg npmcache npmcli
+	local reg npmcache npmcli npm_log rc start_ts end_ts elapsed added timed_out
 	reg="$(npm_registry)"
 	npmcache="$BASE_DIR/npm-cache"
 	npmcli="$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js"
@@ -377,14 +408,62 @@ install_openclaw() {
 	export npm_config_prefix="$OC_DIR"
 
 	ilog "npm install -g openclaw@$OCV  (registry=$reg)"
+	# npm 的输出写到独立文件：$OC_INSTALLLOG 由 ilog 的 tee -a 追加，
+	# 两个写入者（外加调用方的 stdout 重定向）同时写一个文件会产生半截行。
 	# NOTE: piping through tee would swallow npm's exit status (we would only
-	# ever see tee's 0). Appending to the log keeps the live progress readable
-	# from the install-status endpoint, and the rc tells us the truth.
-	if "$NODE_BIN" "$npmcli" install -g --prefix "$OC_DIR" --registry "$reg" \
-		--no-audit --no-fund --loglevel=info "openclaw@$OCV" >>"$OC_INSTALLLOG" 2>&1; then
-		ilog "npm install 完成"
+	# ever see tee's 0), so the rc below is captured directly.
+	npm_log="$OC_INSTALLLOG.npm"
+	: >"$npm_log" 2>/dev/null || die "无法创建 npm 日志：$npm_log"
+
+	if command -v timeout >/dev/null 2>&1; then
+		ilog "npm install 开始（$(date '+%Y-%m-%d %H:%M:%S')，超时 ${NPM_INSTALL_TIMEOUT}s）"
 	else
-		die "npm install 失败（退出码 $?，完整日志：$OC_INSTALLLOG）"
+		ilog "npm install 开始（$(date '+%Y-%m-%d %H:%M:%S')）"
+		ilog "WARN: 未找到 timeout 命令，本次 npm install 不设超时上限，卡住时只能手动终止"
+	fi
+	start_ts="$(date +%s 2>/dev/null)"
+	case "$start_ts" in ''|*[!0-9]*) start_ts=0 ;; esac
+
+	run_with_timeout "$NPM_INSTALL_TIMEOUT" "$NODE_BIN" "$npmcli" install -g \
+		--prefix "$OC_DIR" --registry "$reg" \
+		--no-audit --no-fund --loglevel=http --prefer-offline \
+		"openclaw@$OCV" >>"$npm_log" 2>&1
+	rc=$?
+
+	end_ts="$(date +%s 2>/dev/null)"
+	case "$end_ts" in ''|*[!0-9]*) end_ts=0 ;; esac
+	elapsed=0
+	if [ "$start_ts" -gt 0 ] && [ "$end_ts" -ge "$start_ts" ]; then
+		elapsed=$((end_ts - start_ts))
+	fi
+
+	# GNU timeout 超时返回 124；busybox 用 SIGTERM 收尾、返回 143。
+	# 143 只有在耗时确实到达上限时才当超时，避免把外部 SIGTERM 误报成超时。
+	timed_out=0
+	if [ "$rc" -eq 124 ]; then
+		timed_out=1
+	elif [ "$rc" -eq 143 ] && command -v timeout >/dev/null 2>&1 \
+		&& [ "$elapsed" -ge "$((NPM_INSTALL_TIMEOUT - 5))" ]; then
+		timed_out=1
+	fi
+
+	if [ "$rc" -eq 0 ]; then
+		ilog "npm install 完成（$(date '+%Y-%m-%d %H:%M:%S')，耗时 ${elapsed}s）"
+		# 汇总行单独提出来：确认真的出现了 added N packages，而不是中途静默结束。
+		added="$(grep -E '^added [0-9]+ packages?' "$npm_log" 2>/dev/null | tail -n 1)"
+		if [ -n "$added" ]; then ilog "npm: $added"; fi
+	elif [ "$timed_out" -eq 1 ]; then
+		ilog "npm install 超时（${NPM_INSTALL_TIMEOUT} 秒，退出码 $rc，耗时 ${elapsed}s，$(date '+%Y-%m-%d %H:%M:%S')）"
+		append_tail "$npm_log" 40 "npm 日志"
+		die "npm install 超时（${NPM_INSTALL_TIMEOUT} 秒）。可调大 NPM_INSTALL_TIMEOUT（环境变量或 UCI main.npm_install_timeout），或更换镜像源（npm_registry）后重试。npm 日志：$npm_log"
+	elif [ "$rc" -eq 137 ]; then
+		ilog "npm install 被 SIGKILL 终止（退出码 137，耗时 ${elapsed}s，$(date '+%Y-%m-%d %H:%M:%S')），可能因内存不足被 OOM killer 杀掉"
+		append_tail "$npm_log" 40 "npm 日志"
+		die "npm install 被强制终止（退出码 137）。请检查可用内存（free -m）后重试。npm 日志：$npm_log"
+	else
+		ilog "npm install 失败（退出码 $rc，耗时 ${elapsed}s，$(date '+%Y-%m-%d %H:%M:%S')）"
+		append_tail "$npm_log" 40 "npm 日志"
+		die "npm install 失败（退出码 $rc，完整日志：$npm_log）"
 	fi
 
 	if [ ! -x "$OC_DIR/bin/openclaw" ]; then
