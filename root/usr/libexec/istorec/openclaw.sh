@@ -1025,29 +1025,43 @@ cmd_save() {
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--base-dir)
-				# refuse a dangerous target instead of silently accepting it
+				# refuse a dangerous target instead of silently accepting it.
+				# 提示必须说清"哪些不允许 + 该选什么"：用户撞到这条时往往不知道
+				# /overlay 是系统分区，只说"不安全"会让人反复重试同一个路径。
 				if ! oc_validate_base_dir "${2:-}"; then
 					oc_err "拒绝保存不安全的安装目录：${2:-}"
+					oc_err "不能选 /、/root、/usr、/etc、/tmp、/var、/proc、/sys、/dev、/run 等系统路径，"
+					oc_err "也不能选系统分区 /overlay（根文件系统的 overlay，容量与系统共用）或只读的 /rom。"
+					oc_err "含 . 或 .. 段的路径、相对路径，以及指向上述目录的符号链接同样会被拒绝。"
+					oc_err "请改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw（面板的安装目录下拉可直接选）。"
 					exit 2
 				fi
 				uci_set main.base_dir "$2"; shift 2 ;;
 			--openclaw-dir)
 				# 程序目录可单独指定；空值表示"恢复默认（<安装目录>/openclaw）"
+				local b="${2%/}" cur
+				# 与后面的冲突判定用同一个安装目录：--base-dir 可能已在本轮保存过
+				cur="$(oc_base_dir)"
 				if [ -n "${2:-}" ]; then
 					if ! oc_validate_base_dir "$2"; then
-						oc_err "拒绝保存不安全的程序目录：${2}（不能是 /、/etc、/tmp、/var 等系统路径）"
+						oc_err "拒绝保存不安全的程序目录：${2}"
+						oc_err "不能选 /、/root、/usr、/etc、/tmp、/var 等系统路径，也不能选系统分区 /overlay、/rom。"
+						oc_err "推荐留空 —— 程序会自动装到 ${cur}/openclaw；"
+						oc_err "要单独指定时请选数据盘下的独立目录，例如 /mnt/<磁盘>/OpenClaw-program。"
 						exit 2
 					fi
 					# 程序目录不能是安装目录本身或它的上级，否则卸载时
 					# `rm -rf "$ocdir"` 会把数据（home）一起删掉
-					local b="${2%/}" cur
-					cur="$(oc_base_dir)"
 					if [ "$b" = "$cur" ]; then
-						oc_err "程序目录不能等于安装目录（$cur）"; exit 2
+						oc_err "程序目录不能等于安装目录（$cur）：卸载时会连同数据（会话 / 工作区）一起删除。"
+						oc_err "推荐留空 —— 留空时程序自动装到 ${cur}/openclaw，与数据分开。"
+						exit 2
 					fi
 					case "$cur" in
 						"$b"/*)
-							oc_err "程序目录不能是安装目录的上级（$b 包含 $cur）"; exit 2 ;;
+							oc_err "程序目录不能是安装目录的上级（$b 包含 $cur）：卸载时会连同安装目录（含数据）一起删除。"
+							oc_err "推荐留空 —— 留空时程序自动装到 ${cur}/openclaw。"
+							exit 2 ;;
 					esac
 				fi
 				uci_set main.openclaw_dir "$2"; shift 2 ;;

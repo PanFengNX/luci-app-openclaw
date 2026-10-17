@@ -13,6 +13,7 @@
 .oc-hint{font-size:12px;color:#888;margin-top:4px}
 .oc-warn{color:#c05621}
 .oc-ok{color:#2f8f3f}
+.oc-err{color:#c00}
 select,input[type=text]{padding:4px 6px;min-width:260px}
 button,.oc-btn{background:#0069d9;color:#fff;border:0;border-radius:4px;padding:6px 14px;cursor:pointer;margin-right:6px}
 button:disabled{background:#aaa;cursor:not-allowed}
@@ -78,7 +79,10 @@ button:disabled{background:#aaa;cursor:not-allowed}
     <select id="in-dir" style="min-width:320px"></select>
     <input type="text" id="in-dir-custom" placeholder="或手动输入目录，如 /mnt/nvme0n1-3/Configs/OpenClaw" style="min-width:280px">
   </div>
-  <div class="oc-hint" id="in-dir-hint"></div>
+  <div class="oc-hint" id="in-dir-hint">
+    <div id="in-dir-warn" class="oc-err" style="display:none;margin-bottom:4px"></div>
+    建议选数据盘挂载点下的目录，例如 /mnt/&lt;磁盘&gt;/OpenClaw；不要选 /overlay、/rom 等系统分区。
+  </div>
 
   <div class="oc-row" style="margin-top:10px">
     <label>程序目录</label>
@@ -86,6 +90,7 @@ button:disabled{background:#aaa;cursor:not-allowed}
     <input type="text" id="in-ocdir-custom" placeholder="留空 = 安装目录/openclaw" style="min-width:280px">
   </div>
   <div class="oc-hint" id="in-ocdir-hint">
+    <div id="in-ocdir-warn" class="oc-err" style="display:none;margin-bottom:4px"></div>
     OpenClaw 程序本体（含 node_modules，约 100MB+）的安装位置。
     <b>留空</b>表示放在安装目录下；也可以单独指定，例如程序放内置存储、数据（会话/工作区）放大容量磁盘。
     改动此项后需要重新执行安装。
@@ -242,6 +247,88 @@ function get(url, cb){
 }
 function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }
 
+// ------------------------------- 目录检查（只是提示，最终以后端校验为准）
+// 后端 oc_validate_base_dir 还会解析符号链接、检查真实路径，这里只覆盖用户
+// 最常撞到的两类误填：目录落在系统分区上、程序目录 == 安装目录（或它的上级）。
+// 目的不是替代后端，而是在点"安装"之前就把"为什么不行、该怎么改"说清楚。
+var OC_SYS_PREFIXES = [
+  ['/bin','是系统程序目录'], ['/sbin','是系统程序目录'], ['/lib','是系统库目录'],
+  ['/usr','是系统程序目录'], ['/etc','是系统配置目录'],
+  ['/proc','是内核虚拟文件系统'], ['/sys','是内核虚拟文件系统'], ['/dev','是设备目录'],
+  ['/run','是运行时临时目录'], ['/tmp','是内存临时目录（重启即清空）'],
+  ['/var','是运行时数据目录'], ['/overlay','是根文件系统的 overlay（系统分区）'],
+  ['/rom','是只读的固件分区'], ['/root','是 root 用户的主目录']
+];
+
+// 与后端一致：去掉首尾空白与尾部斜杠（"/" 本身保留）
+function normDir(p){
+  p = String(p || '').replace(/^\s+|\s+$/g, '');
+  while (p.length > 1 && p.charAt(p.length-1) === '/') p = p.slice(0, -1);
+  return p;
+}
+
+// 返回不适合放应用数据的原因；空字符串 = 这一层看不出问题
+function dirProblem(p){
+  p = normDir(p);
+  if (!p) return '';
+  if (p.charAt(0) !== '/') return '请填写以 / 开头的绝对路径。';
+  if (p === '/') return '根目录是系统分区，不能放应用数据。';
+  // 与后端 oc_validate_base_dir_shape 一致：不允许 . / .. 段（后端还会解析符号链接）
+  if (/(^|\/)\.\.?(\/|$)/.test(p)) return '路径不能包含 . 或 .. 段，请填写规范化后的绝对路径。';
+  for (var i = 0; i < OC_SYS_PREFIXES.length; i++){
+    var pre = OC_SYS_PREFIXES[i][0];
+    if (p !== pre && p.indexOf(pre + '/') !== 0) continue;
+    if (pre === '/overlay')
+      return '/overlay 是系统分区（根文件系统的 overlay），容量有限且与系统配置混在一起，不适合放应用数据。'
+           + '请改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
+    if (pre === '/rom')
+      return '/rom 是只读的固件分区，无法写入。请改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
+    return pre + ' ' + OC_SYS_PREFIXES[i][1] + '，不能放应用数据。'
+         + '请改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
+  }
+  return '';
+}
+
+// 程序目录的冲突检查：留空 = 默认 <安装目录>/openclaw，永远安全
+function ocDirProblem(base, ocdir){
+  base = normDir(base); ocdir = normDir(ocdir);
+  if (!ocdir) return '';
+  var p = dirProblem(ocdir);
+  if (p) return p;
+  if (base && ocdir === base)
+    return '程序目录不能等于安装目录（' + base + '）：那样卸载时会连带删除数据（会话 / 工作区）。'
+         + '留空即可 —— 程序会自动装到 ' + base + '/openclaw。';
+  if (base && base.indexOf(ocdir + '/') === 0)
+    return '程序目录不能是安装目录的上级（' + ocdir + ' 包含 ' + base + '）：'
+         + '卸载时会连同安装目录（含数据）一起删除。留空即可 —— 程序会自动装到 '
+         + base + '/openclaw。';
+  return '';
+}
+
+function setHint(id, msg){
+  var el = $(id);
+  if (!el) return;
+  el.textContent = msg || '';            // 服务端数据 / 用户输入只进 textContent
+  el.style.display = msg ? '' : 'none';
+}
+
+function currentDirs(){
+  return {
+    base:  normDir($('in-dir-custom').value || $('in-dir').value),
+    ocdir: normDir($('in-ocdir-custom').value)
+  };
+}
+
+// 刷新两条 hint，并把本次检查结果返回给调用方（提交前拦截用）
+function dirCheck(){
+  var d = currentDirs();
+  var baseMsg = dirProblem(d.base);
+  var ocMsg   = ocDirProblem(d.base, d.ocdir);
+  setHint('in-dir-warn', baseMsg);
+  setHint('in-ocdir-warn', ocMsg);
+  return { base: baseMsg, ocdir: ocMsg, dirs: d };
+}
+
 function loadInfo(){
   get(API.info, function(r){
     var d = jp(r.data||'{}', {});
@@ -301,6 +388,8 @@ function loadInfo(){
     renderDiscover(state.disc || []);
     // 同理：探测结果可能比 info / 版本列表先到，node_mode 与 engines 都影响提示内容。
     renderNodeExisting();
+    // 回填后的目录组合也要立刻检查一次（刷新 / 保存后不会残留旧的红字）
+    dirCheck();
   });
 }
 
@@ -338,6 +427,8 @@ function loadMounts(){
       if (cur2 && cur2.indexOf(m.path) === 0) o.selected = true;
       sel2.appendChild(o);
     });
+    // 下拉框重新生成后，选中的默认值可能变化 —— 重新比对一次
+    dirCheck();
   });
 }
 
@@ -673,6 +764,15 @@ $('btn-install').onclick = function(){
   var ocdir = $('in-ocdir-custom').value.trim();
   var nd  = $('in-node').value, oc = $('in-oc').value;
   if (!dir) { alert('请选择安装目录'); return; }
+  // 目录问题在提交前就拦住，并把"为什么不行、该怎么改"直接告诉用户；
+  // 真正的判定仍由后端 save / install 完成（这里只是提示性检查）。
+  var chk = dirCheck();
+  if (chk.base || chk.ocdir){
+    var why = chk.base || chk.ocdir;
+    alert('无法继续：' + why);
+    $('in-log').textContent = '安装未提交：' + why + '\n';
+    return;
+  }
   if (nd && nd !== 'auto' && !engineOK(nd.replace(/^v/,''), currentEngines())){
     alert('所选 Node.js ' + nd + ' 不满足 OpenClaw ' + oc + ' 的要求：' + currentEngines());
     return;
@@ -689,9 +789,11 @@ $('btn-install').onclick = function(){
   post(API.save, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: nd,
     npm_registry: $('in-registry').value, node_mirror: $('in-nodemirror').value, http_proxy: $('in-proxy').value }, function(sr){
     if (sr && sr.ok === false){
-      $('in-log').textContent = '设置保存失败：安装目录或端口未通过安全校验。\n'
-        + '端口需在 1025-65535；安装目录需在数据盘（如 /mnt/...），不能是 /etc、/tmp、/var 等系统路径。\n'
-        + '程序目录同样不能是系统路径，也不能等于安装目录或它的上级。\n';
+      $('in-log').textContent = '设置保存失败：服务端拒绝了本次配置。请按下面的提示检查对应输入框：\n'
+        + '· 安装目录：必须是数据盘上的绝对路径（如 /mnt/<磁盘>/OpenClaw），\n'
+        + '  不能是 /etc、/tmp、/var、/overlay、/rom 等系统路径，也不能是符号链接；\n'
+        + '· 程序目录：留空即可（默认 <安装目录>/openclaw），不能等于安装目录，也不能是它的上级；\n'
+        + '· 端口需在 1025-65535。\n';
       return;
     }
     $('btn-install').disabled = true;
@@ -795,9 +897,11 @@ $('btn-save').onclick = function(){
       setTimeout(loadInfo, 2000);
     });
 };
-$('in-dir').onchange = function(){ $('in-dir-custom').value = $('in-dir').value; };
-$('in-ocdir').onchange = function(){ $('in-ocdir-custom').value = $('in-ocdir').value; };
-$('in-ocdir-custom').oninput = function(){ state.ocdirTouched = true; };
+$('in-dir').onchange = function(){ $('in-dir-custom').value = $('in-dir').value; dirCheck(); };
+$('in-ocdir').onchange = function(){ $('in-ocdir-custom').value = $('in-ocdir').value; dirCheck(); };
+$('in-ocdir-custom').oninput = function(){ state.ocdirTouched = true; dirCheck(); };
+// 安装目录也是"程序目录 == 安装目录"的另一半：两边任一改动都要重新比对
+$('in-dir-custom').oninput = function(){ dirCheck(); };
 
 // ---------------------------------------------------------------- 备份 / 恢复
 function bkSay(msg, bad){
