@@ -24,7 +24,7 @@ button:disabled{background:#aaa;cursor:not-allowed}
 .oc-btn.gray{background:#6c757d}
 </style>
 
-<h2><a id="content" name="content">OpenClaw 助手 · 状态 / 安装</a></h2>
+<h2><a id="content" name="content">OpenClaw 助手 · 状态</a></h2>
 
 <div class="oc-card">
   <h3>运行状态</h3>
@@ -63,6 +63,7 @@ button:disabled{background:#aaa;cursor:not-allowed}
     <span id="node-update-text"></span>
     <button id="btn-node-update" class="oc-btn" style="margin-left:8px">更新 Node</button>
   </div>
+  <div id="st-op-hint" class="oc-hint" style="display:none;margin-top:10px"></div>
   <div id="diag-box" style="display:none;margin-top:12px">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
       <b id="diag-title">诊断</b>
@@ -85,115 +86,8 @@ button:disabled{background:#aaa;cursor:not-allowed}
   <div id="oc-disc-log" class="oc-log" style="display:none;height:auto;max-height:180px;margin-top:10px"></div>
 </div>
 
-<div class="oc-card">
-  <h3>安装 / 修复运行环境</h3>
-  <div class="oc-row">
-    <label>安装目录</label>
-    <select id="in-dir" style="min-width:320px"></select>
-    <input type="text" id="in-dir-custom" placeholder="或手动输入目录，如 /mnt/nvme0n1-3/Configs/OpenClaw" style="min-width:280px">
-  </div>
-  <div class="oc-hint" id="in-dir-hint">
-    <div id="in-dir-warn" class="oc-err" style="display:none;margin-bottom:4px"></div>
-    建议选数据盘挂载点下的目录，例如 /mnt/&lt;磁盘&gt;/OpenClaw；不要选 /overlay、/rom 等系统分区。
-  </div>
-
-  <div class="oc-row" style="margin-top:10px">
-    <label>程序目录</label>
-    <select id="in-ocdir" style="min-width:320px"></select>
-    <input type="text" id="in-ocdir-custom" placeholder="留空 = 安装目录/openclaw" style="min-width:280px">
-  </div>
-  <div class="oc-hint" id="in-ocdir-hint">
-    <div id="in-ocdir-warn" class="oc-err" style="display:none;margin-bottom:4px"></div>
-    OpenClaw 程序本体（含 node_modules，约 100MB+）的安装位置。
-    <b>留空</b>表示放在安装目录下；也可以单独指定，例如程序放内置存储、数据（会话/工作区）放大容量磁盘。
-    改动此项后需要重新执行安装。
-  </div>
-
-  <div class="oc-row" style="margin-top:14px">
-    <label>OpenClaw 版本</label>
-    <select id="in-oc"></select>
-    <button id="btn-reload-versions" class="oc-btn gray">重新获取版本</button>
-  </div>
-  <div class="oc-hint" id="in-engines">在线获取中…</div>
-
-  <div class="oc-row" style="margin-top:14px">
-    <label>Node.js 版本</label>
-    <select id="in-node"></select>
-  </div>
-  <div class="oc-hint" id="in-node-hint"></div>
-
-  <div class="oc-row" style="margin-top:14px">
-    <label>npm 源</label>
-    <select id="in-registry">
-      <option value="https://registry.npmjs.org">官方 registry.npmjs.org</option>
-      <option value="https://registry.npmmirror.com">npmmirror（国内加速）</option>
-    </select>
-  </div>
-  <div class="oc-row">
-    <label>Node.js 源</label>
-    <select id="in-nodemirror">
-      <option value="">自动（musl 用 unofficial-builds）</option>
-      <option value="https://unofficial-builds.nodejs.org/download/release">unofficial-builds（musl，官方）</option>
-      <option value="https://nodejs.org/dist">nodejs.org（glibc）</option>
-      <option value="https://registry.npmmirror.com/-/binary/node-unofficial-builds">npmmirror 镜像（国内加速）</option>
-    </select>
-  </div>
-  <div class="oc-row">
-    <label>HTTP 代理</label>
-    <input type="text" id="in-proxy" placeholder="例如 http://127.0.0.1:7890，可留空">
-  </div>
-
-  <div style="margin-top:14px">
-    <button id="btn-install">安装 / 修复运行环境</button>
-    <button id="btn-uninstall" class="oc-btn gray" style="background:#c05621">卸载运行时</button>
-  </div>
-
-  <div style="margin-top:14px">
-    <div class="oc-hint">安装日志</div>
-    <div class="oc-log" id="in-log">（尚未开始）</div>
-  </div>
-</div>
-
-<div class="oc-card">
-  <h3>基本设置</h3>
-  <div class="oc-row"><label>网关端口</label><input type="text" id="cfg-port" style="min-width:120px"></div>
-  <div class="oc-row"><label>绑定模式</label>
-    <select id="cfg-bind">
-      <option value="loopback">loopback（仅本机）</option>
-      <option value="lan">lan（局域网，默认）</option>
-      <option value="auto">auto</option>
-      <option value="tailnet">tailnet</option>
-      <option value="custom">custom</option>
-    </select>
-  </div>
-  <div class="oc-row"><label>开机自启</label>
-    <select id="cfg-enabled"><option value="1">启用</option><option value="0">禁用</option></select>
-  </div>
-  <div style="margin-top:10px"><button id="btn-save">保存并应用</button></div>
-</div>
-
-<div class="oc-card">
-  <h3>备份与恢复</h3>
-  <div class="oc-hint">
-    备份内容：OpenClaw 配置（模型 / 渠道 / 会话 / 工作区）与 UCI 设置。<br>
-    <b>不含</b> Node.js 运行时与 OpenClaw 程序本体 —— 这两项可重新安装，备份因此很小。<br>
-    <b style="color:#b00">⚠️ 备份文件内含 API Key，请勿外传</b>；归档权限固定为 600。
-  </div>
-  <div style="margin-top:10px">
-    <button id="btn-backup">立即备份</button>
-    <input type="text" id="bk-name" placeholder="备注名（可选）" style="min-width:150px">
-    <label style="margin-left:10px;font-size:12px">
-      <input type="checkbox" id="bk-ws" checked> 包含工作区数据
-    </label>
-    <button id="btn-bk-refresh" class="oc-btn gray">刷新列表</button>
-  </div>
-  <div style="margin-top:10px">
-    <input type="file" id="bk-file" accept=".gz">
-    <button id="btn-bk-upload" class="oc-btn gray">上传并恢复</button>
-    <span class="oc-hint" style="margin-left:6px">（上传的归档会先做安全校验，通过后才允许还原）</span>
-  </div>
-  <div id="bk-status" class="oc-hint" style="margin-top:8px"></div>
-  <div id="bk-list" style="margin-top:8px"></div>
+<div class="oc-hint" style="margin-top:4px">安装 / 修复运行环境、基本设置与备份恢复已移到
+  <a href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup")%>">设置</a> 页。
 </div>
 
 <script>
@@ -259,88 +153,6 @@ function get(url, cb){
   x.send();
 }
 function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }
-
-// ------------------------------- 目录检查（只是提示，最终以后端校验为准）
-// 后端 oc_validate_base_dir 还会解析符号链接、检查真实路径，这里只覆盖用户
-// 最常撞到的两类误填：目录落在系统分区上、程序目录 == 安装目录（或它的上级）。
-// 目的不是替代后端，而是在点"安装"之前就把"为什么不行、该怎么改"说清楚。
-var OC_SYS_PREFIXES = [
-  ['/bin','是系统程序目录'], ['/sbin','是系统程序目录'], ['/lib','是系统库目录'],
-  ['/usr','是系统程序目录'], ['/etc','是系统配置目录'],
-  ['/proc','是内核虚拟文件系统'], ['/sys','是内核虚拟文件系统'], ['/dev','是设备目录'],
-  ['/run','是运行时临时目录'], ['/tmp','是内存临时目录（重启即清空）'],
-  ['/var','是运行时数据目录'], ['/overlay','是根文件系统的 overlay（系统分区）'],
-  ['/rom','是只读的固件分区'], ['/root','是 root 用户的主目录']
-];
-
-// 与后端一致：去掉首尾空白与尾部斜杠（"/" 本身保留）
-function normDir(p){
-  p = String(p || '').replace(/^\s+|\s+$/g, '');
-  while (p.length > 1 && p.charAt(p.length-1) === '/') p = p.slice(0, -1);
-  return p;
-}
-
-// 返回不适合放应用数据的原因；空字符串 = 这一层看不出问题
-function dirProblem(p){
-  p = normDir(p);
-  if (!p) return '';
-  if (p.charAt(0) !== '/') return '请填写以 / 开头的绝对路径。';
-  if (p === '/') return '根目录是系统分区，不能放应用数据。';
-  // 与后端 oc_validate_base_dir_shape 一致：不允许 . / .. 段（后端还会解析符号链接）
-  if (/(^|\/)\.\.?(\/|$)/.test(p)) return '路径不能包含 . 或 .. 段，请填写规范化后的绝对路径。';
-  for (var i = 0; i < OC_SYS_PREFIXES.length; i++){
-    var pre = OC_SYS_PREFIXES[i][0];
-    if (p !== pre && p.indexOf(pre + '/') !== 0) continue;
-    if (pre === '/overlay')
-      return '/overlay 是系统分区（根文件系统的 overlay），容量有限且与系统配置混在一起，不适合放应用数据。'
-           + '请改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
-    if (pre === '/rom')
-      return '/rom 是只读的固件分区，无法写入。请改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
-    return pre + ' ' + OC_SYS_PREFIXES[i][1] + '，不能放应用数据。'
-         + '请改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
-  }
-  return '';
-}
-
-// 程序目录的冲突检查：留空 = 默认 <安装目录>/openclaw，永远安全
-function ocDirProblem(base, ocdir){
-  base = normDir(base); ocdir = normDir(ocdir);
-  if (!ocdir) return '';
-  var p = dirProblem(ocdir);
-  if (p) return p;
-  if (base && ocdir === base)
-    return '程序目录不能等于安装目录（' + base + '）：那样卸载时会连带删除数据（会话 / 工作区）。'
-         + '留空即可 —— 程序会自动装到 ' + base + '/openclaw。';
-  if (base && base.indexOf(ocdir + '/') === 0)
-    return '程序目录不能是安装目录的上级（' + ocdir + ' 包含 ' + base + '）：'
-         + '卸载时会连同安装目录（含数据）一起删除。留空即可 —— 程序会自动装到 '
-         + base + '/openclaw。';
-  return '';
-}
-
-function setHint(id, msg){
-  var el = $(id);
-  if (!el) return;
-  el.textContent = msg || '';            // 服务端数据 / 用户输入只进 textContent
-  el.style.display = msg ? '' : 'none';
-}
-
-function currentDirs(){
-  return {
-    base:  normDir($('in-dir-custom').value || $('in-dir').value),
-    ocdir: normDir($('in-ocdir-custom').value)
-  };
-}
-
-// 刷新两条 hint，并把本次检查结果返回给调用方（提交前拦截用）
-function dirCheck(){
-  var d = currentDirs();
-  var baseMsg = dirProblem(d.base);
-  var ocMsg   = ocDirProblem(d.base, d.ocdir);
-  setHint('in-dir-warn', baseMsg);
-  setHint('in-ocdir-warn', ocMsg);
-  return { base: baseMsg, ocdir: ocMsg, dirs: d };
-}
 
 // ------------------------------- 控制台地址：用浏览器自己的主机名现拼
 // 后端 info.url 是按路由器 LAN 地址（uci network.lan.ipaddr）拼的，
@@ -439,13 +251,6 @@ function loadInfo(){
     $('st-url').textContent = (d.status=='running') ? (d.url || '-') : '-';
     // 「打开控制台」的导航目标与两个可复制地址：用浏览器主机名现拼，见 renderOpen()。
     renderOpen();
-    $('cfg-port').value = d.port||'18789';
-    $('cfg-bind').value = d.bind||'lan';
-    if (d.base_dir && !$('in-dir-custom').value) $('in-dir-custom').value = d.base_dir;
-    // 程序目录：只在用户还没动过输入框时回填，否则每次轮询都会覆盖用户正在编辑的内容
-    if (d.oc_dir_custom && !state.ocdirTouched) $('in-ocdir-custom').value = d.openclaw_dir || '';
-    // 记住服务端当前保存的配置值，用于在安装前判断"程序目录是否被改动"
-    state.savedOcdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
     // 当前版本已知，结合（可能更晚到达的）版本列表决定是否提示更新 Node
     renderNodeUpdate();
     // 已有安装列表要按"当前安装目录"过滤，而 discover 可能比 info 先返回；
@@ -453,47 +258,6 @@ function loadInfo(){
     renderDiscover(state.disc || []);
     // 同理：探测结果可能比 info / 版本列表先到，node_mode 与 engines 都影响提示内容。
     renderNodeExisting();
-    // 回填后的目录组合也要立刻检查一次（刷新 / 保存后不会残留旧的红字）
-    dirCheck();
-  });
-}
-
-function loadMounts(){
-  get(API.mounts, function(r){
-    var arr = jp(r.data||'[]', []);
-    var sel = $('in-dir'), cur = $('in-dir-custom').value || (state.info && state.info.base_dir) || '';
-    sel.innerHTML = '';
-    arr.forEach(function(m){
-      var o = document.createElement('option');
-      o.value = m.path.replace(/\/$/,'') + '/OpenClaw';
-      o.textContent = m.path + '  （可用 ' + m.free_mb + ' MB，' + m.dev + '）';
-      if (cur && cur.indexOf(m.path) === 0) o.selected = true;
-      sel.appendChild(o);
-    });
-    if (!arr.length){
-      var o = document.createElement('option');
-      o.value = '/mnt/data/OpenClaw'; o.textContent = '/mnt/data（未检测到外置盘）';
-      sel.appendChild(o);
-    }
-
-    // 程序目录选择：比安装目录多一个"留空 = 默认"的选项
-    var sel2 = $('in-ocdir');
-    var cur2 = $('in-ocdir-custom').value || '';
-    sel2.innerHTML = '';
-    var def = document.createElement('option');
-    def.value = '';
-    def.textContent = '（默认）与安装目录同盘 → <安装目录>/openclaw';
-    if (!cur2) def.selected = true;
-    sel2.appendChild(def);
-    arr.forEach(function(m){
-      var o = document.createElement('option');
-      o.value = m.path.replace(/\/$/,'') + '/OpenClaw';
-      o.textContent = m.path + '  （可用 ' + m.free_mb + ' MB，' + m.dev + '）';
-      if (cur2 && cur2.indexOf(m.path) === 0) o.selected = true;
-      sel2.appendChild(o);
-    });
-    // 下拉框重新生成后，选中的默认值可能变化 —— 重新比对一次
-    dirCheck();
   });
 }
 
@@ -529,27 +293,12 @@ function cmpOne(v, c){
   return true;
 }
 
+// 状态页只保留版本列表，用于判断「是否有更新的 Node」与「本机 Node 是否满足要求」；
+// 版本下拉框与 engines 数据源提示在 openclaw/setup 页面。
 function loadVersions(refresh){
   get(API.versions + (refresh ? '?refresh=1' : ''), function(r){
-    var oc = jp(r.openclaw||'[]', []), nd = jp(r.node||'[]', []);
-    state.ocList = oc; state.nodeList = nd;
-    var src = jp(r.sources||'{}', {});
-    $('in-engines').textContent = '数据源：npm ' + (src.npm||'') + '  |  node ' + (src.node||'') + '  |  ' + (src.arch||'') + (src.musl=='1'?' musl':' glibc');
-
-    var sel = $('in-oc'); sel.innerHTML = '';
-    var seen = {};
-    oc.slice().reverse().forEach(function(v){
-      if (seen[v.version]) return; seen[v.version] = 1;
-      var o = document.createElement('option');
-      o.value = v.version;
-      o.textContent = v.version + (v.tag ? '  [' + v.tag + ']' : '') + '  (node ' + (v.engines||'any') + ')';
-      if (v.tag === 'latest') o.selected = true;
-      sel.appendChild(o);
-    });
-    if (!sel.options.length){
-      var o = document.createElement('option'); o.value='latest'; o.textContent='latest（在线获取失败，将使用最新稳定版）'; sel.appendChild(o);
-    }
-    renderNodeOptions();
+    state.ocList = jp(r.openclaw||'[]', []);
+    state.nodeList = jp(r.node||'[]', []);
     // 版本列表可能比 info 更晚返回；两处都调用，先到的那次不满足条件时安静不显示。
     renderNodeUpdate();
     // engines 到位后，已有 Node 的提示要重新判定（可能从"可用"变成"版本不满足"）。
@@ -557,37 +306,13 @@ function loadVersions(refresh){
   });
 }
 
+// 状态页没有版本下拉框，无法取「当前所选版本」；退回已安装版本的 engines。
 function currentEngines(){
-  var v = $('in-oc').value, e = '';
-  state.ocList.forEach(function(x){ if (x.version === v) e = x.engines || ''; });
-  return e;
-}
-
-function renderNodeOptions(){
-  var e = currentEngines();
-  var sel = $('in-node'); sel.innerHTML = '';
-  var prefer = null;
-  state.nodeList.forEach(function(n){
-    var ok = engineOK(n.num, e);
-    var o = document.createElement('option');
-    o.value = n.version;
-    o.textContent = n.version + (n.lts ? '  [LTS ' + n.lts + ']' : '') + (ok ? '' : '  ✗ 低于要求 ' + e);
-    if (!ok) { o.disabled = true; o.style.color = '#b00'; }
-    else if (!prefer) prefer = o;
-    sel.appendChild(o);
-  });
-  if (!sel.options.length){
-    var o = document.createElement('option'); o.value='auto'; o.textContent='auto（自动选择满足要求的版本）'; sel.appendChild(o);
-  } else if (prefer) { prefer.selected = true; }
-  var auto = document.createElement('option'); auto.value='auto'; auto.textContent='auto（自动选择满足要求的最新版本）'; sel.insertBefore(auto, sel.firstChild);
-  if (state.info && state.info.node) {
-    for (var i=0;i<sel.options.length;i++){ if (sel.options[i].value.replace(/^v/,'v') === state.info.node) sel.options[i].selected = true; }
+  var d = state.info || {}, ocv = d.openclaw || '', e = '';
+  if (ocv){
+    state.ocList.forEach(function(x){ if (x.version === ocv) e = x.engines || ''; });
   }
-  var hint = $('in-node-hint');
-  hint.innerHTML = '';                       // e comes from the version feed
-  hint.appendChild(document.createTextNode('OpenClaw ' + $('in-oc').value + ' 要求 Node.js：'));
-  var hb = document.createElement('b'); hb.textContent = e || 'any'; hint.appendChild(hb);
-  hint.appendChild(document.createTextNode('　低于该要求的版本已被禁用。'));
+  return e;
 }
 
 // --------------------------------------------------- Node.js 更新提示
@@ -639,6 +364,35 @@ function renderNodeUpdate(){
   box.style.display = '';
 }
 
+// 安装类操作的进度提示：安装日志已移到「设置」页，本页只显示一行状态。
+function stOpSay(msg, bad){
+  var el = $('st-op-hint');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = bad ? '#b00' : '';
+  el.style.display = msg ? '' : 'none';
+}
+
+// 只轮询安装状态（不读安装日志）：日志元素在设置页，本页不依赖它。
+function startInstallPoll(what, onDone){
+  if (state.logTimer) clearInterval(state.logTimer);
+  state.logTimer = setInterval(function(){
+    get(API.istatus, function(r){
+      var d = jp(r.data||'{}', {});
+      if (d.state === 'done' || d.state === 'failed'){
+        clearInterval(state.logTimer); state.logTimer = null;
+        // 「更新 Node」复用同一轮流程，结束时也必须恢复，否则按钮永久禁用。
+        if ($('btn-node-update')) $('btn-node-update').disabled = false;
+        stOpSay(what + (d.state==='done' ? '完成。' : '失败，请到设置页查看安装日志。'),
+                d.state==='failed');
+        loadInfo();
+        // 调用方（如「使用它」复用本机 Node）可在这里恢复自己的按钮 / 重新探测。
+        if (onDone) onDone(d.state);
+      }
+    });
+  }, 2000);
+}
+
 function startNodeUpdate(){
   var c = nodeUpdateCandidate();
   if (!c){ renderNodeUpdate(); return; }
@@ -647,46 +401,26 @@ function startNodeUpdate(){
 
   // 复用现有安装端点：oc_version 传"当前已装版本"，避免顺带把 OpenClaw 升级。
   var d = state.info || {};
-  var dir   = d.base_dir || $('in-dir-custom').value.trim() || $('in-dir').value;
+  var dir   = d.base_dir || '';
   var ocdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
   // 只有形如 1.2.3 的正式版本才回填；预发布/带后缀的版本（如 1.2.3-dev）不可靠，
   // 传下去会变成 npm 的固定版本约束，宁可回退到 latest。
   var oc    = /^v?\d+\.\d+\.\d+$/.test(String(d.openclaw || '')) ? d.openclaw : 'latest';
-  if (!dir){ alert('未获取到安装目录，请先刷新状态'); return; }
+  if (!dir){ alert('未获取到安装目录，请到设置页刷新后重试'); return; }
 
   $('btn-node-update').disabled = true;
-  $('in-log').textContent = '正在更新 Node.js 到 v' + c.latest + ' …（进度见下方安装日志）\n';
+  stOpSay('正在更新 Node.js 到 v' + c.latest + ' …（完整日志见「设置」页）');
   post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc,
                       node_version: 'v' + c.latest }, function(r){
     if (!r || r.ok === false){
       $('btn-node-update').disabled = false;
-      $('in-log').textContent = 'Node.js 更新启动失败：'
-        + ((r && (r.data || r.error)) || '服务无响应，请重试') + '\n';
+      stOpSay('Node.js 更新启动失败：'
+        + ((r && (r.data || r.error)) || '服务无响应，请重试'), true);
       return;
     }
-    $('in-log').textContent = 'Node.js 更新已启动，日志如下：\n';
-    startLogPoll();
+    stOpSay('Node.js 更新已启动，完成后本页会自动刷新。');
+    startInstallPoll('Node.js 更新');
   });
-}
-
-function startLogPoll(onDone){
-  if (state.logTimer) clearInterval(state.logTimer);
-  state.logTimer = setInterval(function(){
-    get(API.ilog, function(r){ $('in-log').textContent = r.log || '（暂无输出）'; $('in-log').scrollTop = $('in-log').scrollHeight; });
-    get(API.istatus, function(r){
-      var d = jp(r.data||'{}', {});
-      if (d.state === 'done' || d.state === 'failed'){
-        clearInterval(state.logTimer); state.logTimer = null;
-        $('btn-install').disabled = false;
-        // 「更新 Node」复用同一轮流程，结束时也必须恢复，否则按钮永久禁用。
-        if ($('btn-node-update')) $('btn-node-update').disabled = false;
-        $('in-log').textContent += '\n=== 安装' + (d.state==='done'?'完成':'失败') + ' ===';
-        loadInfo(); loadMounts();
-        // 调用方（如「使用它」复用本机 Node）可在这里恢复自己的按钮 / 重新探测。
-        if (onDone) onDone(d.state);
-      }
-    });
-  }, 2000);
 }
 
 // ------------------------------- 本机已有 Node 运行时：探测 / 一键复用
@@ -792,8 +526,8 @@ function loadNodeExisting(){
 
 function useExistingNode(e, btn){
   var d = state.info || {};
-  var dir = d.base_dir || $('in-dir-custom').value.trim() || $('in-dir').value;
-  if (!dir){ alert('未获取到安装目录，请先刷新状态后重试'); return; }
+  var dir = d.base_dir || '';
+  if (!dir){ alert('未获取到安装目录，请到设置页刷新后重试'); return; }
   if (!confirm('将把 OpenClaw 切换为使用本机已有的 Node.js '
              + (e.version || '') + '（' + e.path + '）。\n\n'
              + '· 复用现有安装流程，不再下载 Node 运行时；\n'
@@ -806,89 +540,25 @@ function useExistingNode(e, btn){
   if (btn) btn.disabled = true;
   state.nodeBusy = true;
   var host = $('st-node-existing');
-  if (host){ host.style.display = ''; host.textContent = '正在切换到本机已有的 Node.js …（进度见下方安装日志）'; }
-  $('in-log').textContent = '正在复用本机 Node.js ' + (e.version || '') + ' …\n';
+  if (host){ host.style.display = ''; host.textContent = '正在切换到本机已有的 Node.js …（完整日志见「设置」页）'; }
+  stOpSay('正在复用本机 Node.js ' + (e.version || '') + ' …');
   post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: 'system' }, function(r){
     if (!r || r.ok === false){
       state.nodeBusy = false;
-      $('in-log').textContent = '复用本机 Node 启动失败：'
-        + ((r && (r.data || r.error)) || '服务无响应，请重试') + '\n';
+      stOpSay('复用本机 Node 启动失败：'
+        + ((r && (r.data || r.error)) || '服务无响应，请重试'), true);
       loadNodeExisting();                 // 重绘并恢复按钮
       return;
     }
-    $('in-log').textContent = '复用本机 Node 已启动，日志如下：\n';
-    startLogPoll(function(){ state.nodeBusy = false; loadNodeExisting(); });
+    stOpSay('复用本机 Node 已启动，完成后本页会自动刷新。');
+    startInstallPoll('切换到本机 Node.js ', function(){ state.nodeBusy = false; loadNodeExisting(); });
   });
 }
-
-$('in-oc').onchange = renderNodeOptions;
-$('btn-reload-versions').onclick = function(){ $('in-engines').textContent='正在在线获取…'; loadVersions(true); };
-
-$('btn-install').onclick = function(){
-  var dir = $('in-dir-custom').value.trim() || $('in-dir').value;
-  var ocdir = $('in-ocdir-custom').value.trim();
-  var nd  = $('in-node').value, oc = $('in-oc').value;
-  if (!dir) { alert('请选择安装目录'); return; }
-  // 目录问题在提交前就拦住，并把"为什么不行、该怎么改"直接告诉用户；
-  // 真正的判定仍由后端 save / install 完成（这里只是提示性检查）。
-  var chk = dirCheck();
-  if (chk.base || chk.ocdir){
-    var why = chk.base || chk.ocdir;
-    alert('无法继续：' + why);
-    $('in-log').textContent = '安装未提交：' + why + '\n';
-    return;
-  }
-  if (nd && nd !== 'auto' && !engineOK(nd.replace(/^v/,''), currentEngines())){
-    alert('所选 Node.js ' + nd + ' 不满足 OpenClaw ' + oc + ' 的要求：' + currentEngines());
-    return;
-  }
-  // 程序目录改了要重新安装，且旧目录不会自动清理 —— 先确认
-  if (state.savedOcdir !== undefined && ocdir !== state.savedOcdir){
-    if (!confirm('OpenClaw 程序目录已改动：\n\n'
-      + '  原：' + (state.savedOcdir || '（默认，随安装目录）') + '\n'
-      + '  新：' + (ocdir || '（默认，随安装目录）') + '\n\n'
-      + '旧目录不会被自动删除；本次安装会把程序装到新位置。继续？')) return;
-  }
-  // 先保存设置：save 现在会返回真实结果。目录/端口被安全校验拒绝时
-  // 必须停下来提示，否则安装会在后面以难懂的方式失败。
-  post(API.save, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: nd,
-    npm_registry: $('in-registry').value, node_mirror: $('in-nodemirror').value, http_proxy: $('in-proxy').value }, function(sr){
-    if (sr && sr.ok === false){
-      $('in-log').textContent = '设置保存失败：服务端拒绝了本次配置。请按下面的提示检查对应输入框：\n'
-        + '· 安装目录：必须是数据盘上的绝对路径（如 /mnt/<磁盘>/OpenClaw），\n'
-        + '  不能是 /etc、/tmp、/var、/overlay、/rom 等系统路径，也不能是符号链接；\n'
-        + '· 程序目录：留空即可（默认 <安装目录>/openclaw），不能等于安装目录，也不能是它的上级；\n'
-        + '· 端口需在 1025-65535。\n';
-      return;
-    }
-    $('btn-install').disabled = true;
-    $('in-log').textContent = '安装已提交，正在准备…\n';
-    post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: nd }, function(r){
-      if (!r || r.ok === false){
-        $('btn-install').disabled = false;
-        $('in-log').textContent = '安装启动失败：' + ((r && (r.data || r.error)) || '服务无响应，请重试') + '\n';
-        return;
-      }
-      $('in-log').textContent = '安装已启动，日志如下：\n';
-      startLogPoll();
-    });
-  });
-};
-
-$('btn-uninstall').onclick = function(){
-  if (!confirm('将删除 OpenClaw 与 Node.js 运行时（保留配置数据），继续？')) return;
-  post(API.service, { action: 'stop' }, function(){});
-  var x = new XMLHttpRequest();
-  x.open('POST', '<%=luci.dispatcher.build_url("admin","services","openclaw","api","run")%>', true);
-  x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
-  x.send('cmd=uninstall');
-  setTimeout(function(){ loadInfo(); }, 3000);
-};
 
 $('btn-start').onclick   = function(){ post(API.service, {action:'start'},   function(){ setTimeout(loadInfo, 2500); }); };
 $('btn-stop').onclick    = function(){ post(API.service, {action:'stop'},    function(){ setTimeout(loadInfo, 1500); }); };
 $('btn-restart').onclick = function(){ post(API.service, {action:'restart'}, function(){ setTimeout(loadInfo, 3000); }); };
-$('btn-refresh').onclick = function(){ loadInfo(); loadMounts(); loadNodeExisting(); };
+$('btn-refresh').onclick = function(){ loadInfo(); loadNodeExisting(); };
 $('btn-open').onclick = openControl;
 // 只读地址框：聚焦 / 点击即全选，方便直接 Ctrl+C
 ['open-local','open-current'].forEach(function(id){
@@ -959,196 +629,6 @@ $('btn-repair').onclick = function(){
   if (!confirm('将检查并修复权限、目录、配置、服务与开机自启，然后重启网关。继续？')) return;
   diagRun('repair', '一键修复');
 };
-$('btn-save').onclick = function(){
-  post(API.save, { port: $('cfg-port').value, bind: $('cfg-bind').value, enabled: $('cfg-enabled').value },
-    function(r){
-      if (!r || r.ok === false){
-        alert('保存失败：' + ((r && (r.data || r.error)) || '服务无响应，请检查端口（1025-65535）后重试'));
-        return;
-      }
-      alert('已保存');
-      setTimeout(loadInfo, 2000);
-    });
-};
-$('in-dir').onchange = function(){ $('in-dir-custom').value = $('in-dir').value; dirCheck(); };
-$('in-ocdir').onchange = function(){ $('in-ocdir-custom').value = $('in-ocdir').value; dirCheck(); };
-$('in-ocdir-custom').oninput = function(){ state.ocdirTouched = true; dirCheck(); };
-// 安装目录也是"程序目录 == 安装目录"的另一半：两边任一改动都要重新比对
-$('in-dir-custom').oninput = function(){ dirCheck(); };
-
-// ---------------------------------------------------------------- 备份 / 恢复
-function bkSay(msg, bad){
-  var el = $('bk-status');
-  el.textContent = msg;
-  el.style.color = bad ? '#b00' : '';
-}
-
-function fmtSize(n){
-  if (n >= 1048576) return (n/1048576).toFixed(1) + ' MB';
-  if (n >= 1024) return (n/1024).toFixed(0) + ' KB';
-  return n + ' B';
-}
-
-function fmtTime(ts){
-  if (!ts) return '-';
-  var d = new Date(ts * 1000);
-  var p = function(x){ return (x<10?'0':'') + x; };
-  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' '
-       + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
-}
-
-function loadBackups(){
-  var host = $('bk-list');
-  get(API.backups, function(r){
-    var arr = jp(r.data || '[]', []);
-    host.innerHTML = '';
-    if (r && r.ok === false && !arr.length){
-      host.textContent = '（读取备份列表失败，请刷新重试）';
-      host.className = 'oc-hint oc-warn';
-      return;
-    }
-    if (!arr.length){
-      host.textContent = '（暂无备份）';
-      host.className = 'oc-hint';
-      return;
-    }
-    host.className = '';
-    var t = document.createElement('table');
-    t.style.width = '100%';
-    t.style.fontSize = '12px';
-    t.style.borderCollapse = 'collapse';
-
-    var head = document.createElement('tr');
-    ['文件', '大小', '时间', '操作'].forEach(function(h){
-      var th = document.createElement('th');
-      th.textContent = h;
-      th.style.textAlign = 'left';
-      th.style.padding = '6px 8px';
-      th.style.borderBottom = '1px solid #ddd';
-      head.appendChild(th);
-    });
-    t.appendChild(head);
-
-    arr.forEach(function(b){
-      var tr = document.createElement('tr');
-
-      var tdName = document.createElement('td');
-      tdName.textContent = b.file;              // 服务端数据只进 textContent
-      tdName.style.padding = '6px 8px';
-      tdName.style.wordBreak = 'break-all';
-      tr.appendChild(tdName);
-
-      var tdSize = document.createElement('td');
-      tdSize.textContent = fmtSize(b.size || 0);
-      tdSize.style.padding = '6px 8px';
-      tr.appendChild(tdSize);
-
-      var tdTime = document.createElement('td');
-      tdTime.textContent = fmtTime(b.mtime);
-      tdTime.style.padding = '6px 8px';
-      tr.appendChild(tdTime);
-
-      var tdAct = document.createElement('td');
-      tdAct.style.padding = '6px 8px';
-      tdAct.style.whiteSpace = 'nowrap';
-
-      var mk = function(label, fn, gray){
-        var btn = document.createElement('button');
-        btn.textContent = label;
-        btn.className = 'oc-btn' + (gray ? ' gray' : '');
-        btn.style.fontSize = '12px';
-        btn.style.padding = '3px 9px';
-        btn.onclick = fn;
-        tdAct.appendChild(btn);
-        tdAct.appendChild(document.createTextNode(' '));
-        return btn;
-      };
-
-      mk('下载', function(){
-        window.open(API.backup_download + '?file=' + encodeURIComponent(b.file), '_blank');
-      }, true);
-      mk('校验', function(){
-        bkSay('正在校验 ' + b.file + ' …');
-        post(API.backup_verify, { file: b.file }, function(rr){
-          bkSay(rr && rr.ok ? ('校验通过：' + b.file) : ('校验失败：' + ((rr && rr.data) || '未知错误')), !(rr && rr.ok));
-        });
-      }, true);
-      mk('恢复', function(){
-        if (!confirm('将用 ' + b.file + ' 覆盖当前配置与数据，并重启网关。\n'
-                   + '系统会先自动做一次还原前快照。继续？')) return;
-        bkSay('正在恢复 ' + b.file + ' …（会先做安全快照，可能需要一会儿）');
-        post(API.restore, { file: b.file }, function(rr){
-          bkSay(rr && rr.ok ? '恢复完成，网关已重启。' : ('恢复失败：' + ((rr && rr.data) || '未知错误')), !(rr && rr.ok));
-          loadBackups();
-          setTimeout(loadInfo, 3000);
-        });
-      });
-      mk('删除', function(){
-        if (!confirm('删除备份 ' + b.file + ' ？')) return;
-        post(API.backup_delete, { file: b.file }, function(rr){
-          bkSay(rr && rr.ok ? ('已删除 ' + b.file) : ('删除失败：' + ((rr && rr.data) || '')), !(rr && rr.ok));
-          loadBackups();
-        });
-      }, true);
-
-      tr.appendChild(tdAct);
-      t.appendChild(tr);
-    });
-    host.appendChild(t);
-  });
-}
-
-$('btn-backup').onclick = function(){
-  var nm = $('bk-name').value.trim();
-  var ws = $('bk-ws').checked ? '1' : '0';
-  $('btn-backup').disabled = true;
-  bkSay('正在打包…');
-  post(API.backup_create, { name: nm, workspace: ws }, function(r){
-    $('btn-backup').disabled = false;
-    bkSay(r && r.ok ? '备份已创建。' : ('备份失败：' + ((r && r.data) || (r && r.error) || '未知错误')), !(r && r.ok));
-    loadBackups();
-  });
-};
-
-$('btn-bk-refresh').onclick = loadBackups;
-
-$('btn-bk-upload').onclick = function(){
-  var f = $('bk-file').files && $('bk-file').files[0];
-  if (!f){ alert('请先选择备份文件（.tar.gz）'); return; }
-  if (!confirm('将用上传的备份覆盖当前配置与数据，并重启网关。\n系统会先自动做一次还原前快照。继续？')) return;
-  $('btn-bk-upload').disabled = true;
-  bkSay('正在上传 ' + f.name + ' …');
-  var fd = new FormData();
-  fd.append('archive', f);
-  var x = new XMLHttpRequest();
-  x.open('POST', API.backup_upload, true);
-  // 网络中断/连接被重置时 readyState 也会到 4，但 responseText 为空；
-  // 显式处理 onerror 并恢复按钮，避免用户卡在"上传中"且无法重试。
-  x.onerror = function(){
-    $('btn-bk-upload').disabled = false;
-    bkSay('上传失败：网络错误或连接中断，请重试', true);
-  };
-  x.ontimeout = x.onerror;
-  x.onreadystatechange = function(){
-    if (x.readyState !== 4) return;
-    var r; try { r = JSON.parse(x.responseText); } catch(e){ r = {}; }
-    if (!r.ok){
-      $('btn-bk-upload').disabled = false;
-      bkSay('上传失败：' + (r.error || '未知错误'), true);
-      return;
-    }
-    bkSay('上传完成，正在校验并恢复…');
-    post(API.restore, { uploaded: r.file }, function(rr){
-      $('btn-bk-upload').disabled = false;
-      bkSay(rr && rr.ok ? '恢复完成，网关已重启。' : ('恢复失败：' + ((rr && rr.data) || '未知错误')), !(rr && rr.ok));
-      loadBackups();
-      setTimeout(loadInfo, 3000);
-    });
-  };
-  x.send(fd);
-};
-
-loadBackups();
 
 // ------------------------------------------- 已有 OpenClaw 安装：关联 / 迁移
 // 后端 openclaw.sh discover 输出 JSON 数组，元素形如
@@ -1252,9 +732,8 @@ function doLink(e, btn){
       + (d.base_dir ? '\n安装目录 → ' + d.base_dir : '')
       + (d.state_dir ? '\n数据目录 → ' + d.state_dir : '')
       + '\n若状态页显示的目录没有变化，请到「基本设置」检查安装目录 / 程序目录是否残留了旧值。');
-    // 关联只改 UCI：刷新状态卡与安装目录下拉，稍后再重新探测一次
+    // 关联只改 UCI：刷新状态卡，稍后再重新探测一次
     loadInfo();
-    loadMounts();
     setTimeout(loadDiscover, 800);
   });
 }
@@ -1293,16 +772,14 @@ function doMigrate(e){
     }
     for (var j = 0; j < btns.length; j++) btns[j].disabled = false;
     loadInfo();
-    loadMounts();
     setTimeout(loadDiscover, 1500);
   });
 }
 
 loadInfo();
-loadMounts();
 loadVersions(false);
 // discover 会扫描挂载点、可能很慢，而且 uhttpd 的 Lua 请求是串行的：
-// 放到最后并延后一点发起，先让状态卡 / 安装卡 / 版本列表的请求排出去，
+// 放到最后并延后一点发起，先让状态卡 / 版本列表的请求排出去，
 // 慢扫描就不会把首屏渲染挤在后面。
 setTimeout(loadDiscover, 600);
 // node-existing 同样要逐个候选跑 node -v，也放到首屏之后、discover 之后，

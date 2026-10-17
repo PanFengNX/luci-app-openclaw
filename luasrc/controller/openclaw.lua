@@ -14,7 +14,8 @@ local MODELS = "/usr/libexec/openclaw/models.sh"
 
 function index()
 	entry({"admin", "services", "openclaw"}, firstchild(), _("OpenClaw 助手"), 60).dependent = false
-	entry({"admin", "services", "openclaw", "status"},   template("openclaw/status"),   _("状态 / 安装"), 10)
+	entry({"admin", "services", "openclaw", "status"},   template("openclaw/status"),   _("状态"),      10)
+	entry({"admin", "services", "openclaw", "setup"},    template("openclaw/setup"),    _("设置"),      15)
 	entry({"admin", "services", "openclaw", "model"},    template("openclaw/model"),    _("模型"),      20)
 	entry({"admin", "services", "openclaw", "channels"}, template("openclaw/channels"), _("渠道"),      30)
 	entry({"admin", "services", "openclaw", "terminal"}, template("openclaw/terminal"), _("命令行"),    40)

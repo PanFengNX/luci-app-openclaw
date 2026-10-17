@@ -387,8 +387,8 @@ python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 /
 
 ## 使用
 
-1. LuCI → 服务 → **OpenClaw 助手** →「状态 / 安装」：选择安装目录、OpenClaw 版本、Node.js 版本 → 安装。
-2. 安装完成后点击「打开控制台」（自动带 token）。
+1. LuCI → 服务 → **OpenClaw 助手** →「设置」：选择安装目录、OpenClaw 版本、Node.js 版本 → 安装。
+2. 安装完成后回到「状态」页，点击「打开控制台」（自动带 token）。
 3. 「模型」页选择 `DeepSeek` / `Z.AI` 等，填 Key → 一键安装插件并设为默认。
 4. 出问题时点「一键修复」或「doctor 一键修复」。
 5. 「渠道」页安装微信插件；「命令行」页可执行任意 openclaw 子命令。
@@ -416,7 +416,7 @@ openclaw.sh run plugins list
 ```
 Makefile                                  OpenWrt 包定义（feeds / SDK）
 luasrc/controller/openclaw.lua            LuCI 路由 + JSON API
-luasrc/view/openclaw/*.htm                状态/安装、模型、渠道、命令行、日志
+luasrc/view/openclaw/*.htm                状态、设置、模型、渠道、命令行、日志
 root/etc/config/openclaw                 UCI 默认配置（独立）
 root/etc/init.d/openclaw                 procd 服务
 root/etc/uci-defaults/99-openclaw        首次安装初始化（用户、目录、默认挂载点）
