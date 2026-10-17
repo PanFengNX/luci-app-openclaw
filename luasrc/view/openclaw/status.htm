@@ -15,8 +15,12 @@
 .oc-ok{color:#2f8f3f}
 .oc-err{color:#c00}
 select,input[type=text]{padding:4px 6px;min-width:260px}
+/* 控制台地址：只读、等宽，点一下就能全选复制 */
+input.oc-addr{min-width:320px;font-family:monospace;font-size:12px;background:#f7f7f7;color:#333}
 button,.oc-btn{background:#0069d9;color:#fff;border:0;border-radius:4px;padding:6px 14px;cursor:pointer;margin-right:6px}
 button:disabled{background:#aaa;cursor:not-allowed}
+/* 「打开控制台」启用时是 .gray 的中灰，禁用时用更浅的灰，状态一眼可分 */
+#btn-open:disabled{background:#aaa;color:#f2f2f2}
 .oc-btn.gray{background:#6c757d}
 </style>
 
@@ -40,11 +44,20 @@ button:disabled{background:#aaa;cursor:not-allowed}
     <button id="btn-start">启动</button>
     <button id="btn-stop">停止</button>
     <button id="btn-restart">重启</button>
-    <button id="btn-open" class="oc-btn gray" style="display:none">打开控制台</button>
+    <button id="btn-open" class="oc-btn gray" disabled title="服务未启动">打开控制台</button>
+    <span id="open-hint" class="oc-hint" style="margin-right:8px">服务未启动</span>
     <button id="btn-doctor" class="oc-btn gray">体检 (doctor)</button>
     <button id="btn-doctor-fix" class="oc-btn gray">doctor 一键修复</button>
     <button id="btn-repair" class="oc-btn" style="background:#1a7f37">一键修复</button>
     <button id="btn-refresh" class="oc-btn gray">刷新</button>
+  </div>
+  <div id="oc-open-addrs" class="oc-hint" style="margin-top:8px">
+    <div style="margin-bottom:4px">本机地址
+      <input type="text" id="open-local" class="oc-addr" readonly placeholder="-">
+    </div>
+    <div>当前访问地址
+      <input type="text" id="open-current" class="oc-addr" readonly placeholder="-">
+    </div>
   </div>
   <div id="node-update" class="oc-hint" style="display:none;margin-top:10px">
     <span id="node-update-text"></span>
@@ -329,6 +342,71 @@ function dirCheck(){
   return { base: baseMsg, ocdir: ocMsg, dirs: d };
 }
 
+// ------------------------------- 控制台地址：用浏览器自己的主机名现拼
+// 后端 info.url 是按路由器 LAN 地址（uci network.lan.ipaddr）拼的，
+// bind=lan / 0.0.0.0 或 LAN IP 缺失时浏览器根本打不开；
+// 导航目标必须用当前地址栏里的主机名 + 后端端口重新拼。
+function browserHost(){
+  var h = '';
+  try { h = window.location.hostname || ''; } catch(e){ h = ''; }
+  h = String(h).replace(/^\s+|\s+$/g, '');
+  if (!h) return '127.0.0.1';                 // 极端情况（无 hostname）退回本机
+  if (h.charAt(0) === '[') return h;          // 已经是方括号形式
+  // location.hostname 对 IPv6 字面量不带方括号，URL 里必须补上；
+  // zone id 里的 % 在 URL 中要写成 %25。
+  if (h.indexOf(':') !== -1) return '[' + h.replace(/%/g, '%25') + ']';
+  return h;
+}
+
+// 端口只接受 1-65535 的整数；返回规范化后的字符串，无效时返回 ''
+function validPort(p){
+  var s = String(p == null ? '' : p).replace(/^\s+|\s+$/g, '');
+  if (!/^[0-9]{1,5}$/.test(s)) return '';
+  var n = parseInt(s, 10);
+  return (n >= 1 && n <= 65535) ? String(n) : '';
+}
+
+// 目标 URL 固定由本函数拼出（scheme 是字面量），仍保留 http(s) 校验作为最后一道闸。
+function controlUrl(port){
+  var p = validPort(port);
+  if (!p) return '';
+  var url = 'http://' + browserHost() + ':' + p + '/';
+  return /^https?:\/\//i.test(url) ? url : '';
+}
+
+// 统一渲染按钮状态与两个可复制地址；可安全重复调用。
+function renderOpen(){
+  var d = state.info || {};
+  var running = d.status === 'running';
+  var port = validPort(d.port);
+  var local = (running && port) ? 'http://127.0.0.1:' + port + '/' : '';
+  var cur   = (running && port) ? controlUrl(port) : '';
+  var le = $('open-local'), ce = $('open-current');
+  if (le) le.value = local;                   // 服务端数据只进 value，不拼 innerHTML
+  if (ce) ce.value = cur;
+  var btn = $('btn-open');
+  if (btn){
+    btn.disabled = !cur;
+    btn.title = cur ? '在新标签页打开 Control UI'
+                    : (running ? '端口无效，无法打开' : '服务未启动');
+  }
+  var hint = $('open-hint');
+  if (hint){
+    hint.textContent = cur ? '' : (running ? '端口无效，无法打开' : '服务未启动');
+    hint.style.display = cur ? 'none' : '';
+  }
+}
+
+// 点击时才读取最新的 port / token；token 只拼进新标签页的 hash，
+// 不写入 href，也不会被当前页的 Referer / 历史带走。
+function openControl(){
+  var d = state.info || {};
+  if (d.status !== 'running') return;
+  var url = controlUrl(d.port);
+  if (!url) return;                           // 端口无效时按钮本就置灰
+  window.open(url + '#token=' + String(d.token || ''), '_blank');
+}
+
 function loadInfo(){
   get(API.info, function(r){
     var d = jp(r.data||'{}', {});
@@ -356,24 +434,11 @@ function loadInfo(){
       + (d.oc_dir_custom ? '（自定义）' : '（默认）');
     $('st-free').textContent = (d.free_mb||0) + ' MB';
     $('st-arch').textContent = (d.arch||'-') + ' / ' + (d.musl=='1'?'musl':'glibc');
-    if (d.status=='running'){
-      // Show the URL as text only. Building an <a href> out of server data was
-      // an XSS sink, and putting the token in the href leaked it into the
-      // browser history and into Referer headers.
-      var url = d.url || '';
-      $('st-url').textContent = url;
-      $('btn-open').style.display='';
-      // 只允许导航到 http(s) 网关地址：服务端数据若被篡改，
-      // 直接 window.open 会把浏览器（连同 token）带到 javascript:/data: 等危险目标。
-      var safeUrl = /^https?:\/\//i.test(url) ? url : '';
-      $('btn-open').onclick = function(){
-        if (!safeUrl){ alert('网关地址无效，无法打开控制台：' + url); return; }
-        window.open(safeUrl + '#token=' + (d.token||''), '_blank');
-      };
-    } else {
-      $('st-url').textContent = '-';
-      $('btn-open').style.display='none';
-    }
+    // 网关地址仍然只作为文本展示：后端给的是它认为的绑定地址（lan 下可能是
+    // 0.0.0.0 / LAN IP），只用于排查，不作为导航目标。
+    $('st-url').textContent = (d.status=='running') ? (d.url || '-') : '-';
+    // 「打开控制台」的导航目标与两个可复制地址：用浏览器主机名现拼，见 renderOpen()。
+    renderOpen();
     $('cfg-port').value = d.port||'18789';
     $('cfg-bind').value = d.bind||'lan';
     if (d.base_dir && !$('in-dir-custom').value) $('in-dir-custom').value = d.base_dir;
@@ -824,6 +889,14 @@ $('btn-start').onclick   = function(){ post(API.service, {action:'start'},   fun
 $('btn-stop').onclick    = function(){ post(API.service, {action:'stop'},    function(){ setTimeout(loadInfo, 1500); }); };
 $('btn-restart').onclick = function(){ post(API.service, {action:'restart'}, function(){ setTimeout(loadInfo, 3000); }); };
 $('btn-refresh').onclick = function(){ loadInfo(); loadMounts(); loadNodeExisting(); };
+$('btn-open').onclick = openControl;
+// 只读地址框：聚焦 / 点击即全选，方便直接 Ctrl+C
+['open-local','open-current'].forEach(function(id){
+  var el = $(id);
+  if (!el) return;
+  el.onfocus = function(){ this.select(); };
+  el.onclick = function(){ this.select(); };
+});
 $('btn-node-update').onclick = startNodeUpdate;
 // ---- asynchronous diagnostics -------------------------------------------
 // doctor / repair run detached on the router; we poll for partial output so a
