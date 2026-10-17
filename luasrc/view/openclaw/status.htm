@@ -34,6 +34,7 @@ button:disabled{background:#aaa;cursor:not-allowed}
     <div class="oc-kv"><b>架构 / libc</b><span id="st-arch">-</span></div>
     <div class="oc-kv"><b>网关地址</b><span id="st-url">-</span></div>
   </div>
+  <div id="st-node-existing" class="oc-hint" style="display:none;margin-top:10px"></div>
   <div style="margin-top:12px">
     <button id="btn-start">启动</button>
     <button id="btn-stop">停止</button>
@@ -189,6 +190,7 @@ var API = {
   save: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","save")%>',
   mounts: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","mounts")%>',
   discover: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","discover")%>',
+  node_existing: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","node_existing")%>',
   link: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","link")%>',
   migrate: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate")%>',
   doctor: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>',
@@ -203,7 +205,7 @@ var API = {
   backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
   restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>'
 };
-var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, disc:null };
+var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, disc:null, nodeExisting:[], nodeBusy:false };
 
 function $(id){ return document.getElementById(id); }
 // 回调只允许触发一次：readyState==4 与 onerror 在某些浏览器上会同时到达，
@@ -297,6 +299,8 @@ function loadInfo(){
     // 已有安装列表要按"当前安装目录"过滤，而 discover 可能比 info 先返回；
     // 两边都重绘一次，谁后到谁生效。
     renderDiscover(state.disc || []);
+    // 同理：探测结果可能比 info / 版本列表先到，node_mode 与 engines 都影响提示内容。
+    renderNodeExisting();
   });
 }
 
@@ -392,6 +396,8 @@ function loadVersions(refresh){
     renderNodeOptions();
     // 版本列表可能比 info 更晚返回；两处都调用，先到的那次不满足条件时安静不显示。
     renderNodeUpdate();
+    // engines 到位后，已有 Node 的提示要重新判定（可能从"可用"变成"版本不满足"）。
+    renderNodeExisting();
   });
 }
 
@@ -507,7 +513,7 @@ function startNodeUpdate(){
   });
 }
 
-function startLogPoll(){
+function startLogPoll(onDone){
   if (state.logTimer) clearInterval(state.logTimer);
   state.logTimer = setInterval(function(){
     get(API.ilog, function(r){ $('in-log').textContent = r.log || '（暂无输出）'; $('in-log').scrollTop = $('in-log').scrollHeight; });
@@ -520,9 +526,143 @@ function startLogPoll(){
         if ($('btn-node-update')) $('btn-node-update').disabled = false;
         $('in-log').textContent += '\n=== 安装' + (d.state==='done'?'完成':'失败') + ' ===';
         loadInfo(); loadMounts();
+        // 调用方（如「使用它」复用本机 Node）可在这里恢复自己的按钮 / 重新探测。
+        if (onDone) onDone(d.state);
       }
     });
   }, 2000);
+}
+
+// ------------------------------- 本机已有 Node 运行时：探测 / 一键复用
+// 后端 openclaw.sh node-existing 输出 JSON 数组，元素形如
+//   {path, version, source, usable}
+// source ∈ system | plugin-global | plugin-private | mount（见 lib.sh 的说明）。
+// 「复用」走既有安装动作：install.sh 的 --node-version system（等价 --system-node，
+// USE_SYSTEM_NODE=1），不再下载 Node，直接用本机已有的运行时。
+// 与 discover 同策略：异步、失败或空结果安静隐藏，不弹错误。
+
+function nodeExistingItem(e){
+  return (e && e.path) ? e : null;
+}
+
+// 已知的 OpenClaw engines.node：优先当前所选版本，其次已装版本；都没有时返回 ''。
+// 拿不到时不做额外拦截，避免把可用运行时误判成不可用。
+function knownEngines(){
+  var e = currentEngines();
+  if (e) return e;
+  var d = state.info || {}, ocv = d.openclaw || '';
+  if (ocv){
+    state.ocList.forEach(function(x){ if (x.version === ocv) e = x.engines || ''; });
+  }
+  return e;
+}
+
+// 返回 {item, engines} 或 null。null = 不该提示（本插件运行时已在用 / 没有可复用项）。
+function nodeExistingCandidate(){
+  var list = (state.nodeExisting || []).filter(nodeExistingItem);
+  if (!list.length) return null;
+  var engines = knownEngines(), cand = null;
+  list.forEach(function(e){
+    if (cand) return;
+    if (e.usable !== true) return;                 // 跑不起来 / 版本不满足
+    if (e.source === 'plugin-global') return;      // 本插件自己的全局运行时：已经在用
+    // 后端在 engines 缓存缺失时会退化成"能跑起来就算 usable"（lib.sh），
+    // 这里按已知 engines 再复核一次，宁可少提示也不要误导。
+    if (engines && !engineOK(String(e.version||'').replace(/^v/,''), engines)) return;
+    cand = e;
+  });
+  if (!cand) return null;
+  // global 模式下运行期用的就是 /usr/bin/node（lib.sh oc_node_bin）：若候选正是它
+  // 且版本一致，说明已经在用了，不必再提示（避免反复出现「使用它」）。
+  var d = state.info || {};
+  if (d.node_mode === 'global' && String(cand.path||'') === '/usr/bin/node'
+      && String(d.node||'').replace(/^v/,'') === String(cand.version||'').replace(/^v/,'')
+      && String(d.node||'') !== ''){
+    return null;
+  }
+  return { item: cand, engines: engines };
+}
+
+function renderNodeExisting(){
+  var host = $('st-node-existing');
+  if (!host) return;
+  // 切换进行中：保留"正在切换"提示，别再长出按钮（安装期间点刷新也会走到这里）。
+  if (state.nodeBusy){ host.className = 'oc-hint'; host.style.display = ''; return; }
+  host.textContent = '';                 // 服务端数据只进 textContent / createTextNode
+  host.className = 'oc-hint';
+  host.style.color = '';
+  host.style.display = 'none';
+
+  var list = (state.nodeExisting || []).filter(nodeExistingItem);
+  var cand = nodeExistingCandidate();
+  if (cand){
+    var e = cand.item;
+    host.appendChild(document.createTextNode('检测到本机已有 Node '
+      + (e.version || '（版本未知）') + '（' + e.path + '），可直接使用。'));
+    var btn = document.createElement('button');
+    btn.className = 'oc-btn';
+    btn.style.marginLeft = '8px';
+    btn.textContent = '使用它';
+    btn.onclick = function(){ useExistingNode(e, btn); };
+    host.appendChild(btn);
+    host.style.display = '';
+    return;
+  }
+
+  // 没有可复用项，但存在跑不起来 / 版本不满足的条目：说明原因（列出 path 与 version）。
+  // 若本插件自己的运行时可用（已在用），则不打扰用户。
+  var ours = list.some(function(e){ return e.usable === true && e.source === 'plugin-global'; });
+  var bad  = list.filter(function(e){ return e.usable !== true; });
+  if (!ours && bad.length){
+    var engines = knownEngines();
+    var parts = bad.map(function(e){
+      return (e.path || '?') + '（' + (e.version || '版本未知') + '）';
+    });
+    host.textContent = '本机已有 Node 不满足 OpenClaw'
+      + (engines ? ' ' + engines : '') + ' 的要求：' + parts.join('、');
+    host.className = 'oc-hint oc-warn';
+    host.style.display = '';
+  }
+}
+
+function loadNodeExisting(){
+  get(API.node_existing, function(r){
+    // 失败 / 解析不出数组 / 空结果：安静隐藏，不弹窗、不报错。
+    if (!r || r.ok === false || r.net){ state.nodeExisting = []; renderNodeExisting(); return; }
+    state.nodeExisting = jp(r.data || '[]', []);
+    renderNodeExisting();
+  });
+}
+
+function useExistingNode(e, btn){
+  var d = state.info || {};
+  var dir = d.base_dir || $('in-dir-custom').value.trim() || $('in-dir').value;
+  if (!dir){ alert('未获取到安装目录，请先刷新状态后重试'); return; }
+  if (!confirm('将把 OpenClaw 切换为使用本机已有的 Node.js '
+             + (e.version || '') + '（' + e.path + '）。\n\n'
+             + '· 复用现有安装流程，不再下载 Node 运行时；\n'
+             + '· 会重新安装 OpenClaw 程序，过程中网关短暂停止。\n\n继续？')) return;
+
+  var ocdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
+  // 同「更新 Node」：只有形如 1.2.3 的正式版本才回填，预发布版本会让 npm 卡死在固定约束上。
+  var oc = /^v?\d+\.\d+\.\d+$/.test(String(d.openclaw || '')) ? d.openclaw : 'latest';
+
+  if (btn) btn.disabled = true;
+  state.nodeBusy = true;
+  var host = $('st-node-existing');
+  if (host){ host.style.display = ''; host.textContent = '正在切换到本机已有的 Node.js …（进度见下方安装日志）'; }
+  $('in-log').textContent = '正在复用本机 Node.js ' + (e.version || '') + ' …\n';
+  post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: 'system' }, function(r){
+    if (!r || r.ok === false){
+      state.nodeBusy = false;
+      $('in-log').textContent = '复用本机 Node 启动失败：'
+        + ((r && (r.data || r.error)) || '服务无响应，请重试') + '\n';
+      loadNodeExisting();                 // 重绘并恢复按钮
+      return;
+    }
+    $('in-log').textContent = '复用本机 Node 已启动，日志如下：\n';
+    startLogPoll(function(){ state.nodeBusy = false; loadNodeExisting(); });
+  });
 }
 
 $('in-oc').onchange = renderNodeOptions;
@@ -581,7 +721,7 @@ $('btn-uninstall').onclick = function(){
 $('btn-start').onclick   = function(){ post(API.service, {action:'start'},   function(){ setTimeout(loadInfo, 2500); }); };
 $('btn-stop').onclick    = function(){ post(API.service, {action:'stop'},    function(){ setTimeout(loadInfo, 1500); }); };
 $('btn-restart').onclick = function(){ post(API.service, {action:'restart'}, function(){ setTimeout(loadInfo, 3000); }); };
-$('btn-refresh').onclick = function(){ loadInfo(); loadMounts(); };
+$('btn-refresh').onclick = function(){ loadInfo(); loadMounts(); loadNodeExisting(); };
 $('btn-node-update').onclick = startNodeUpdate;
 // ---- asynchronous diagnostics -------------------------------------------
 // doctor / repair run detached on the router; we poll for partial output so a
@@ -976,5 +1116,8 @@ loadVersions(false);
 // 放到最后并延后一点发起，先让状态卡 / 安装卡 / 版本列表的请求排出去，
 // 慢扫描就不会把首屏渲染挤在后面。
 setTimeout(loadDiscover, 600);
+// node-existing 同样要逐个候选跑 node -v，也放到首屏之后、discover 之后，
+// 慢探测不会阻塞主信息渲染。
+setTimeout(loadNodeExisting, 900);
 </script>
 <%+footer%>

@@ -37,6 +37,7 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "log"},       call("api_log")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "mounts"},    call("api_mounts")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "discover"},  call("api_discover")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "node_existing"}, call("api_node_existing")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "link"},      call("api_link")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "migrate"},   call("api_migrate")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "doctor"},    call("api_doctor")).leaf = true
@@ -299,6 +300,16 @@ function api_discover()
 	-- 只读探测。可能较慢（每个候选目录一次 du，helper 内部有 timeout 封顶），
 	-- 所以前端必须异步调用、失败或空结果时安静隐藏卡片。
 	local r = sh(SH .. " discover")
+	out({ ok = true, data = r })
+end
+
+function api_node_existing()
+	-- 只读探测：列出本机已有的 node 运行时（JSON 数组，每项 path/version/source/usable）。
+	-- 与 api_discover 同一条约定：helper 只往 stdout 写 JSON、日志走 stderr，
+	-- 这里原样透传，前端拿到 data 后自己 JSON.parse。
+	-- 同样可能较慢（逐候选跑 node -v，helper 用 timeout 封顶），前端必须异步调用、
+	-- 失败或空结果时安静隐藏提示，不弹错误。
+	local r = sh(SH .. " node-existing")
 	out({ ok = true, data = r })
 end
 

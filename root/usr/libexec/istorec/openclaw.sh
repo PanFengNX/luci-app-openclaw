@@ -452,17 +452,21 @@ cmd_node_existing() {
 cmd_link() {
 	# link <dir> : 把本机已有的 OpenClaw 安装「关联」到本插件。
 	#
-	# 只改 UCI（main.base_dir / main.state_dir）指向它 —— 不复制文件、不建目录、
-	# 不 chown、不取锁，所以这里不调 require_safe：它校验的是「当前」的 base_dir
-	# 与端口，而 link 的目的恰恰是把它们指到别处。
+	# 只改 UCI（main.base_dir / main.state_dir 指向它，并清掉指向旧 base_dir 的
+	# 残留 main.state_dir / main.openclaw_dir）—— 不复制文件、不建目录、不 chown、
+	# 不取锁，所以这里不调 require_safe：它校验的是「当前」的 base_dir 与端口，
+	# 而 link 的目的恰恰是把它们指到别处。
 	#
 	# stdout 只允许出现 JSON（前端直接 JSON.parse）：日志一律走 oc_err（stderr），
 	# 与 cmd_discover 同一条约定 —— 谁在这里加一行 oc_info，谁的 JSON 就坏掉。
 	#
-	# 已知缺口：kind=ours 时若 UCI 里残留 main.state_dir / main.openclaw_dir，
-	# 它们优先于 base_dir 推导出的默认值，关联可能「报成功但不生效」。这里有意
-	# 不静默清空 —— 那会把用户自定义的数据目录改回一份旧副本，代价更大。
+	# 已知缺口（已修复）：kind=ours 时 base_dir 会被指到 <dir>，但 UCI 里若残留
+	# main.state_dir / main.openclaw_dir，它们优先于 base_dir 推导出的默认值，
+	# 关联可能「报成功但不生效」（数据其实还在旧目录）。这里只清「残留」，不清
+	# 「用户显式设置」——判定见下方：非空且位于旧 base_dir 之下 ⇒ 残留（是从旧
+	# base_dir 推导出来的）；非空但不在旧 base_dir 之下 ⇒ 用户显式指到别处，保留。
 	local dir="${2:-}" kind target="" base_dir="" state_dir=""
+	local old_base="" cur="" cleared="" state_cleared=0 f
 
 	[ -n "$dir" ] || {
 		oc_err "link: 缺少目录参数"
@@ -480,6 +484,9 @@ cmd_link() {
 	fi
 
 	kind="$(oc_probe_openclaw_dir "$dir")"
+	# 旧 base_dir 必须在下面写 main.base_dir 之前取到：残留判定要拿它做基准，
+	# 否则会把「新」base_dir 当成旧值，残留项就判不出来了。
+	old_base="$(oc_base_dir)"
 	case "$kind" in
 		ours)
 			# 本插件布局：base_dir 会被 oc_fix_perms 递归 chown/chmod，
@@ -512,15 +519,47 @@ cmd_link() {
 		return 2
 	fi
 
+	# 只清「残留」：kind=ours 会把 base_dir 指到别处，旧 base_dir 派生出的
+	# main.state_dir / main.openclaw_dir 随之失效并覆盖新默认值，必须清掉，
+	# 否则 link 报成功但数据仍在旧目录。用户显式指到别处（不在旧 base_dir
+	# 之下，例如大容量盘）的值保留不动 —— 清掉它会把数据改回一份旧副本。
+	if [ "$kind" = "ours" ] && [ -n "$old_base" ] && [ "$old_base" != "/" ]; then
+		for f in main.state_dir main.openclaw_dir; do
+			cur="$(uci_get "$f" '')"
+			[ -n "$cur" ] || continue
+			cur="${cur%/}"
+			[ -n "$cur" ] || continue
+			case "$cur" in
+				"$old_base"/*)
+					uci -q delete "${OC_UCI}.${f}" 2>/dev/null
+					oc_warn "link: 清除残留的 $f=$cur（位于旧安装目录 $old_base 之下）"
+					[ "$f" = "main.state_dir" ] && state_cleared=1
+					:
+					if [ -z "$cleared" ]; then
+						cleared="\"$f\""
+					else
+						cleared="$cleared,\"$f\""
+					fi
+					;;
+			esac
+		done
+	fi
+
 	case "$kind" in
 		ours) uci_set main.base_dir "$dir" ;;
 		*)    uci_set main.state_dir "$state_dir" ;;
 	esac
 	uci_commit
 
-	# 未设置的字段给空字符串，保持结构稳定
-	printf '{"ok":true,"kind":"%s","base_dir":"%s","state_dir":"%s"}\n' \
-		"$kind" "$(oc_json_str "$base_dir")" "$(oc_json_str "$state_dir")"
+	# state_dir 被清空后不再由 UCI 指定，实际生效值就是 base_dir 派生出的默认
+	# 数据目录；把它如实报给前端（不清空时 ours 仍报空串，保持原有语义）。
+	if [ "$state_cleared" = "1" ]; then
+		state_dir="$(oc_probe_data_dir "$base_dir" ours)"
+	fi
+
+	# 未设置的字段给空字符串，保持结构稳定；cleared 是被清空的 UCI 项（无则 []）
+	printf '{"ok":true,"kind":"%s","base_dir":"%s","state_dir":"%s","cleared":[%s]}\n' \
+		"$kind" "$(oc_json_str "$base_dir")" "$(oc_json_str "$state_dir")" "$cleared"
 }
 
 # ---------------------------------------------------------------- migrate
