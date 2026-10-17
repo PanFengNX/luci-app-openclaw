@@ -1,18 +1,80 @@
 <%+header%>
 <style>
-.oc-card{border:1px solid #ddd;border-radius:6px;padding:14px 16px;margin-bottom:14px;background:#fff}
-.oc-card h3{margin:0 0 10px 0;font-size:15px}
-.oc-row{margin-bottom:10px}
-.oc-row label{display:inline-block;width:150px;font-size:13px;color:#555;vertical-align:top}
-.oc-hint{font-size:12px;color:#888;margin-top:4px}
-select,input[type=text]{padding:4px 6px;min-width:280px}
-button,.oc-btn{background:#0069d9;color:#fff;border:0;border-radius:4px;padding:6px 14px;cursor:pointer;margin-right:6px}
+/* ===== OpenClaw 统一视图样式（6 个视图共用，逐字节一致） =====
+ * 中性色统一使用半透明 rgba(127,127,127,α)：同一个值在浅色底上呈浅灰、
+ * 在深色底上呈深灰，自动跟随 LuCI 主题，不依赖系统配色方案媒体查询。
+ * 强调色（蓝/绿/橙/红）保持固定十六进制，明暗底上均有足够对比度。 */
+:root{--oc-fg-dim:rgba(127,127,127,.95);--oc-fg-mute:rgba(127,127,127,.72);
+  --oc-line:rgba(127,127,127,.30);--oc-line-soft:rgba(127,127,127,.16);
+  --oc-surface:rgba(127,127,127,.06);--oc-surface-2:rgba(127,127,127,.12);
+  --oc-accent:#0b74d8;--oc-ok:#2f8f3f;--oc-warn:#c05621;--oc-err:#cc2222;}
+
+/* 卡片 */
+.oc-card{border:1px solid var(--oc-line);border-radius:10px;background:var(--oc-surface);padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.oc-card h3{margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--oc-line-soft);font-size:15px;font-weight:600}
+
+/* 渠道卡片头 */
+.oc-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.oc-head h3{margin:0;padding-bottom:0;border-bottom:0;font-size:15px}
+.oc-head .oc-tag:first-of-type{margin-left:auto}
+
+/* 键值区 */
+.oc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.oc-kv{font-size:13px;line-height:1.5;font-variant-numeric:tabular-nums}
+.oc-kv b{display:block;color:var(--oc-fg-mute);font-weight:normal;font-size:12px;margin-bottom:2px}
+
+/* 状态徽章 */
+.oc-badge{display:inline-block;border-radius:999px;padding:3px 10px;font-size:12px;color:#fff;white-space:nowrap}
+.oc-badge::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:#fff;margin-right:6px;vertical-align:1px}
+.oc-run{background:var(--oc-ok)}
+.oc-stop{background:#8a8a8a}
+.oc-none{background:var(--oc-warn)}
+
+/* 日志（深色控制台） */
+.oc-log{background:#1b1b1b;color:#e6e6e6;border-radius:8px;padding:12px;height:280px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap}
+.oc-log::-webkit-scrollbar{width:10px;height:10px}
+.oc-log::-webkit-scrollbar-thumb{background:rgba(127,127,127,.55);border-radius:6px}
+.oc-log::-webkit-scrollbar-track{background:transparent}
+
+/* 执行输出 */
+.oc-out{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;background:var(--oc-surface-2);border-radius:8px;padding:10px 12px;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-variant-numeric:tabular-nums}
+
+/* 表单行 */
+.oc-row{margin-bottom:12px}
+.oc-row label{display:inline-block;width:150px;font-size:13px;color:var(--oc-fg-dim);vertical-align:top}
+@media (max-width:600px){.oc-row label{display:block;width:auto;margin-bottom:4px}}
+
+/* 提示与语义文字 */
+.oc-hint{font-size:12px;color:var(--oc-fg-mute);margin-top:4px;line-height:1.6}
+.oc-note{border-left:3px solid var(--oc-accent);background:var(--oc-surface-2);border-radius:4px;padding:8px 10px;font-size:12px;color:var(--oc-fg-dim);margin-top:8px;line-height:1.6}
+.oc-warn{color:var(--oc-warn)}
+.oc-ok{color:var(--oc-ok)}
+.oc-err{color:var(--oc-err)}
+
+/* 小标签 */
+.oc-tag{display:inline-block;border-radius:999px;padding:2px 8px;font-size:12px;background:var(--oc-surface-2);color:var(--oc-fg-dim);white-space:nowrap;vertical-align:middle}
+.oc-tag.ok{color:var(--oc-ok)}
+.oc-tag.warn{color:var(--oc-warn)}
+.oc-tag.off{color:var(--oc-fg-mute)}
+
+/* 按钮 */
+button,.oc-btn{border:0;border-radius:6px;padding:6px 14px;font-size:13px;background:var(--oc-accent);color:#fff;cursor:pointer;margin-right:6px}
+button:hover,.oc-btn:hover{filter:brightness(.94)}
+button:focus-visible,.oc-btn:focus-visible{outline:2px solid var(--oc-accent);outline-offset:2px}
 .oc-btn.gray{background:#6c757d}
-.oc-btn.green{background:#1a7f37}
-.oc-tag{display:inline-block;background:#eef4ff;color:#2a5db0;border-radius:8px;padding:1px 8px;font-size:11px;margin-left:6px}
-.oc-tag.ok{background:#e8f6ec;color:#1a7f37}
-.oc-tag.warn{background:#fff4e5;color:#a15c00}
-.oc-out{background:#1e1e1e;color:#eaeaea;font-family:monospace;font-size:12px;padding:10px;border-radius:4px;white-space:pre-wrap;max-height:260px;overflow:auto}
+.oc-btn.green{background:var(--oc-ok)}
+button:disabled,.oc-btn:disabled{background:#9a9a9a;color:#fff;cursor:not-allowed;opacity:.85}
+button:disabled:hover,.oc-btn:disabled:hover{filter:none}
+#btn-open:disabled{background:#bdbdbd;color:#f7f7f7}
+
+/* 操作条 */
+.oc-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.oc-actions button,.oc-actions .oc-btn{margin-right:0}
+
+/* 表单控件 */
+select,input[type=text],input[type=password]{border:1px solid var(--oc-line);border-radius:6px;background:var(--oc-surface);padding:5px 8px;font-size:13px;min-width:260px;color:inherit}
+select:focus,input[type=text]:focus,input[type=password]:focus{border-color:var(--oc-accent);outline:none}
+input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;background:var(--oc-surface-2);min-width:320px}
 </style>
 
 <h2><a id="content" name="content">模型配置</a></h2>
