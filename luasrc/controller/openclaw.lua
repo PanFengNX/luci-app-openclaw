@@ -88,6 +88,43 @@ local function q(s)
 	return "'" .. s .. "'"
 end
 
+-- 私有临时目录。必须在这里声明：api_apply() 也要用 RUNDIR / need_dir()，
+-- 而 Lua 5.1 是词法作用域 —— 声明放在文件后半段时，前面的引用会解析成全局
+-- 查找（模块表与 _G 里都没有），填写 API Key 保存时直接报 nil 调用。
+local RUNDIR = "/tmp/.openclaw"
+
+-- RUNDIR 在全局可写的 /tmp 下：mkdir -p 会照单全收预先存在的同名条目，包括
+-- 本地用户预置的符号链接，root 随后就会把上传内容写进链接指向的文件。
+-- 所以先确认它不是符号链接，失败时由调用者拒绝本次写入。
+local function need_dir()
+	if sh("test -L " .. q(RUNDIR) .. " && echo symlink") == "symlink" then
+		return false
+	end
+	os.execute("mkdir -p " .. q(RUNDIR) .. " && chmod 700 " .. q(RUNDIR) .. " 2>/dev/null")
+	return true
+end
+
+-- sys.exec() 只返回 stdout 且丢掉退出码，写操作会因此一律回报成功。这里把
+-- 合并后的输出落到私有 rundir 的临时文件，退出码与文本都能拿到；调用方负责
+-- 在动作结束后删除临时文件（run_capture 自己删）。
+local MAX_CAPTURE = 262144   -- 256 KiB
+local function run_capture(args)
+	if not need_dir() then return false, "" end
+	local tmp = RUNDIR .. "/out-" .. os.date("%Y%m%d%H%M%S") .. "-" .. tostring(math.random(100000, 999999))
+	local rc = sys.call(args .. " >" .. q(tmp) .. " 2>&1")
+	local fh = io.open(tmp, "rb")
+	local txt = ""
+	if fh then
+		txt = fh:read("*a") or ""
+		fh:close()
+	end
+	os.remove(tmp)
+	if #txt > MAX_CAPTURE then
+		txt = "…（输出过长，仅显示最后 256KB）\n" .. txt:sub(-MAX_CAPTURE)
+	end
+	return rc == 0, txt
+end
+
 function api_info()
 	local r = sh(SH .. " info")
 	out({ ok = true, data = r })
@@ -255,17 +292,207 @@ function api_run()
 	out({ ok = true, output = r })
 end
 
+-- ---------------------------------------------------------------- channels
+-- 渠道动作全部转给 channels.sh（渠道注册表、参数表、凭据规则都只在那一处维护，
+-- 控制器不复制一份）。约定：
+--   * channels.sh channels-list 的 stdout 只有 JSON 数组，日志走 stderr。
+--   * 凭据只接受 --key-file：本控制器把浏览器 POST 上来的值写成 0600 临时文件，
+--     调用后立刻删除。值绝不进 argv，也绝不进 URL —— uhttpd 会把查询串写进
+--     访问日志，凭据一旦出现在 query 里就等于落盘。
+local CHANNELS = "/usr/libexec/openclaw/channels.sh"
+
+-- 渠道 id 先做形状校验，再经 q() 单引号转义后交给 shell。真正的合法集合在
+-- channels.sh 的 channel_canon 里；这里只挡住空串、前导 "-"（会被当成选项）
+-- 与任何可能改变命令结构的字符。
+local CH_ID = "^[a-z][a-z0-9_]*$"
+local CH_MAX_PARAMS = 32
+local CH_MAX_VALUE  = 8192
+
+local function ch_id(v)
+	if type(v) ~= "string" or #v == 0 or #v > 32 then return nil end
+	if not v:match(CH_ID) then return nil end
+	return v
+end
+
+-- channels.sh 的 config 动作把结果写成一行 JSON，进度日志走 stderr；
+-- run_capture 把两者合并了，所以按行找那条 JSON，取出脚本自己的错误文案。
+local function ch_json_error(txt)
+	for line in tostring(txt or ""):gmatch("[^\r\n]+") do
+		local t = line:match("^%s*(%b{})%s*$")
+		if t then
+			local j = jsonc.parse(t)
+			if type(j) == "table" and j.ok == false then
+				return tostring(j.error or "操作失败")
+			end
+		end
+	end
+	return nil
+end
+
+-- 私有临时文件：目录本身是 0700，文件创建后立刻收紧到 0600。
+-- 同名文件已存在时换一个后缀，避免同一秒内的两次请求互相覆盖
+-- （上一次的文件可能正被 channels.sh 读取）。
+local function ch_tmpfile(prefix)
+	if not need_dir() then return nil end
+	local base = prefix .. "-" .. os.date("%Y%m%d%H%M%S")
+	for i = 0, 100 do
+		local path = RUNDIR .. "/" .. (i == 0 and base or (base .. "-" .. i))
+		local probe = io.open(path, "rb")
+		if probe then
+			probe:close()
+		else
+			local fh = io.open(path, "wb")
+			if not fh then return nil end
+			fh:close()
+			os.execute("chmod 600 " .. q(path) .. " 2>/dev/null")
+			return path
+		end
+	end
+	return nil
+end
+
+-- 该渠道允许写入的键名：channels-list 里的 params[].name，或该渠道自己的
+-- 完整键（顶层 configKey 形如 "channels.<channelId>"）。这样前端不可能借
+-- config 动作改别的渠道，也改不到 channels 之外的键。
+local function ch_allowed_keys(ch)
+	local list = jsonc.parse(sh(CHANNELS .. " channels-list"))
+	if type(list) ~= "table" then return nil end
+	for _, c in ipairs(list) do
+		if type(c) == "table" and c.id == ch then
+			local names = {}
+			for _, p in ipairs(c.params or {}) do
+				if type(p) == "table" and type(p.name) == "string" then
+					names[p.name] = true
+				end
+			end
+			return names, tostring(c.configKey or "")
+		end
+	end
+	return nil
+end
+
+local function ch_key_ok(key, names, prefix)
+	if names[key] then return true end
+	if prefix == "" or key:sub(1, #prefix + 1) ~= prefix .. "." then return false end
+	local rest = key:sub(#prefix + 2)
+	return rest ~= ""
+		and rest:match("^[A-Za-z0-9_.-]+$") ~= nil
+		and rest:sub(1, 1) ~= "."
+		and rest:sub(-1) ~= "."
+		and not rest:find("%.%.")
+end
+
+-- 把 values 写成 --key-file 要求的 "name=value" 行。
+-- 值里的控制字符必须拒绝：换行会往文件里注入额外的一行 name=value，
+-- 等于让一次请求写入任意键。留空表示"不修改"（密码框永不回填）。
+local function ch_write_cred(path, values, names, prefix)
+	local lines, n, err = {}, 0, nil
+	for k, v in pairs(values) do
+		if type(k) ~= "string" or type(v) ~= "string" then
+			err = "参数格式无效"
+			break
+		elseif v ~= "" then
+			n = n + 1
+			if n > CH_MAX_PARAMS then
+				err = "一次提交的参数过多"
+				break
+			elseif not ch_key_ok(k, names, prefix) then
+				err = "参数名不在该渠道的配置项内：" .. k
+				break
+			elseif #v > CH_MAX_VALUE then
+				err = "参数值过长：" .. k
+				break
+			elseif v:find("%c") then
+				err = "参数值不能包含控制字符：" .. k
+				break
+			else
+				lines[#lines + 1] = k .. "=" .. v
+			end
+		end
+	end
+	if err then return false, err end
+	if n == 0 then return false, "没有填写任何配置项" end
+
+	local fh = io.open(path, "wb")
+	if not fh then return false, "无法创建临时密钥文件" end
+	local wrote = fh:write(table.concat(lines, "\n") .. "\n")
+	local closed = fh:close()
+	if not wrote or not closed then return false, "写入临时密钥文件失败" end
+	return true
+end
+
 function api_channels()
 	local act = http.formvalue("action") or "list"
-	local r
-	if act == "weixin_install" then
-		r = sh("/usr/libexec/openclaw/channels.sh weixin install")
-	elseif act == "weixin_login" then
-		r = sh("/usr/libexec/openclaw/channels.sh weixin login")
-	else
-		r = sh("/usr/libexec/openclaw/channels.sh list")
+
+	-- 只读：给前端渲染卡片用。data 是原样 JSON 字符串，前端自己 parse。
+	if act == "channels_list" then
+		local r = sh(CHANNELS .. " channels-list")
+		local list = jsonc.parse(r)
+		if type(list) ~= "table" then
+			out({ ok = false, error = "无法读取渠道列表（OpenClaw 可能未安装）" })
+			return
+		end
+		out({ ok = true, data = r })
+		return
 	end
-	out({ ok = true, output = r })
+
+	if act == "list" then
+		out({ ok = true, output = sh(CHANNELS .. " list") })
+		return
+	end
+
+	-- 兼容旧页面的动作名；实现走下面同一套（微信的 canonical id 是 wechat）
+	local ch = ch_id(http.formvalue("channel"))
+	if act == "weixin_install" or act == "weixin_login" then
+		ch = "wechat"
+		act = (act == "weixin_install") and "install" or "login"
+	end
+
+	if act ~= "install" and act ~= "login" and act ~= "status" and act ~= "config" then
+		out({ ok = false, error = "不支持的动作：" .. act })
+		return
+	end
+	if not ch then
+		out({ ok = false, error = "渠道参数无效" })
+		return
+	end
+
+	if act == "install" or act == "login" or act == "status" then
+		local ok, txt = run_capture(CHANNELS .. " " .. q(ch) .. " " .. act)
+		out({ ok = ok, output = txt })
+		return
+	end
+
+	-- config：值来自 POST body（http.formvalue 同时读 POST 与 query，但前端
+	-- 只会 POST；这里绝不把它们拼进命令行）。
+	local raw = http.formvalue("values")
+	local values = type(raw) == "string" and jsonc.parse(raw) or nil
+	if type(values) ~= "table" then
+		out({ ok = false, error = "配置内容无法解析" })
+		return
+	end
+	local names, prefix = ch_allowed_keys(ch)
+	if not names then
+		out({ ok = false, error = "未知渠道：" .. ch })
+		return
+	end
+	local path = ch_tmpfile("cred")
+	if not path then
+		out({ ok = false, error = "临时目录不可用" })
+		return
+	end
+	local okw, werr = ch_write_cred(path, values, names, prefix)
+	if not okw then
+		os.remove(path)
+		out({ ok = false, error = werr })
+		return
+	end
+	local ok, txt = run_capture(CHANNELS .. " " .. q(ch) .. " config --key-file " .. q(path))
+	-- 凭据文件用完即删：/tmp 是 tmpfs，留着只会把明文多留一会儿
+	os.remove(path)
+	local err = ch_json_error(txt)
+	if err then ok = false end
+	out({ ok = ok, output = txt, error = err })
 end
 
 function api_log()
@@ -388,22 +615,10 @@ end
 --   * 上传的归档先落到私有 rundir，再由 backup.sh 校验后才允许还原
 --   * 下载强制 attachment，避免浏览器直接渲染内容
 
-local RUNDIR = "/tmp/.openclaw"
 -- 首字符必须是字母数字：排除 "." / ".."（会被拼成路径穿越）与前导 "-"
 -- （会被 helper 的 getopts 当成选项）。这些名字会原样下传给 openclaw.sh。
 local SAFE_NAME = "^[A-Za-z0-9][A-Za-z0-9._-]*$"
 local MAX_UPLOAD = 64 * 1024 * 1024   -- 64 MiB
-
--- RUNDIR 在全局可写的 /tmp 下：mkdir -p 会照单全收预先存在的同名条目，包括
--- 本地用户预置的符号链接，root 随后就会把上传内容写进链接指向的文件。
--- 所以先确认它不是符号链接，失败时由调用者拒绝本次上传。
-local function need_dir()
-	if sh("test -L " .. q(RUNDIR) .. " && echo symlink") == "symlink" then
-		return false
-	end
-	os.execute("mkdir -p " .. q(RUNDIR) .. " && chmod 700 " .. q(RUNDIR) .. " 2>/dev/null")
-	return true
-end
 
 function api_backups()
 	local r = sh(SH .. " backups")
