@@ -1,10 +1,11 @@
 #!/bin/sh
 # openclaw - model provider configuration
 #
-# The model catalogue is built from what OpenClaw itself supports:
-#   1. curated presets shipped with this package (offline fallback)
+# The model catalogue is built from three layers, highest priority first:
+#   1. providers the user already configured in openclaw.json
 #   2. live discovery from the installed OpenClaw (`openclaw models list --all`)
-#   3. manual model id input
+#   3. curated presets shipped with this package (offline fallback)
+# plus manual model id input.
 # Selecting a provider installs its official plugin (if any), stores the API
 # key and sets the chosen model as the default - all in one step.
 # DeepSeek and Z.AI (zai/GLM) are part of the default preset set.
@@ -96,14 +97,232 @@ models_of() {
 	' "$PRESETS"
 }
 
+# ---------------------------------------------------------------- configured
+# openclaw.json is the source of truth for providers the user already set up
+# under models.providers.<id>. The CLI is not always runnable (fresh install,
+# npm install in progress, broken upgrade), and live discovery then returns
+# nothing - the catalogue must still show what is in the config file.
+#
+# The helpers below only read the file. jsonfilter (an OpenWrt base package,
+# already a dependency of this package) is used when present; the awk scanners
+# are a fallback that also cope with compact (single-line) JSON.
+
+json_slice() {
+	# json_slice <key>  (stdin: JSON text) -> the object/array value of "key"
+	# String- and escape-aware, so braces/brackets inside strings do not
+	# confuse it. Handles both pretty-printed and compact JSON.
+	awk -v key="$1" '
+		BEGIN { instr = 0; esc = 0; str = ""; last = ""; want = 0; cap = 0; depth = 0 }
+		{
+			s = $0 "\n"
+			for (i = 1; i <= length(s); i++) {
+				c = substr(s, i, 1)
+				if (cap) {
+					printf "%s", c
+					if (instr) {
+						if (esc) esc = 0
+						else if (c == "\\") esc = 1
+						else if (c == "\"") instr = 0
+					} else {
+						if (c == "\"") instr = 1
+						else if (c == "{" || c == "[") depth++
+						else if (c == "}" || c == "]") { depth--; if (depth == 0) exit }
+					}
+					continue
+				}
+				if (instr) {
+					if (esc) { str = str c; esc = 0 }
+					else if (c == "\\") esc = 1
+					else if (c == "\"") { instr = 0; last = str }
+					else str = str c
+					continue
+				}
+				if (c == "\"") { instr = 1; str = ""; continue }
+				if (c == ":" && last == key) want = 1
+				else if (want && (c == "{" || c == "[")) {
+					cap = 1; depth = 1; printf "%s", c; want = 0
+				}
+				else if (want && c != " " && c != "\t" && c != "\n" && c != "\r") want = 0
+			}
+		}
+	'
+}
+
+json_keys() {
+	# stdin: JSON object -> its direct member keys, one per line
+	awk '
+		BEGIN { depth = 0; instr = 0; esc = 0; expect = 0; buf = "" }
+		{
+			s = $0 "\n"
+			for (i = 1; i <= length(s); i++) {
+				c = substr(s, i, 1)
+				if (instr) {
+					if (esc) { buf = buf c; esc = 0 }
+					else if (c == "\\") esc = 1
+					else if (c == "\"") {
+						instr = 0
+						if (depth == 1 && expect) { print buf; expect = 0 }
+					} else buf = buf c
+					continue
+				}
+				if (c == "\"") { instr = 1; buf = ""; continue }
+				if (c == "{") { depth++; if (depth == 1) expect = 1; continue }
+				if (c == "}") { depth--; continue }
+				if (c == "," && depth == 1) { expect = 1; continue }
+				if (c == ":" && depth == 1) { expect = 0; continue }
+			}
+		}
+	'
+}
+
+json_scalar() {
+	# json_scalar <key>  (stdin: JSON object) -> scalar value of a direct member
+	awk -v key="$1" '
+		BEGIN { depth = 0; instr = 0; esc = 0; buf = ""; last = ""; want = 0; val = "" }
+		{
+			s = $0 "\n"
+			for (i = 1; i <= length(s); i++) {
+				c = substr(s, i, 1)
+				if (instr) {
+					if (esc) { buf = buf c; esc = 0 }
+					else if (c == "\\") esc = 1
+					else if (c == "\"") {
+						instr = 0
+						if (want) { print buf; exit }
+						last = buf
+					} else buf = buf c
+					continue
+				}
+				if (want) {
+					if (c == "\"") { instr = 1; buf = ""; continue }
+					if (c == " " || c == "\t" || c == "\n" || c == "\r") continue
+					if (c == "," || c == "}" || c == "]") { print val; exit }
+					val = val c
+					continue
+				}
+				if (c == "\"") { instr = 1; buf = ""; continue }
+				if (c == "{" || c == "[") { depth++; continue }
+				if (c == "}" || c == "]") { depth--; continue }
+				if (c == ":" && depth == 1 && last == key) { want = 1; val = "" }
+			}
+		}
+	'
+}
+
+json_model_ids() {
+	# stdin: a models array -> model ids, one per line.
+	# Accepts both [{"id":"x"},...] and ["x",...].
+	awk '
+		BEGIN { depth = 0; instr = 0; esc = 0; buf = ""; last = ""; want = 0 }
+		{
+			s = $0 "\n"
+			for (i = 1; i <= length(s); i++) {
+				c = substr(s, i, 1)
+				if (instr) {
+					if (esc) { buf = buf c; esc = 0 }
+					else if (c == "\\") esc = 1
+					else if (c == "\"") {
+						instr = 0
+						if (want) { if (buf != "") print buf; want = 0 }
+						else if (depth == 1 && buf != "") print buf
+						last = buf
+					} else buf = buf c
+					continue
+				}
+				if (c == "\"") { instr = 1; buf = ""; continue }
+				if (c == "{" || c == "[") { if (want) want = 0; depth++; continue }
+				if (c == "}" || c == "]") { depth--; continue }
+				if (c == ":" && depth == 2 && last == "id") want = 1
+				else if (c == ",") want = 0
+			}
+		}
+	'
+}
+
+configured_providers() {
+	# provider ids found under models.providers in openclaw.json
+	local conf blk
+	conf="$(oc_conf)"
+	[ -f "$conf" ] || return 0
+	blk=""
+	if command -v jsonfilter >/dev/null 2>&1; then
+		blk="$(jsonfilter -i "$conf" -e '$["models"]["providers"]' 2>/dev/null)"
+	fi
+	[ -n "$blk" ] || blk="$(json_slice providers <"$conf")"
+	[ -n "$blk" ] || return 0
+	printf '%s\n' "$blk" | json_keys
+}
+
+configured_field() {
+	# configured_field <provider-id> <field> -> scalar from openclaw.json
+	local p="$1" f="$2" conf v
+	case "$p" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+	case "$f" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+	conf="$(oc_conf)"
+	[ -f "$conf" ] || return 1
+	v=""
+	if command -v jsonfilter >/dev/null 2>&1; then
+		v="$(jsonfilter -i "$conf" -e "\$[\"models\"][\"providers\"][\"$p\"][\"$f\"]" 2>/dev/null | head -n1)"
+	fi
+	[ -n "$v" ] || v="$(json_slice providers <"$conf" | json_slice "$p" | json_scalar "$f")"
+	[ -n "$v" ] || return 1
+	printf '%s\n' "$v"
+}
+
+configured_models() {
+	# configured_models <provider-id> -> model ids from openclaw.json
+	local p="$1" conf arr
+	case "$p" in ''|*[!A-Za-z0-9_.-]*) return 0 ;; esac
+	conf="$(oc_conf)"
+	[ -f "$conf" ] || return 0
+	arr=""
+	if command -v jsonfilter >/dev/null 2>&1; then
+		arr="$(jsonfilter -i "$conf" -e "\$[\"models\"][\"providers\"][\"$p\"][\"models\"]" 2>/dev/null)"
+	fi
+	[ -n "$arr" ] || arr="$(json_slice providers <"$conf" | json_slice "$p" | json_slice models)"
+	[ -n "$arr" ] || return 0
+	printf '%s\n' "$arr" | json_model_ids
+}
+
+# Parsing the config once per provider would mean one jsonfilter run each;
+# catalog() needs the id list and a membership test per provider, so cache it.
+OC_CONF_PROVIDERS=""
+OC_CONF_PROVIDERS_READY=0
+configured_list() {
+	if [ "$OC_CONF_PROVIDERS_READY" != "1" ]; then
+		OC_CONF_PROVIDERS="$(configured_providers)"
+		OC_CONF_PROVIDERS_READY=1
+	fi
+	printf '%s' "$OC_CONF_PROVIDERS"
+}
+
+configured_has() {
+	[ -n "${1:-}" ] || return 1
+	printf '%s\n' "$(configured_list)" | grep -qxF -- "$1"
+}
+
 # ---------------------------------------------------------------- live discovery
+OC_LIVE_RAW=""
+OC_LIVE_READY=0
+live_raw() {
+	# `models list` / `providers list` start node and are expensive. catalog()
+	# needs both provider ids and per-provider model ids, so run them once.
+	if [ "$OC_LIVE_READY" != "1" ]; then
+		OC_LIVE_RAW=""
+		if [ -x "$(oc_oc_bin)" ]; then
+			OC_LIVE_RAW="$({
+				oc_run 20 models list --all
+				oc_run 20 providers list
+			} 2>/dev/null)"
+		fi
+		OC_LIVE_READY=1
+	fi
+	printf '%s' "$OC_LIVE_RAW"
+}
+
 live_providers() {
 	# provider ids OpenClaw currently knows about
-	[ -x "$(oc_oc_bin)" ] || return 0
-	{
-		oc_run 20 models list --all
-		oc_run 20 providers list
-	} 2>/dev/null | grep -o '[A-Za-z0-9._-]*/[A-Za-z0-9._:/-]*' | \
+	live_raw | grep -o '[A-Za-z0-9._-]*/[A-Za-z0-9._:/-]*' | \
 		awk -F/ '$1!="" && $2!="" {print $1}' | sort -u
 }
 
@@ -117,6 +336,34 @@ live_models() {
 	printf '%s' "$out" | grep -o '[A-Za-z0-9._:/-]*' | \
 		awk 'length($0) < 3 { next } /^(id|name|model|provider|models|all|list)$/ { next } { print }' | \
 		sort -u
+}
+
+live_models_of() {
+	# live_models_of <provider> -> model ids parsed from the cached
+	# `models list --all` output ("provider/model" pairs). No extra CLI call:
+	# catalog() asks this for every provider.
+	local p="$1"
+	[ -n "$p" ] || return 0
+	live_raw | grep -o '[A-Za-z0-9._-]*/[A-Za-z0-9._:/-]*' | \
+		awk -F/ -v p="$p" '$1 == p { m = $0; sub("^[^/]*/", "", m); if (m != "") print m }' | \
+		sort -u
+}
+
+# live_providers() itself walks the cached output; keep its result too so the
+# per-provider source lookup does not re-run grep/awk each time.
+OC_LIVE_PROVIDERS=""
+OC_LIVE_PROVIDERS_READY=0
+live_list() {
+	if [ "$OC_LIVE_PROVIDERS_READY" != "1" ]; then
+		OC_LIVE_PROVIDERS="$(live_providers)"
+		OC_LIVE_PROVIDERS_READY=1
+	fi
+	printf '%s' "$OC_LIVE_PROVIDERS"
+}
+
+live_has() {
+	[ -n "${1:-}" ] || return 1
+	printf '%s\n' "$(live_list)" | grep -qxF -- "$1"
 }
 
 discover() {
@@ -226,13 +473,28 @@ provider_configured() {
 }
 
 # ---------------------------------------------------------------- catalogue
+merge_models() {
+	# merge_models <provider> -> "<id>\t<source>" lines, highest priority first.
+	# configured wins over live, live wins over presets; duplicates are dropped
+	# so a model the user configured is never overwritten by a preset entry.
+	local p="$1"
+	{
+		configured_models "$p" | awk -v s=configured 'NF { print $0 "\t" s }'
+		live_models_of "$p" | awk -v s=live 'NF { print $0 "\t" s }'
+		models_of "$p" | awk -v s=preset 'NF { print $0 "\t" s }'
+	} | awk 'BEGIN { FS = "\t" } NF && !seen[$1]++ { print $1 "\t" $2 }'
+}
+
 catalog() {
-	# JSON array describing every provider OpenClaw supports here
-	local all id first=1 name plugin defm base keyurl m mfirst
-	all="$(preset_ids)"
-	if [ -x "$(oc_oc_bin)" ]; then
-		all="$(printf '%s\n%s\n' "$all" "$(live_providers)" | grep -v '^$' | awk '!seen[$0]++')"
-	fi
+	# JSON array describing every provider this box knows about: configured
+	# (openclaw.json) first, then live discovery, then shipped presets.
+	local all id first=1 name plugin defm base keyurl m msrc mfirst src tab
+	tab="$(printf '\t')"
+	all="$({
+		configured_list
+		live_list
+		preset_ids
+	} | grep -v '^$' | awk '!seen[$0]++')"
 	printf '['
 	for id in $all; do
 		[ -n "$id" ] || continue
@@ -241,20 +503,32 @@ catalog() {
 		defm="$(preset_field "$id" defaultModel)"
 		base="$(preset_field "$id" baseUrl)"
 		keyurl="$(preset_field "$id" keyUrl)"
+		# A provider that only exists in openclaw.json has no preset metadata:
+		# show its configured endpoint and its first configured model.
+		[ -n "$base" ] || base="$(configured_field "$id" baseUrl)"
+		[ -n "$defm" ] || defm="$(configured_models "$id" | head -n1)"
+		src="preset"
+		if configured_has "$id"; then
+			src="configured"
+		elif live_has "$id"; then
+			src="live"
+		fi
 		[ "$first" = "1" ] || printf ','
 		first=0
-		printf '{"id":"%s","name":"%s","plugin":"%s","bundled":%s,"installed":%s,"configured":%s,"hasKey":%s,"defaultModel":"%s","baseUrl":"%s","keyUrl":"%s","models":[' \
-			"$id" "$name" "${plugin:-}" \
+		printf '{"id":"%s","name":"%s","plugin":"%s","source":"%s","bundled":%s,"installed":%s,"configured":%s,"hasKey":%s,"defaultModel":"%s","baseUrl":"%s","keyUrl":"%s","models":[' \
+			"$(oc_json_str "$id")" "$(oc_json_str "$name")" "$(oc_json_str "${plugin:-}")" "$src" \
 			"$([ -n "$plugin" ] && echo false || echo true)" \
 			"$(plugin_installed "$id" && echo true || echo false)" \
 			"$(provider_configured "$id" && echo true || echo false)" \
 			"$(provider_has_key "$id" && echo true || echo false)" \
-			"${defm:-}" "${base:-}" "${keyurl:-}"
+			"$(oc_json_str "${defm:-}")" "$(oc_json_str "${base:-}")" "$(oc_json_str "${keyurl:-}")"
 		mfirst=1
-		for m in $(models_of "$id"); do
+		merge_models "$id" | while IFS="$tab" read -r m msrc; do
+			[ -n "$m" ] || continue
 			[ "$mfirst" = "1" ] || printf ','
 			mfirst=0
-			printf '{"id":"%s","name":"%s"}' "$m" "$m"
+			printf '{"id":"%s","name":"%s","source":"%s"}' \
+				"$(oc_json_str "$m")" "$(oc_json_str "$m")" "$(oc_json_str "${msrc:-preset}")"
 		done
 		printf ']}'
 	done
