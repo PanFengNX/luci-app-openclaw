@@ -20,6 +20,8 @@
 
 /* 键值区 */
 .oc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.oc-sub{margin:16px 0 8px;font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--oc-fg-mute);text-transform:none}
+.oc-card>.oc-sub:first-of-type{margin-top:0}
 .oc-kv{font-size:13px;line-height:1.5;font-variant-numeric:tabular-nums}
 .oc-kv b{display:block;color:var(--oc-fg-mute);font-weight:normal;font-size:12px;margin-bottom:2px}
 
@@ -80,30 +82,44 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
 <h2><a id="content" name="content">OpenClaw 助手 · 状态</a></h2>
 
 <div class="oc-card">
-  <h3>运行状态</h3>
+  <div class="oc-head">
+    <h3>运行状态</h3>
+    <span id="st-badge">加载中…</span>
+  </div>
+  <div class="oc-sub">运行环境</div>
   <div class="oc-grid">
-    <div class="oc-kv"><b>服务状态</b><span id="st-badge">加载中…</span></div>
     <div class="oc-kv"><b>OpenClaw 版本</b><span id="st-oc">-</span></div>
     <div class="oc-kv"><b>Node.js</b><span id="st-node">-</span><span id="st-node-mode" class="oc-hint" style="display:block"></span></div>
-    <div class="oc-kv"><b>端口 / 绑定</b><span id="st-port">-</span></div>
+    <div class="oc-kv"><b>架构 / libc</b><span id="st-arch">-</span></div>
     <div class="oc-kv"><b>安装目录</b><span id="st-dir">-</span></div>
     <div class="oc-kv"><b>程序目录</b><span id="st-ocdir">-</span></div>
     <div class="oc-kv"><b>剩余空间</b><span id="st-free">-</span></div>
-    <div class="oc-kv"><b>架构 / libc</b><span id="st-arch">-</span></div>
-    <div class="oc-kv"><b>网关地址</b><span id="st-url">-</span></div>
   </div>
   <div id="st-node-existing" class="oc-hint" style="display:none;margin-top:10px"></div>
-  <div style="margin-top:12px">
+  <div class="oc-sub">访问</div>
+  <div class="oc-grid">
+    <div class="oc-kv"><b>端口 / 绑定</b><span id="st-port">-</span></div>
+    <div class="oc-kv"><b>网关地址</b><span id="st-url">-</span></div>
+  </div>
+  <div class="oc-sub">服务控制</div>
+  <div class="oc-actions">
     <button id="btn-start">启动</button>
     <button id="btn-stop">停止</button>
     <button id="btn-restart">重启</button>
+    <button id="btn-refresh" class="oc-btn gray">刷新</button>
+  </div>
+  <div class="oc-sub">控制台</div>
+  <div class="oc-actions">
     <button id="btn-open" class="oc-btn gray" disabled title="服务未启动">打开控制台</button>
     <span id="open-hint" class="oc-hint" style="margin-right:8px">服务未启动</span>
+  </div>
+  <div class="oc-sub">诊断与修复</div>
+  <div class="oc-actions">
     <button id="btn-doctor" class="oc-btn gray">体检 (doctor)</button>
     <button id="btn-doctor-fix" class="oc-btn gray">doctor 一键修复</button>
     <button id="btn-repair" class="oc-btn" style="background:#1a7f37">一键修复</button>
-    <button id="btn-refresh" class="oc-btn gray">刷新</button>
   </div>
+  <div class="oc-sub">可复制的控制台地址</div>
   <div id="oc-open-addrs" class="oc-hint" style="margin-top:8px">
     <div style="margin-bottom:4px">本机地址
       <input type="text" id="open-local" class="oc-addr" readonly placeholder="-">
@@ -128,7 +144,9 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
 </div>
 
 <div class="oc-card" id="oc-disc-card" style="display:none">
-  <h3>检测到已有 OpenClaw 安装</h3>
+  <div class="oc-head">
+    <h3>检测到已有 OpenClaw 安装</h3>
+  </div>
   <div class="oc-hint">
     在本机其它位置发现了可用的 OpenClaw 安装 / 数据目录。两种处理方式：<br>
     <b>关联</b>：只把本插件配置指向它，<b>不复制任何文件</b>（两边共用同一份数据）。<br>
