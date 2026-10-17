@@ -41,6 +41,10 @@ TYPE_BLOB_32 = 0xA
 TYPE_ARRAY = 0xD
 TYPE_OBJECT = 0xE
 
+# adb_val := (type << 28) | off -- the low 28 bits hold the payload offset, so
+# an offset above this cannot be encoded without spilling into the type nibble.
+ADB_OFF_MAX = 0x0FFFFFFF
+
 BLOCK_ADB = 0
 BLOCK_SIG = 1
 BLOCK_DATA = 2
@@ -94,6 +98,11 @@ class AdbWriter:
         while len(self.buf) % align:
             self.buf.append(0)
         off = len(self.buf)
+        if off > ADB_OFF_MAX:
+            raise ValueError(
+                "ADB 载荷超过 28 位偏移上限（约 256MB）："
+                f"offset 0x{off:X} > 0x{ADB_OFF_MAX:X}"
+            )
         self.buf.extend(data)
         return off
 
