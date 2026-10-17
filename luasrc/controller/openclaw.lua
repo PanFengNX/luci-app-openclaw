@@ -53,6 +53,8 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "backup_upload"}, call("api_backup_upload")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_download"}, call("api_backup_download")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "restore"}, call("api_restore")).leaf = true
+	-- 诊断包下载（openclaw.sh export）：生成后立刻作为附件回传
+	entry({"admin", "services", "openclaw", "api", "export"}, call("api_export")).leaf = true
 end
 
 local function sh(args)
@@ -535,8 +537,82 @@ function api_backup_download()
 	end
 	local data = fh:read("*a") or ""
 	fh:close()
-	http.prepare_content("application/octet-stream")
+	-- 顺序不能反：prepare_content() 会立刻把响应头刷出并置 sent，
+	-- 之后再调用 header() 是空操作，附件名会丢。
 	http.header("Content-Disposition", 'attachment; filename="' .. f .. '"')
 	http.header("X-Content-Type-Options", "nosniff")
+	http.prepare_content("application/octet-stream")
 	http.write(data)
+end
+
+-- ---------------------------------------------------------------- export
+-- 诊断包下载。openclaw.sh export 会把脱敏后的 tar.gz 写到
+-- /tmp/luci-app-openclaw-diag-<ts>.tar.gz，stdout 只有一行 JSON：
+--   {"ok":true,"path":"...","size":N} / {"ok":false,"error":"..."}
+-- 这里只负责调用、解析路径、回传文件；export 子命令本身不改。
+local EXPORT_CHUNK  = 65536   -- 64 KiB
+
+local function export_fail(msg)
+	-- status() 会立刻把响应头刷出，所以 Content-Type 必须先写进头表；
+	-- 反过来调用（先 status 再 prepare_content）时后者不会再生效。
+	http.header("Content-Type", "application/json")
+	http.status(500, "Internal Error")
+	http.write(jsonc.stringify({ ok = false, error = tostring(msg) })
+		or '{"ok":false,"error":"export-failed"}')
+end
+
+function api_export()
+	local r = sh(SH .. " export")
+	local j = jsonc.parse(r)
+	if type(j) ~= "table" then
+		export_fail("导出结果无法解析")
+		return
+	end
+	if j.ok ~= true then
+		export_fail(j.error or "导出失败")
+		return
+	end
+
+	local path = j.path
+	-- 只接受 helper 默认输出位置的精确形状：
+	--   /tmp/luci-app-openclaw-diag-YYYYmmdd-HHMMSS.tar.gz
+	-- 路径由 helper 生成、不来自浏览器；这条白名单保证即使 helper 返回值
+	-- 被污染，本端点也不会变成任意文件读取 / 任意文件删除。
+	if type(path) ~= "string"
+		or not path:match("^/tmp/luci%-app%-openclaw%-diag%-%d%d%d%d%d%d%d%d%-%d%d%d%d%d%d%.tar%.gz$")
+	then
+		export_fail("导出路径不合法")
+		return
+	end
+
+	local fh = io.open(path, "rb")
+	if not fh then
+		export_fail("无法读取诊断包")
+		return
+	end
+	local size = fh:seek("end") or 0
+	fh:seek("set", 0)
+
+	-- 浏览器端文件名固定格式、带时间戳，不暴露 /tmp 路径，也不拼接请求参数。
+	local name = "openclaw-diag-" .. os.date("%Y%m%d-%H%M") .. ".tar.gz"
+
+	-- 先 header() 再 prepare_content()（理由同 api_backup_download）。
+	http.header("Content-Disposition", 'attachment; filename="' .. name .. '"')
+	http.header("X-Content-Type-Options", "nosniff")
+	http.header("Cache-Control", "no-store")
+	if size > 0 then
+		http.header("Content-Length", tostring(size))
+	end
+	http.prepare_content("application/octet-stream")
+
+	-- 分块写出：诊断包含完整日志，整份 read("*a") 会把包同时压在 Lua 与
+	-- uhttpd 的内存里；分块读只占一个 chunk。
+	while true do
+		local chunk = fh:read(EXPORT_CHUNK)
+		if not chunk then break end
+		http.write(chunk)
+	end
+	fh:close()
+	-- 每次导出都会生成新包，临时文件没有保留价值；/tmp 是 tmpfs，留着占内存。
+	os.remove(path)
 end
