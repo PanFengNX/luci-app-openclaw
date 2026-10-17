@@ -270,7 +270,7 @@ apply() {
 	# 都能在 helper 运行期间读到它。所以支持两种"不进 argv"的传法：
 	#   --key-file <path>  从 600 的临时文件读（LuCI 控制器用这个）
 	#   -                  从 $OC_APPLY_KEY 环境变量读（命令行用法）
-	local provider="$1" key="" kf="" model="" base=""
+	local provider="$1" key="" kf="" model="" base="" envname=""
 	shift
 	case "${1:-}" in
 		--key-file) kf="${2:-}"; shift 2 ;;
@@ -315,7 +315,7 @@ apply() {
 
 	# 2) credential into .env so the gateway process sees it
 	if [ -n "$key" ]; then
-		local envname envfile
+		local envfile
 		envname="$(preset_field "$provider" env)"
 		[ -n "$envname" ] || envname="$(printf '%s' "$provider" | tr 'a-z' 'A-Z')_API_KEY"
 
@@ -345,7 +345,20 @@ apply() {
 	fi
 
 	# 3) explicit provider config
-	[ -n "$key" ] && oc_run 60 config set "models.providers.${provider}.apiKey" "$key" >/dev/null 2>&1
+	# The key must never travel through argv: oc_run execs the CLI, so a plaintext
+	# key would sit in /proc/<pid>/cmdline (world readable) for as long as the
+	# command runs. OpenClaw wants credentials as SecretRefs anyway, so point the
+	# config at the variable we just wrote to .env. Old versions do not know the
+	# --ref-* flags; for those we fall back to the legacy plaintext form, loudly.
+	if [ -n "$key" ]; then
+		if ! oc_run 60 config set "models.providers.${provider}.apiKey" \
+			--ref-provider default --ref-source env --ref-id "$envname" >/dev/null 2>&1
+		then
+			oc_warn "当前 OpenClaw 版本不支持 SecretRef，密钥只能以明文写入配置（已写入 .env，建议升级 OpenClaw 后重跑本步）"
+			oc_run 60 config set "models.providers.${provider}.apiKey" "$key" >/dev/null 2>&1 \
+				|| oc_warn "API Key 写入配置失败：$provider（已写入 .env，可稍后重试）"
+		fi
+	fi
 	if [ -n "$base" ]; then
 		oc_run 60 config set "models.providers.${provider}.baseUrl" "$base" >/dev/null 2>&1
 	else

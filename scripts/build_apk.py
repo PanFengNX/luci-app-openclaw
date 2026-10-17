@@ -154,6 +154,22 @@ def build_data_tar(items, sde: int = 0) -> bytes:
     return buf.getvalue()
 
 
+def cut_tar_end(blob: bytes) -> bytes:
+    """Drop every trailing all-zero 512-byte block (abuild-tar --cut).
+
+    tarfile pads the archive up to a 10240-byte blocking factor, so chopping
+    the final 1024 bytes alone still leaves thousands of zero bytes behind.
+    Scan block-wise from the end and stop at the first all-zero block
+    (content blocks kept).  Every tar segment we emit -- control and
+    signature -- must go through this helper so the two can never drift
+    apart again.
+    """
+    end = len(blob)
+    while end >= 512 and blob[end - 512:end] == b"\0" * 512:
+        end -= 512
+    return blob[:end]
+
+
 def build_control_tar(pkginfo: str, with_script: bool, sde: int = 0) -> bytes:
     """tar *segment*: no trailing end-of-archive records."""
     buf = io.BytesIO()
@@ -175,15 +191,7 @@ def build_control_tar(pkginfo: str, with_script: bool, sde: int = 0) -> bytes:
             ti.mtime = sde
             ti.uname = ti.gname = "root"
             tf.addfile(ti, io.BytesIO(raw))
-    out = buf.getvalue()
-    # abuild-tar --cut: drop every trailing all-zero block.  tarfile pads the
-    # archive up to a 10240-byte blocking factor, so chopping the final 1024
-    # bytes alone still leaves thousands of zero bytes behind.  Scan block-wise
-    # from the end and stop at the first all-zero block (content blocks kept).
-    end = len(out)
-    while end >= 512 and out[end - 512:end] == b"\0" * 512:
-        end -= 512
-    return out[:end]
+    return cut_tar_end(buf.getvalue())
 
 
 def gz(data: bytes) -> bytes:
@@ -221,8 +229,11 @@ def sign_control(control_gz: bytes, keydir: Path, keyname: str):
         ti.uname = ti.gname = "root"
         tf.addfile(ti, io.BytesIO(sig))
     seg = buf.getvalue()
-    if seg.endswith(b"\0" * 1024):
-        seg = seg[:-1024]
+    # Same trailing-zero handling as the control segment: tarfile pads to a
+    # 10240-byte blocking factor, so the old "strip the last 1024 bytes"
+    # version left thousands of zero bytes behind.  Must stay in sync with
+    # build_control_tar() -- both call cut_tar_end().
+    seg = cut_tar_end(seg)
     ctl_file.unlink(missing_ok=True)
     return gz(seg), pub
 
