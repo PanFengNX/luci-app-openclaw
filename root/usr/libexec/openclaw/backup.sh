@@ -155,11 +155,12 @@ oc_archive_ok_size() {
 
 # ---------------------------------------------------------------- create
 cmd_create() {
-	local name="" ws=1
+	local name="" ws=1 data_override=""
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--name) shift; name="${1:-}"; [ $# -eq 0 ] || shift ;;
 			--no-workspace) ws=0; shift ;;
+			--data-dir) shift; data_override="${1:-}"; [ $# -eq 0 ] || shift ;;
 			*) shift ;;
 		esac
 	done
@@ -169,6 +170,16 @@ cmd_create() {
 	base="$(oc_base_dir)"
 	home="$(oc_home_dir)"
 	data="$(oc_data_dir)"
+	# --data-dir 是给 migrate 用的内部参数：migrate 可能在「当前 UCI 的
+	# state_dir 指向外部目录、但即将被替换的是 base 内的物理目标」时，
+	# 需要快照后者而不是 oc_data_dir()。只接受绝对路径并复用 base_dir 的
+	# 形态校验，避免把 /etc 之类的位置当数据目录打包。
+	if [ -n "$data_override" ]; then
+		data_override="${data_override%/}"
+		oc_validate_base_dir_shape "$data_override" \
+			|| die_json "非法的数据目录：$data_override"
+		data="$data_override"
+	fi
 	dir="$(backup_dir)"
 
 	[ -d "$data" ] || die_json "数据目录不存在：$data（尚未安装或未初始化？）"
@@ -239,6 +250,7 @@ cmd_create() {
 		printf 'openclaw=%s\n' "$(uci_get main.oc_version 'unknown')"
 		printf 'node=%s\n' "$(uci_get main.node_version 'unknown')"
 		printf 'base_dir=%s\n' "$base"
+		printf 'data_dir=%s\n' "$data"
 		printf 'openclaw_dir=%s\n' "$(oc_oc_dir)"
 		printf 'arch=%s\n' "$(oc_arch)"
 		printf 'system=OpenWrt %s\n' "$(oc_sys_version)"

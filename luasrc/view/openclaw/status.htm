@@ -1085,6 +1085,7 @@ function doLink(e, btn){
 function doMigrate(e){
   if (!confirm('将把\n\n  ' + e.path + '\n\n的内容复制到本插件的安装目录。\n'
              + '· 源目录保持不动，确认无误后你可以自行删除；\n'
+             + '· 若数据目录 / 程序目录当前指向安装目录之外，会一并搬到默认位置并清除对应的 UCI 设置；\n'
              + '· 目标已有的数据会先自动做一次安全快照；\n'
              + '· 大目录可能需要数分钟，期间请勿关闭页面。\n\n继续？')) return;
 
@@ -1099,7 +1100,18 @@ function doMigrate(e){
       discSay('迁移失败：' + (d.error || (r && r.error) || '服务无响应，请重试')
         + '\n源目录 ' + e.path + ' 未被改动，可稍后重试。', true);
     } else {
+      // 后端在来源位于安装目录之外时会把数据/程序目录搬到默认位置并清掉
+      // 对应的 UCI 项；relocations 用来如实展示「已从 X 搬到 Y」。
+      var rel = d.relocations || [];
+      var extra = '';
+      for (var i = 0; i < rel.length; i++) {
+        var it = rel[i] || {};
+        if (it.key && it.from && it.to) {
+          extra += '\n已重定位 ' + it.key + '：' + it.from + ' → ' + it.to;
+        }
+      }
       discSay('迁移完成：' + (d.from || e.path) + ' → ' + (d.to || '本插件目录')
+        + extra
         + '\n源目录保持原样，确认无误后可自行删除。');
     }
     for (var j = 0; j < btns.length; j++) btns[j].disabled = false;

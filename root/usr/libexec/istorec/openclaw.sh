@@ -574,9 +574,22 @@ cmd_link() {
 # 数据，先走 backup.sh 的安全快照；任何一步失败都只清理暂存目录，已存在的
 # 目标数据保持原样。
 #
-# 目标布局：<安装目录>/{home/.openclaw,openclaw,node}（可用 main.state_dir /
-# main.openclaw_dir 覆盖，但必须仍在 <安装目录> 之下 —— 否则一次 mv 无法原子
-# 完成，这里会明确拒绝，而不是留下一半新一半旧的状态）。
+# 关于 cp 与 mv：源目录 → 暂存目录始终用 cp -a。同分区时 mv 虽然只是 rename、
+# 更快，但它会消费源目录 —— 与「源目录保持原样、失败可回退」的契约冲突，
+# 且校验失败时源数据只剩暂存目录里那一份。跨分区时 mv 会退化成复制+删除源，
+# 中途失败更危险。真正需要同分区 rename 的是「暂存 → 目标」换入，那里用 mv，
+# 并在下面用 mig_fs_dev 校验同一文件系统（跨分区直接拒绝，不硬做）。
+#
+# 目标布局：<安装目录>/{home/.openclaw,openclaw,node}。
+#
+# 数据/程序目录有两种来源：
+#   A) main.state_dir / main.openclaw_dir 指向 <安装目录> 之内（含未设置时的
+#      默认值）：按相对路径搬到新目录的对应位置，UCI 保持不变。
+#   B) 指向 <安装目录> 之外（典型场景：先 link 到已有的 iStoreOS 安装）：
+#      重定位到上述默认位置 —— state_dir → <base>/home/.openclaw，
+#      openclaw_dir → <base>/openclaw；原子换入成功后删除对应 UCI 项并
+#      commit，让配置回到「由 base_dir 推导」的状态。这样 link 之后直接
+#      migrate 就能把外部安装搬进来，不需要用户先手工清空 UCI。
 #
 # stdout 只允许 JSON（前端直接 JSON.parse）：日志一律走 stderr，不用 oc_info。
 
@@ -585,6 +598,9 @@ MIG_OLD=""
 MIG_DST=""
 MIG_MOVED=0
 MIG_LOCKED=0
+# 成功 JSON 里的 relocated / relocations（只记录真正被重定位并清掉 UCI 的项）
+MIG_RELOCATED=""
+MIG_RELOCATIONS=""
 
 oc_mig_exit() {
 	mig_cleanup
@@ -650,13 +666,35 @@ mig_rand() {
 	printf '%s' "$r"
 }
 
+mig_reloc_add() {
+	# mig_reloc_add <key> <from> <to>
+	# 追加到成功 JSON 的 relocated（键名数组）与 relocations（明细对象数组）。
+	# 只有「文件已经搬到新位置、UCI 也已清掉」的项才调用这里，避免前端展示
+	# 一个其实没发生的重定位。
+	local k="$1" f="$2" t="$3" obj
+	obj="{\"key\":\"$k\",\"from\":\"$(oc_json_str "$f")\",\"to\":\"$(oc_json_str "$t")\"}"
+	if [ -z "${MIG_RELOCATED:-}" ]; then
+		MIG_RELOCATED="\"$k\""
+		MIG_RELOCATIONS="$obj"
+	else
+		MIG_RELOCATED="$MIG_RELOCATED,\"$k\""
+		MIG_RELOCATIONS="$MIG_RELOCATIONS,$obj"
+	fi
+}
+
 cmd_migrate() {
 	# migrate <dir> : 见本节开头的说明。成功输出
 	# {"ok":true,"from":..,"to":..,"kind":..}，失败输出 {"ok":false,"error":..}
 	local dir="${2:-}" kind src_root base state ocdir nodedir
 	local rel_state rel_oc rel_node
+	local state_external=0 oc_external=0
 	local src_data src_prog src_node
 	local dst swap_parent stage old full=1 need have_data before snap dev_stage dev_dst
+	local snap_src="" snap_src_phys="" uci_changed=0
+
+	# 每次调用都重置，避免（未来若被同进程复用）把上一次的重定位带进 JSON
+	MIG_RELOCATED=""
+	MIG_RELOCATIONS=""
 
 	# ---- 1) 参数与前置校验（此时未持锁、未写任何文件）----
 	if [ -z "$dir" ]; then
@@ -707,16 +745,25 @@ cmd_migrate() {
 		"$base"/*) mig_fail "拒绝迁移：源目录位于目标目录之内（$dir）" 2 ;;
 	esac
 
-	# 目标必须落在 base_dir 之下：暂存目录建在 base 的同级，只有这样才能用
-	# 一次 mv 原子换入。自定义到 base 之外的数据/程序目录无法一次搬完，
-	# 明确拒绝而不是做一次可能半途失败的多次移动。
+	# 数据/程序目录的来源分两种：
+	#   A) 在 base_dir 之内（含未设置时的默认值）：沿用相对路径，搬到新目录
+	#      的对应位置，UCI 保持不变；
+	#   B) 在 base_dir 之外（典型：link 之后 state_dir 指向已有安装）：重定位
+	#      到默认位置，原子换入成功后再清掉对应 UCI 项（见第 9b 步）。
+	# 目标位置仍然必须落在 base_dir 之下：暂存目录建在 base 的同级，只有这样
+	# 才能用一次 mv 原子换入 —— 这一点不因来源在外部而改变。
+	if [ "$state" = "$base" ]; then
+		mig_fail "拒绝迁移：数据目录不能等于安装目录（$base），请先修正 main.state_dir" 2
+	fi
 	rel_state="${state#"$base"/}"
 	if [ -z "$rel_state" ] || [ "$rel_state" = "$state" ]; then
-		mig_fail "拒绝迁移：数据目录 $state 不在安装目录 $base 之下，请先清空 main.state_dir" 2
+		state_external=1
+		rel_state="home/.openclaw"
 	fi
 	rel_oc="${ocdir#"$base"/}"
 	if [ -z "$rel_oc" ] || [ "$rel_oc" = "$ocdir" ]; then
-		mig_fail "拒绝迁移：程序目录 $ocdir 不在安装目录 $base 之下，请先清空 main.openclaw_dir" 2
+		oc_external=1
+		rel_oc="openclaw"
 	fi
 	rel_node=""
 	if [ "$(oc_node_mode)" = "private" ]; then
@@ -850,14 +897,23 @@ cmd_migrate() {
 	fi
 
 	# ---- 8) 目标已有数据 → 先做安全快照（复用 backup.sh，不另写一套）----
+	# 快照的必须是「即将被替换的物理目标」，不能直接用 backup.sh 默认的
+	# oc_data_dir()：来源在外部时（B），UCI 的 state_dir 指向源安装，而这里
+	# 要替换的是 <base>/home/.openclaw，两者不是同一个目录。若沿用默认值，
+	# 目标里的旧数据会被换走并删除，却从未进入快照。
 	have_data=0
 	if [ "$full" = "1" ]; then
-		[ -f "$base/$rel_state/openclaw.json" ] && have_data=1
+		snap_src="$base/$rel_state"
 	else
-		[ -f "$dst/openclaw.json" ] && have_data=1
+		snap_src="$dst"
 	fi
+	[ -f "$snap_src/openclaw.json" ] && have_data=1
 	if [ "$have_data" = "1" ]; then
-		before="$(sh "$OC_BACKUP" create --name "pre-migrate" 2>/dev/null)"
+		# 目标可能是符号链接：cp -a 会复制链接本身，归档里就多出一条链接
+		# 条目（restore 的 oc_archive_inspect 会整体拒绝）。先物理解析。
+		snap_src_phys="$(oc_canonical_dir "$snap_src" 2>/dev/null)"
+		[ -n "$snap_src_phys" ] || snap_src_phys="$snap_src"
+		before="$(sh "$OC_BACKUP" create --name "pre-migrate" --data-dir "$snap_src_phys" 2>/dev/null)"
 		snap=""
 		case "$before" in
 			*'"ok":true'*)
@@ -904,6 +960,45 @@ cmd_migrate() {
 		MIG_OLD=""
 	fi
 
+	# ---- 9b) 重定位后的 UCI 清理 ----
+	# 文件已经原子换入新位置，现在让配置也回到「由 base_dir 推导」的状态。
+	# 必须放在 oc_fix_perms 之前：它用 oc_state_dir()/oc_oc_dir() 推导路径，
+	# 晚清会让它继续按外部旧路径操作。oc_state_dir()/oc_oc_dir() 每次都读
+	# UCI，所以 delete + commit 之后后续调用立即返回新位置。
+	if [ "$state_external" = "1" ]; then
+		case "$state" in
+			"$src_root"|"$src_root"/*) ;;
+			*) oc_warn "注意：外部数据目录 $state 不属于本次迁移源 $src_root，其内容未被复制；原目录保持原样" ;;
+		esac
+		uci -q delete "${OC_UCI}.main.state_dir" 2>/dev/null
+		uci_changed=1
+		mig_reloc_add "state_dir" "$state" "$base/$rel_state"
+		mig_log "已重定位数据目录：$state → $base/$rel_state（清除 main.state_dir）"
+	fi
+	if [ "$oc_external" = "1" ]; then
+		if [ "$full" = "1" ]; then
+			case "$ocdir" in
+				"$src_root"|"$src_root"/*) ;;
+				*) oc_warn "注意：外部程序目录 $ocdir 不是本次迁移源的程序目录，其内容未被复制；原目录保持原样" ;;
+			esac
+			uci -q delete "${OC_UCI}.main.openclaw_dir" 2>/dev/null
+			uci_changed=1
+			mig_reloc_add "openclaw_dir" "$ocdir" "$base/$rel_oc"
+			mig_log "已重定位程序目录：$ocdir → $base/$rel_oc（清除 main.openclaw_dir）"
+		else
+			# 源只有数据、没有程序本体：本次没有可搬的程序，清空 UCI 会让
+			# oc_oc_dir() 指向并不存在的 <base>/openclaw，服务随即起不来。
+			oc_warn "程序目录 $ocdir 不是默认的 $base/openclaw；本次只迁移数据、未复制程序本体，保留 main.openclaw_dir 不变"
+		fi
+	fi
+	if [ "$uci_changed" = "1" ]; then
+		if uci_commit; then
+			mig_log "已提交 UCI：后续 oc_state_dir()/oc_oc_dir() 立即使用新位置"
+		else
+			oc_warn "uci commit 失败，配置可能在重启后回退；请手动执行：uci commit $OC_UCI"
+		fi
+	fi
+
 	# ---- 10) 权限与提示 ----
 	oc_fix_perms >/dev/null 2>&1 || oc_warn "权限修复未完全成功，请检查 $base"
 
@@ -915,9 +1010,12 @@ cmd_migrate() {
 		oc_warn "当前为 global 模式，未迁移 Node 运行时（使用系统运行时）"
 	fi
 
-	# to 报安装目录：那才是"本插件的默认目录"（数据/程序都在它下面）
-	printf '{"ok":true,"from":"%s","to":"%s","kind":"%s"}\n' \
-		"$(oc_json_str "$dir")" "$(oc_json_str "$base")" "$kind"
+	# to 报安装目录：那才是"本插件的默认目录"（数据/程序都在它下面）。
+	# relocated 是键名数组（无重定位时为 []），relocations 是给前端展示
+	# 「已从 X 搬到 Y」的明细（key/from/to）。
+	printf '{"ok":true,"from":"%s","to":"%s","kind":"%s","relocated":[%s],"relocations":[%s]}\n' \
+		"$(oc_json_str "$dir")" "$(oc_json_str "$base")" "$kind" \
+		"${MIG_RELOCATED:-}" "${MIG_RELOCATIONS:-}"
 	return 0
 }
 
@@ -1629,7 +1727,10 @@ Usage: openclaw.sh <command> [options]
   link <dir>                point the config at an existing install (UCI only,
                             nothing is copied: base_dir / state_dir per layout)
   migrate <dir>             copy an existing install into this plugin's default
-                            dirs (cp -a + atomic mv; the source is left as-is)
+                            dirs (cp -a + atomic mv; the source is left as-is).
+                            If main.state_dir / main.openclaw_dir point outside
+                            base_dir, they are relocated to <base>/home/.openclaw
+                            / <base>/openclaw and the UCI keys are cleared
 
 Safety: install/start/restart/update/uninstall/repair refuse to run when the
 configured base_dir is a system path (/usr /etc /tmp /var /overlay /rom ...) or
