@@ -18,6 +18,8 @@ uci -q get openclaw.main >/dev/null 2>&1 || {
 # Node.js 部署方式：global（默认，/usr/lib/nodejs + /usr/bin 链接）| private（运行时在安装目录内）
 [ -n "$(uci -q get openclaw.main.node_mode)" ] || uci -q set openclaw.main.node_mode=global
 [ -n "$(uci -q get openclaw.main.preinstall_providers)" ] || uci -q set openclaw.main.preinstall_providers=deepseek
+# 安装成功后是否自动启动服务：1=自动（默认），0=装完保持停止
+[ -n "$(uci -q get openclaw.main.auto_start)" ] || uci -q set openclaw.main.auto_start=1
 
 # 数据根目录（openclaw.json / .env / 会话 / 工作区都在它下面）。
 # 空字符串是**合法默认值**：表示沿用 <安装目录>/home/.openclaw 的历史行为。

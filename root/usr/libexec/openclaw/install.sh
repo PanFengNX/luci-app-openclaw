@@ -99,9 +99,94 @@ HOME_DIR="$BASE_DIR/home"
 
 : >"$OC_INSTALLLOG" 2>/dev/null || OC_INSTALLLOG="${OC_RUNDIR:-/tmp/.openclaw}/install.log"
 : >"$OC_INSTALLLOG" 2>/dev/null || true
-ilog() { printf '%s\n' "$*" | tee -a "$OC_INSTALLLOG"; }
+# 只写一次。install-bg 会把本进程的 stdout 也重定向到 $OC_INSTALLLOG，
+# 原来的 `| tee -a` 于是成了第二个写者：两个描述符各有一个文件偏移，
+# 日志里会出现重复行和被覆盖的半截行。这里只追加到日志文件；
+# 前台运行（终端里直接跑 install.sh）时再额外打一份到终端。
+ilog() {
+	if printf '%s\n' "$*" >>"$OC_INSTALLLOG" 2>/dev/null; then
+		[ -t 1 ] && printf '%s\n' "$*"
+	else
+		printf '%s\n' "$*"
+	fi
+	# 必须显式返回 0：非交互（install-bg）时上面的 `[ -t 1 ]` 为假，若把它的
+	# 状态当成本函数的返回值，main() 的最后一个 ilog 就会让整个安装以 1 退出。
+	return 0
+}
+
+# ---------------------------------------------------------------- progress
+# 阶段编号与心跳。两者都只写日志：不改变控制流，也不影响任何退出码。
+#
+# 背景：npm 的输出已经单独写到 $OC_INSTALLLOG.npm，主日志在 npm 阶段只剩
+# 开始/结束两行；路由器上 npm install 常常跑十几分钟，前端每 2 秒重写日志区
+# 却始终看到同一段文字，用户就会以为安装卡死了。所以这里补两样东西：
+#   [i/N] 阶段名 …            每个阶段开始/结束各一行，能看出"到第几步、共几步"
+#   … 仍在进行（已 Xm Ys）     长步骤每 30 秒一行心跳，证明进程还活着
+STAGE_TOTAL=7
+STAGE_IDX=0
+STAGE_NAME=""
+STAGE_START=0
+HB_PID=""
+
+stage_begin() {
+	STAGE_IDX=$((STAGE_IDX + 1))
+	STAGE_NAME="$1"
+	STAGE_START="$(date +%s 2>/dev/null)"
+	case "$STAGE_START" in ''|*[!0-9]*) STAGE_START=0 ;; esac
+	ilog "[$STAGE_IDX/$STAGE_TOTAL] $STAGE_NAME …"
+}
+
+stage_end() {
+	local now elapsed
+	now="$(date +%s 2>/dev/null)"
+	case "$now" in ''|*[!0-9]*) now=0 ;; esac
+	elapsed=0
+	if [ "$STAGE_START" -gt 0 ] && [ "$now" -ge "$STAGE_START" ]; then
+		elapsed=$((now - STAGE_START))
+	fi
+	ilog "[$STAGE_IDX/$STAGE_TOTAL] $STAGE_NAME 完成（耗时 $(oc_fmt_elapsed "$elapsed")）"
+}
+
+hb_start() {
+	# hb_start <label> —— 为可能超过 60 秒的步骤起一个后台心跳。
+	# 子 shell 里 $$ 仍是父 shell 的 pid，所以父进程一旦退出（包括被 kill -9），
+	# 下一轮 kill -0 就会失败并自行结束，不会留下永久循环的孤儿进程。
+	hb_stop
+	local label="$1" parent start
+	parent=$$
+	start="$(date +%s 2>/dev/null)"
+	case "$start" in ''|*[!0-9]*) start=0 ;; esac
+	(
+		while kill -0 "$parent" 2>/dev/null; do
+			sleep 30
+			kill -0 "$parent" 2>/dev/null || break
+			now="$(date +%s 2>/dev/null)"
+			case "$now" in ''|*[!0-9]*) now="$start" ;; esac
+			printf '%s\n' "[$STAGE_IDX/$STAGE_TOTAL] $label 仍在进行（已 $(oc_fmt_elapsed $((now - start)))）" \
+				>>"$OC_INSTALLLOG" 2>/dev/null
+		done
+	) &
+	HB_PID=$!
+}
+
+hb_stop() {
+	[ -n "$HB_PID" ] || return 0
+	# 心跳子 shell 通常正阻塞在 sleep 上：先收掉它的 sleep 子进程，再收它自己，
+	# 否则会留下一个最长 30 秒的孤儿 sleep。只按父子关系定位，不按名字杀。
+	local kids
+	if command -v pgrep >/dev/null 2>&1; then
+		kids="$(pgrep -P "$HB_PID" 2>/dev/null)"
+		# shellcheck disable=SC2086
+		[ -n "$kids" ] && kill $kids 2>/dev/null
+	fi
+	kill "$HB_PID" 2>/dev/null
+	wait "$HB_PID" 2>/dev/null
+	HB_PID=""
+	return 0
+}
 
 die() {
+	hb_stop
 	ilog "ERROR: $*"
 	exit 1
 }
@@ -288,7 +373,9 @@ install_node_global() {
 		else
 			[ -e "$dest" ] && { ilog "缓存的压缩包已损坏，重新下载：$dest"; rm -f "$dest"; }
 			oc_need_space "$BASE_DIR" 200 || die "空间不足以下载 Node.js（需要约 200MB）"
+			hb_start "下载 Node.js $NODE_V"
 			oc_download "$url" "$dest" "下载 Node.js $NODE_V" 600 || die "Node.js 下载失败：$url"
+			hb_stop
 		fi
 		node_verify_sum "$base/$NODE_V" "$tarball" "$dest"
 		# 清空目标目录。这里刻意不用 rm -rf：find -depth -delete 只删目录内容，
@@ -298,11 +385,13 @@ install_node_global() {
 		mkdir -p "$OC_NODE_GLOBAL_DIR" 2>/dev/null \
 			|| die "无法重建 $OC_NODE_GLOBAL_DIR"
 		ilog "解压中（$OC_NODE_GLOBAL_DIR） ..."
+		hb_start "解压 Node.js $NODE_V"
 		if command -v xz >/dev/null 2>&1; then
 			tar -xJf "$dest" -C "$OC_NODE_GLOBAL_DIR" --strip-components=1 || die "解压失败（xz）"
 		else
 			tar -xf "$dest" -C "$OC_NODE_GLOBAL_DIR" --strip-components=1 || die "解压失败（tar）"
 		fi
+		hb_stop
 		rm -f "$dest"
 	fi
 
@@ -359,17 +448,21 @@ install_node() {
 		else
 			[ -e "$dest" ] && { ilog "缓存的压缩包已损坏，重新下载：$dest"; rm -f "$dest"; }
 			oc_need_space "$BASE_DIR" 200 || die "空间不足以下载 Node.js（需要约 200MB）"
+			hb_start "下载 Node.js $NODE_V"
 			oc_download "$url" "$dest" "下载 Node.js $NODE_V" 600 || die "Node.js 下载失败：$url"
+			hb_stop
 		fi
 		node_verify_sum "$base/$NODE_V" "$tarball" "$dest"
 		rm -rf "$NODE_DIR"
 		mkdir -p "$NODE_DIR"
 		ilog "解压中 ..."
+		hb_start "解压 Node.js $NODE_V"
 		if command -v xz >/dev/null 2>&1; then
 			tar -xJf "$dest" -C "$NODE_DIR" --strip-components=1 || die "解压失败（xz）"
 		else
 			tar -xf "$dest" -C "$NODE_DIR" --strip-components=1 || die "解压失败（tar）"
 		fi
+		hb_stop
 		rm -f "$dest"
 	fi
 	NODE_BIN="$NODE_DIR/bin/node"
@@ -424,11 +517,15 @@ install_openclaw() {
 	start_ts="$(date +%s 2>/dev/null)"
 	case "$start_ts" in ''|*[!0-9]*) start_ts=0 ;; esac
 
+	# npm 的输出只进独立日志，主日志在整段安装期间不会自己增长；
+	# 心跳是"还在干活"的唯一可见证据，阶段结束后立刻收掉。
+	hb_start "npm install"
 	run_with_timeout "$NPM_INSTALL_TIMEOUT" "$NODE_BIN" "$npmcli" install -g \
 		--prefix "$OC_DIR" --registry "$reg" \
 		--no-audit --no-fund --loglevel=http --prefer-offline \
 		"openclaw@$OCV" >>"$npm_log" 2>&1
 	rc=$?
+	hb_stop
 
 	end_ts="$(date +%s 2>/dev/null)"
 	case "$end_ts" in ''|*[!0-9]*) end_ts=0 ;; esac
@@ -537,7 +634,10 @@ install_default_providers() {
 	local OC="$OC_DIR/bin/openclaw"
 	local pre
 	pre="$(uci_get main.preinstall_providers deepseek)"
-	[ -n "$pre" ] || return 0
+	if [ -z "$pre" ]; then
+		ilog "未配置预装模型插件（main.preinstall_providers 为空），跳过"
+		return 0
+	fi
 	export HOME="$HOME_DIR"
 	export PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH"
 	ilog "== 预装模型插件: $pre =="
@@ -555,6 +655,65 @@ install_default_providers() {
 	esac
 }
 
+# ---------------------------------------------------------------- autostart
+# 安装成功后的自动启动。
+#
+# 关键点：init.d 的 start_service() 第一件事就是读 main.enabled，为 0 时直接
+# `return 0`（既不启动也不报错）。安装流程原来从不置 1，所以收尾那句
+# `restart` 一直是静默空转 —— 这就是"装完还得再点一次启动"的根因。
+# 自动启动时一并把 main.enabled 置 1。
+svc_running() {
+	# 与 istorec/openclaw.sh 的 running() 同一语义，但用 lib.sh 的精确探测：
+	# `pgrep -f 'openclaw.*(gateway|run)'` 会误命中编辑器 / tail -f / grep。
+	[ -n "$(oc_gateway_pids 2>/dev/null)" ] && return 0
+	[ -f /var/run/openclaw.pid ] && \
+		kill -0 "$(cat /var/run/openclaw.pid 2>/dev/null)" 2>/dev/null && return 0
+	return 1
+}
+
+svc_wait_running() {
+	# 最多等 15 秒：procd 的 start 是异步的，返回 0 不代表网关进程已经起来。
+	local i=0
+	while [ "$i" -lt 15 ]; do
+		svc_running && return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	svc_running
+}
+
+autostart_service() {
+	# 只在安装全部成功时调用（finish 的末尾）。任何失败都只告警：
+	# 安装本身已经成功，这里的退出码必须保持 0。
+	local auto
+	if [ "$NO_START" = "1" ]; then
+		ilog "已跳过自动启动（--no-start）"
+		return 0
+	fi
+	auto="$(uci_get main.auto_start 1)"
+	[ -n "$auto" ] || auto=1
+	case "$auto" in
+		0)
+			ilog "已跳过自动启动（main.auto_start=0）"
+			;;
+		*)
+			ilog "设置开机自启（/etc/init.d/openclaw enable）"
+			/etc/init.d/openclaw enable >/dev/null 2>&1 \
+				|| ilog "WARN: 开机自启设置失败（不影响安装，可在状态页手动处理）"
+			uci_set main.enabled 1
+			uci_commit
+			ilog "启动服务（/etc/init.d/openclaw start，最多等待 60s）"
+			oc_timeout 60 /etc/init.d/openclaw start >/dev/null 2>&1
+			if svc_wait_running; then
+				ilog "服务已启动"
+			else
+				ilog "WARN: 服务启动失败，请到状态页查看日志或点「一键修复」"
+			fi
+			;;
+	esac
+	return 0
+}
+
 finish() {
 	ilog "== 收尾 =="
 	uci_set main.base_dir "$BASE_DIR"
@@ -564,25 +723,41 @@ finish() {
 	uci_set main.node_mode "$NODE_MODE"
 	uci_commit
 	chmod +x /etc/init.d/openclaw 2>/dev/null
-	/etc/init.d/openclaw enable >/dev/null 2>&1
-	if [ "$NO_START" != "1" ]; then
-		ilog "启动服务 ..."
-		/etc/init.d/openclaw restart
-	fi
+	autostart_service
 	ilog "== 部署完成 =="
 	ilog "OpenClaw $OCV  |  Node.js $NODE_V  |  目录 $BASE_DIR"
 }
 
 # ---------------------------------------------------------------- main
 main() {
+	stage_begin "检查环境并准备目录"
 	preflight
+	stage_end
+
+	stage_begin "解析版本"
 	resolve_versions
 	verify_node_version
+	stage_end
+
+	stage_begin "下载并安装 Node.js $NODE_V"
 	install_node
+	stage_end
+
+	stage_begin "安装 OpenClaw（npm install，可能数分钟）"
 	install_openclaw
+	stage_end
+
+	stage_begin "写入配置"
 	bootstrap_config
+	stage_end
+
+	stage_begin "预装模型插件"
 	install_default_providers
+	stage_end
+
+	stage_begin "收尾并启动服务"
 	finish
+	stage_end
 }
 
 main "$@"

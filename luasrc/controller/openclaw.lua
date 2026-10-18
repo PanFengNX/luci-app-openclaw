@@ -33,6 +33,7 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "save"},      call("api_save")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "presets"},   call("api_presets")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "models"},    call("api_models")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "models_url"}, call("api_models_url")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "apply"},     call("api_apply")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "run"},       call("api_run")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "channels"},  call("api_channels")).leaf = true
@@ -234,6 +235,27 @@ function api_models()
 	local p = http.formvalue("provider") or ""
 	local r = sh("/usr/libexec/openclaw/models.sh discover " .. q(p))
 	out({ ok = true, data = r })
+end
+
+-- 上游模型列表：models.sh models-url <provider> 自己解析 Base URL 与 .env 里的
+-- Key（Key 只经 curl --config - 的 stdin 传递），stdout 只有一行 JSON。
+-- provider 会被拼进 shell 命令，也会被 helper 用来拼 .env 变量名，所以先按
+-- 形状白名单校验，再交给 q() 转义；helper 侧还有一道同样的校验。
+local PROVIDER_ID = "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+
+function api_models_url()
+	local p = http.formvalue("provider") or ""
+	if #p == 0 or #p > 64 or not p:match(PROVIDER_ID) then
+		out({ ok = false, error = "Provider 参数无效" })
+		return
+	end
+	local r = sh(MODELS .. " models-url " .. q(p))
+	local j = jsonc.parse(r)
+	if type(j) ~= "table" then
+		out({ ok = false, error = "上游模型列表无法解析" })
+		return
+	end
+	out(j)
 end
 
 function api_apply()

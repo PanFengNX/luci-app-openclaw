@@ -19,4 +19,6 @@ config main 'main'
 	option node_mirror ''
 	option http_proxy ''
 	option preinstall_providers 'deepseek'
+	# 安装成功后自动启动服务（1=设置开机自启并启动，0=装完保持停止，稍后手动启动）
+	option auto_start '1'
 	option installed '0'

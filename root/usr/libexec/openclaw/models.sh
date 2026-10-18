@@ -375,8 +375,8 @@ discover() {
 	printf '['
 	printf '%s\n' "$out" | while IFS= read -r m; do
 		[ -n "$m" ] || continue
-		if [ "$first" = "1" ]; then printf '"%s"' "$m"; first=0
-		else printf ',"%s"' "$m"; fi
+		if [ "$first" = "1" ]; then printf '"%s"' "$(oc_json_str "$m")"; first=0
+		else printf ',"%s"' "$(oc_json_str "$m")"; fi
 	done
 	printf ']'
 }
@@ -535,6 +535,146 @@ catalog() {
 	printf ']'
 }
 
+# ---------------------------------------------------------------- upstream models
+# 「刷新上游模型」：按 provider 的 Base URL 直接问上游要一份模型清单。
+# 只读、无副作用；stdout 只允许出现一行 JSON，诊断信息一律走 stderr。
+#
+# 密钥绝不能进 argv（/proc/<pid>/cmdline 全局可读）：Key 从 .env 读出后通过
+# curl 的 --config - 从 stdin 交给 curl，命令行里只有 URL 和固定参数。
+# 不传 -k：证书校验失败就应当失败，而不是静默降级。
+
+models_url_fail() {
+	printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "$1")"
+}
+
+env_key() {
+	# env_key <VAR_NAME> -> value from the OpenClaw .env, empty when absent.
+	# apply() writes $HOME/.openclaw/.env, provider_has_key() reads
+	# $(oc_data_dir)/.env. Both are the same file in the default layout but can
+	# differ when main.state_dir is overridden, so look at both.
+	local name="$1" f v
+	for f in "$HOME/.openclaw/.env" "$(oc_data_dir)/.env"; do
+		[ -f "$f" ] || continue
+		v="$(grep "^${name}=" "$f" 2>/dev/null | tail -n1 | sed 's/^[^=]*=//')"
+		[ -n "$v" ] || continue
+		# tolerate a hand-edited NAME="value" / NAME='value'
+		case "$v" in
+			\"*\") v="${v#\"}"; v="${v%\"}" ;;
+			\'*\') v="${v#\'}"; v="${v%\'}" ;;
+		esac
+		printf '%s' "$v"
+		return 0
+	done
+	return 0
+}
+
+models_url() {
+	# models_url <provider-id> -> {"ok":true,"baseUrl":"...","models":[...]}
+	local p="${1:-}" base url envname key esc code rc body errf ids first m msg
+	case "$p" in
+		''|*[!A-Za-z0-9_.-]*|-*) models_url_fail "Provider 名称无效"; return 1 ;;
+	esac
+
+	oc_env
+	base="$(configured_field "$p" baseUrl)"
+	[ -n "$base" ] || base="$(preset_field "$p" baseUrl)"
+	if [ -z "$base" ]; then
+		models_url_fail "该 provider 没有 Base URL"
+		return 1
+	fi
+	if ! oc_safe_url "$base"; then
+		models_url_fail "Base URL 不合法（只支持 http/https）：$base"
+		return 1
+	fi
+
+	# Variable name mirrors apply(): the preset's env field, otherwise
+	# <UPPER(provider)>_API_KEY.
+	envname="$(preset_field "$p" env)"
+	[ -n "$envname" ] || envname="$(printf '%s' "$p" | tr 'a-z' 'A-Z')_API_KEY"
+	case "$envname" in
+		''|*[!A-Za-z0-9_]*) models_url_fail "无法确定该 provider 的 API Key 变量名"; return 1 ;;
+	esac
+	key="$(env_key "$envname" | head -n1)"
+	if [ -z "$key" ]; then
+		models_url_fail "未找到 ${envname}，请先在模型页填写并保存 API Key"
+		return 1
+	fi
+
+	if ! command -v curl >/dev/null 2>&1; then
+		models_url_fail "系统缺少 curl，无法访问上游"
+		return 1
+	fi
+	if [ ! -d "$OC_RUNDIR" ] || [ ! -w "$OC_RUNDIR" ]; then
+		models_url_fail "临时目录不可用"
+		return 1
+	fi
+
+	# strip trailing slashes, then append the OpenAI-compatible path
+	url="$base"
+	while [ "${url%/}" != "$url" ]; do url="${url%/}"; done
+	url="$url/models"
+
+	# curl config syntax: backslash first, then the double quote
+	esc="$(printf '%s' "$key" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+	body="$OC_RUNDIR/models-url.$$.json"
+	errf="$OC_RUNDIR/models-url.$$.err"
+	code="$(printf 'header = "Authorization: Bearer %s"\n' "$esc" | \
+		oc_timeout 20 curl -sS --max-time 20 --connect-timeout 10 \
+			-H 'Accept: application/json' -o "$body" -w '%{http_code}' \
+			--config - "$url" 2>"$errf")"
+	rc=$?
+
+	if [ "$rc" -ne 0 ]; then
+		msg="$(head -n1 "$errf" 2>/dev/null)"
+		rm -f "$body" "$errf"
+		[ -n "$msg" ] || msg="curl 退出码 $rc"
+		models_url_fail "无法连接上游：$msg"
+		return 1
+	fi
+
+	case "$code" in
+		200) ;;
+		401|403)
+			rm -f "$body" "$errf"
+			models_url_fail "上游拒绝访问（HTTP $code），API Key 可能无效或无权限"
+			return 1 ;;
+		404)
+			rm -f "$body" "$errf"
+			models_url_fail "上游没有 /models 接口（HTTP 404）"
+			return 1 ;;
+		''|*[!0-9]*)
+			rm -f "$body" "$errf"
+			models_url_fail "未取得 HTTP 状态码"
+			return 1 ;;
+		*)
+			rm -f "$body" "$errf"
+			models_url_fail "上游返回 HTTP $code"
+			return 1 ;;
+	esac
+
+	# {"data":[{"id":"..."}]} (and, for good measure, ["..."])
+	ids="$(json_slice data <"$body" 2>/dev/null | json_model_ids)"
+	rm -f "$body" "$errf"
+	ids="$(printf '%s\n' "$ids" | grep -v '^[[:space:]]*$' | sort -u)"
+	if [ -z "$ids" ]; then
+		models_url_fail "上游返回的内容中没有可识别的模型列表（HTTP 200）"
+		return 1
+	fi
+
+	printf '{"ok":true,"baseUrl":"%s","models":[' "$(oc_json_str "$base")"
+	first=1
+	printf '%s\n' "$ids" | while IFS= read -r m; do
+		[ -n "$m" ] || continue
+		if [ "$first" = "1" ]; then
+			printf '"%s"' "$(oc_json_str "$m")"
+			first=0
+		else
+			printf ',"%s"' "$(oc_json_str "$m")"
+		fi
+	done
+	printf ']}\n'
+}
+
 # ---------------------------------------------------------------- apply
 apply() {
 	# apply <provider> <apikey|-> [model] [baseurl]
@@ -673,6 +813,7 @@ case "${1:-}" in
 	catalog)   catalog ;;
 	providers) catalog ;;
 	models)    discover "$2" ;;
+	models-url) models_url "$2" ;;
 	discover)  discover "$2" ;;
 	apply)     shift; apply "$@" ;;
 	setkey)    shift; setkey "$@" ;;
@@ -682,10 +823,11 @@ case "${1:-}" in
 	field)     preset_field "$2" "$3" ;;
 	*)
 		cat <<EOF
-Usage: models.sh {catalog|models <provider>|apply <provider> <key> [model] [base]|plugin <provider>|current}
+Usage: models.sh {catalog|models <provider>|models-url <provider>|apply <provider> <key> [model] [base]|plugin <provider>|current}
 
   catalog                 every provider OpenClaw supports (JSON, with state)
   models <provider>       model ids (live from OpenClaw, presets as fallback)
+  models-url <provider>   ask the provider's Base URL for its model list (JSON)
   apply <provider> <key> [model] [base]
                           install plugin + store key + set default model
   plugin <provider>       install only the provider plugin

@@ -263,7 +263,12 @@ cmd_install_bg() {
 		# Record install.sh's own pid, not the subshell's: a forked shell keeps
 		# the parent's cmdline (openclaw.sh install-bg ...), which does not
 		# contain install.sh, so the liveness check would never match it.
-		sh "$OC_INSTALL" "$@" >"$OC_INSTALLLOG" 2>&1 &
+		#
+		# 用 >> 而不是 >：install.sh 自己也往这个文件追加（ilog），而 `>` 打开的
+		# 描述符有独立的文件偏移，两边会互相覆盖 —— 日志里出现重复行和半截行。
+		# O_APPEND 让所有写者都落在文件末尾。日志在启动前已被 rm -f，
+		# install.sh 开头还会再截断一次，所以不需要这里的 `>` 来清空。
+		sh "$OC_INSTALL" "$@" >>"$OC_INSTALLLOG" 2>&1 &
 		inst_pid=$!
 		printf '%s' "$inst_pid" >"$OC_INST_PID" 2>/dev/null || true
 		wait "$inst_pid"
