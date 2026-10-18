@@ -22,7 +22,8 @@ function index()
 	entry({"admin", "services", "openclaw", "setup", "adopt"},   template("openclaw/adopt"), _("关联迁移"), 20)
 	entry({"admin", "services", "openclaw", "setup", "model"},    template("openclaw/model"),    _("模型"), 30)
 	entry({"admin", "services", "openclaw", "setup", "channels"}, template("openclaw/channels"), _("渠道"), 40)
-	entry({"admin", "services", "openclaw", "setup", "backup"},   template("openclaw/backup"),   _("备份"), 50)
+	-- 「备份与恢复」独立成顶层页面（不放在「设置」子菜单里）。
+	entry({"admin", "services", "openclaw", "backup"},    template("openclaw/backup"),   _("备份与恢复"), 20)
 	entry({"admin", "services", "openclaw", "terminal"}, template("openclaw/terminal"), _("命令行"),    40)
 	entry({"admin", "services", "openclaw", "log"},      template("openclaw/log"),      _("日志"),      50)
 

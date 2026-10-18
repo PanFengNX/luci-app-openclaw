@@ -174,8 +174,11 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
   </div>
 </div>
 
-<div class="oc-hint" style="margin-top:4px">安装 / 修复运行环境、基本设置与备份恢复已移到
-  <a href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup")%>">设置</a> 页。
+<div class="oc-hint" style="margin-top:4px">安装 / 修复运行环境、基本设置 →
+  <a href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","general")%>">设置</a>
+</div>
+<div class="oc-hint" style="margin-top:2px">备份与恢复 →
+  <a href="<%=luci.dispatcher.build_url("admin","services","openclaw","backup")%>">备份与恢复</a>
 </div>
 
 <script>
