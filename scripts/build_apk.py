@@ -67,6 +67,7 @@ SCRIPTS = """#!/bin/sh
 chmod +x /etc/init.d/openclaw 2>/dev/null
 chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null
 chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null
+chmod +x /usr/bin/openclaw 2>/dev/null
 rm -f /tmp/luci-indexcache /tmp/luci-modulecache
 exit 0
 """
@@ -351,6 +352,7 @@ tar -xzf "$T/payload.tgz" -C /
 chmod +x /etc/init.d/openclaw 2>/dev/null || true
 chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null || true
 chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null || true
+chmod +x /usr/bin/openclaw 2>/dev/null || true
 [ -x /etc/uci-defaults/99-openclaw ] && /etc/uci-defaults/99-openclaw
 rm -f /tmp/luci-indexcache
 echo "installed {PKG_NAME} {version}"

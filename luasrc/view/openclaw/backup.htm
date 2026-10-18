@@ -1,0 +1,344 @@
+<%+header%>
+<style>
+/* ===== OpenClaw 统一视图样式（6 个视图共用，逐字节一致） =====
+ * 中性色统一使用半透明 rgba(127,127,127,α)：同一个值在浅色底上呈浅灰、
+ * 在深色底上呈深灰，自动跟随 LuCI 主题，不依赖系统配色方案媒体查询。
+ * 强调色（蓝/绿/橙/红）保持固定十六进制，明暗底上均有足够对比度。 */
+:root{--oc-fg-dim:rgba(127,127,127,.95);--oc-fg-mute:rgba(127,127,127,.72);
+  --oc-line:rgba(127,127,127,.30);--oc-line-soft:rgba(127,127,127,.16);
+  --oc-surface:rgba(127,127,127,.06);--oc-surface-2:rgba(127,127,127,.12);
+  --oc-accent:#0b74d8;--oc-ok:#2f8f3f;--oc-warn:#c05621;--oc-err:#cc2222;}
+
+/* 卡片 */
+.oc-card{border:1px solid var(--oc-line);border-radius:10px;background:var(--oc-surface);padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.oc-card h3{margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--oc-line-soft);font-size:15px;font-weight:600}
+
+/* 渠道卡片头 */
+.oc-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.oc-head h3{margin:0;padding-bottom:0;border-bottom:0;font-size:15px}
+.oc-head .oc-tag:first-of-type{margin-left:auto}
+
+/* 键值区 */
+.oc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.oc-sub{margin:16px 0 8px;font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--oc-fg-mute);text-transform:none}
+.oc-card>.oc-sub:first-of-type{margin-top:0}
+.oc-kv{font-size:13px;line-height:1.5;font-variant-numeric:tabular-nums}
+.oc-kv b{display:block;color:var(--oc-fg-mute);font-weight:normal;font-size:12px;margin-bottom:2px}
+
+/* 状态徽章 */
+.oc-badge{display:inline-block;border-radius:999px;padding:3px 10px;font-size:12px;color:#fff;white-space:nowrap}
+.oc-badge::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:#fff;margin-right:6px;vertical-align:1px}
+.oc-run{background:var(--oc-ok)}
+.oc-stop{background:#8a8a8a}
+.oc-none{background:var(--oc-warn)}
+
+/* 日志（深色控制台） */
+.oc-log{background:#1b1b1b;color:#e6e6e6;border-radius:8px;padding:12px;height:280px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap}
+.oc-log::-webkit-scrollbar{width:10px;height:10px}
+.oc-log::-webkit-scrollbar-thumb{background:rgba(127,127,127,.55);border-radius:6px}
+.oc-log::-webkit-scrollbar-track{background:transparent}
+
+/* 执行输出 */
+.oc-out{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;background:var(--oc-surface-2);border-radius:8px;padding:10px 12px;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-variant-numeric:tabular-nums}
+
+/* 表单行 */
+.oc-row{margin-bottom:12px}
+.oc-row label{display:inline-block;width:150px;font-size:13px;color:var(--oc-fg-dim);vertical-align:top}
+@media (max-width:600px){.oc-row label{display:block;width:auto;margin-bottom:4px}}
+
+/* 提示与语义文字 */
+.oc-hint{font-size:12px;color:var(--oc-fg-mute);margin-top:4px;line-height:1.6}
+.oc-note{border-left:3px solid var(--oc-accent);background:var(--oc-surface-2);border-radius:4px;padding:8px 10px;font-size:12px;color:var(--oc-fg-dim);margin-top:8px;line-height:1.6}
+.oc-warn{color:var(--oc-warn)}
+.oc-ok{color:var(--oc-ok)}
+.oc-err{color:var(--oc-err)}
+
+/* 小标签 */
+.oc-tag{display:inline-block;border-radius:999px;padding:2px 8px;font-size:12px;background:var(--oc-surface-2);color:var(--oc-fg-dim);white-space:nowrap;vertical-align:middle}
+.oc-tag.ok{color:var(--oc-ok)}
+.oc-tag.warn{color:var(--oc-warn)}
+.oc-tag.off{color:var(--oc-fg-mute)}
+
+/* 按钮 */
+button,.oc-btn{border:0;border-radius:6px;padding:6px 14px;font-size:13px;background:var(--oc-accent);color:#fff;cursor:pointer;margin-right:6px}
+button:hover,.oc-btn:hover{filter:brightness(.94)}
+button:focus-visible,.oc-btn:focus-visible{outline:2px solid var(--oc-accent);outline-offset:2px}
+.oc-btn.gray{background:#6c757d}
+.oc-btn.green{background:var(--oc-ok)}
+button:disabled,.oc-btn:disabled{background:#9a9a9a;color:#fff;cursor:not-allowed;opacity:.85}
+button:disabled:hover,.oc-btn:disabled:hover{filter:none}
+#btn-open:disabled{background:#bdbdbd;color:#f7f7f7}
+
+/* 操作条 */
+.oc-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.oc-actions button,.oc-actions .oc-btn{margin-right:0}
+
+/* 表单控件 */
+select,input[type=text],input[type=password]{border:1px solid var(--oc-line);border-radius:6px;background:var(--oc-surface);padding:5px 8px;font-size:13px;min-width:260px;color:inherit}
+select:focus,input[type=text]:focus,input[type=password]:focus{border-color:var(--oc-accent);outline:none}
+input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;background:var(--oc-surface-2);min-width:320px}
+</style>
+
+<h2><a id="content" name="content">OpenClaw 助手 · 备份与恢复</a></h2>
+
+<div class="oc-card">
+  <h3>备份与恢复</h3>
+  <div class="oc-hint">
+    备份内容：OpenClaw 配置（模型 / 渠道 / 会话 / 工作区）与 UCI 设置。<br>
+    <b>不含</b> Node.js 运行时与 OpenClaw 程序本体 —— 这两项可重新安装，备份因此很小。<br>
+    <b style="color:#b00">⚠️ 备份文件内含 API Key，请勿外传</b>；归档权限固定为 600。
+  </div>
+  <div style="margin-top:10px">
+    <button id="btn-backup">立即备份</button>
+    <input type="text" id="bk-name" placeholder="备注名（可选）" style="min-width:150px">
+    <label style="margin-left:10px;font-size:12px">
+      <input type="checkbox" id="bk-ws" checked> 包含工作区数据
+    </label>
+    <button id="btn-bk-refresh" class="oc-btn gray">刷新列表</button>
+  </div>
+  <div style="margin-top:10px">
+    <input type="file" id="bk-file" accept=".gz">
+    <button id="btn-bk-upload" class="oc-btn gray">上传并恢复</button>
+    <span class="oc-hint" style="margin-left:6px">（上传的归档会先做安全校验，通过后才允许还原）</span>
+  </div>
+  <div id="bk-status" class="oc-hint" style="margin-top:8px"></div>
+  <div id="bk-list" style="margin-top:8px"></div>
+</div>
+
+<script>
+var API = {
+  info: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","info")%>',
+  versions: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","versions")%>',
+  check: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","check")%>',
+  install: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","install")%>',
+  istatus: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","istatus")%>',
+  ilog: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","ilog")%>',
+  service: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","service")%>',
+  save: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","save")%>',
+  mounts: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","mounts")%>',
+  discover: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","discover")%>',
+  node_existing: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","node_existing")%>',
+  link: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","link")%>',
+  migrate: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate")%>',
+  doctor: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>',
+  repair: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","repair")%>',
+  diag_run: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_run")%>',
+  diag_poll: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_poll")%>',
+  backups: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backups")%>',
+  backup_create: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_create")%>',
+  backup_verify: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_verify")%>',
+  backup_delete: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_delete")%>',
+  backup_upload: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_upload")%>',
+  backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
+  restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>'
+};
+
+function $(id){ return document.getElementById(id); }
+// 回调只允许触发一次：readyState==4 与 onerror 在某些浏览器上会同时到达，
+// 没有这个守卫时同一次请求会把按钮禁用/恢复跑两遍。
+function once(cb){
+  var done = false;
+  return function(v){ if (done) return; done = true; cb(v); };
+}
+function post(url, data, cb){
+  var body = [];
+  for (var k in data) body.push(encodeURIComponent(k)+'='+encodeURIComponent(data[k]));
+  var x = new XMLHttpRequest();
+  x.open('POST', url, true);
+  x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+  var fin = once(cb);
+  x.onreadystatechange = function(){
+    if (x.readyState == 4) { try { fin(JSON.parse(x.responseText)); } catch(e){ fin({ok:false}); } }
+  };
+  // 连接被重置 / 请求超时：readyState 可能根本不到 4，回调就永远不来，
+  // 发起方（例如备份、迁移）会永久卡在 disabled。用 net:true 标记，
+  // 让轮询类调用方知道"这次没拿到数据"而不是"服务端说失败了"。
+  x.onerror   = function(){ fin({ok:false, net:true}); };
+  x.ontimeout = function(){ fin({ok:false, net:true}); };
+  x.send(body.join('&'));
+}
+function get(url, cb){
+  var x = new XMLHttpRequest();
+  x.open('GET', url, true);
+  var fin = once(cb);
+  x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
+  x.onerror   = function(){ fin({ok:false, net:true}); };
+  x.ontimeout = function(){ fin({ok:false, net:true}); };
+  x.send();
+}
+function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }
+function fields(v){ var a=(v||'0.0.0').replace(/^v/,'').split('.'); for(var i=0;i<3;i++){ a[i]=parseInt((a[i]||'0').replace(/[^0-9].*$/,''),10)||0; } return a; }
+
+// ---------------------------------------------------------------- 备份 / 恢复
+function bkSay(msg, bad){
+  var el = $('bk-status');
+  el.textContent = msg;
+  el.style.color = bad ? '#b00' : '';
+}
+
+function fmtSize(n){
+  if (n >= 1048576) return (n/1048576).toFixed(1) + ' MB';
+  if (n >= 1024) return (n/1024).toFixed(0) + ' KB';
+  return n + ' B';
+}
+
+function fmtTime(ts){
+  if (!ts) return '-';
+  var d = new Date(ts * 1000);
+  var p = function(x){ return (x<10?'0':'') + x; };
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' '
+       + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+function loadBackups(){
+  var host = $('bk-list');
+  get(API.backups, function(r){
+    var arr = jp(r.data || '[]', []);
+    host.innerHTML = '';
+    if (r && r.ok === false && !arr.length){
+      host.textContent = '（读取备份列表失败，请刷新重试）';
+      host.className = 'oc-hint oc-warn';
+      return;
+    }
+    if (!arr.length){
+      host.textContent = '（暂无备份）';
+      host.className = 'oc-hint';
+      return;
+    }
+    host.className = '';
+    var t = document.createElement('table');
+    t.style.width = '100%';
+    t.style.fontSize = '12px';
+    t.style.borderCollapse = 'collapse';
+
+    var head = document.createElement('tr');
+    ['文件', '大小', '时间', '操作'].forEach(function(h){
+      var th = document.createElement('th');
+      th.textContent = h;
+      th.style.textAlign = 'left';
+      th.style.padding = '6px 8px';
+      th.style.borderBottom = '1px solid #ddd';
+      head.appendChild(th);
+    });
+    t.appendChild(head);
+
+    arr.forEach(function(b){
+      var tr = document.createElement('tr');
+
+      var tdName = document.createElement('td');
+      tdName.textContent = b.file;              // 服务端数据只进 textContent
+      tdName.style.padding = '6px 8px';
+      tdName.style.wordBreak = 'break-all';
+      tr.appendChild(tdName);
+
+      var tdSize = document.createElement('td');
+      tdSize.textContent = fmtSize(b.size || 0);
+      tdSize.style.padding = '6px 8px';
+      tr.appendChild(tdSize);
+
+      var tdTime = document.createElement('td');
+      tdTime.textContent = fmtTime(b.mtime);
+      tdTime.style.padding = '6px 8px';
+      tr.appendChild(tdTime);
+
+      var tdAct = document.createElement('td');
+      tdAct.style.padding = '6px 8px';
+      tdAct.style.whiteSpace = 'nowrap';
+
+      var mk = function(label, fn, gray){
+        var btn = document.createElement('button');
+        btn.textContent = label;
+        btn.className = 'oc-btn' + (gray ? ' gray' : '');
+        btn.style.fontSize = '12px';
+        btn.style.padding = '3px 9px';
+        btn.onclick = fn;
+        tdAct.appendChild(btn);
+        tdAct.appendChild(document.createTextNode(' '));
+        return btn;
+      };
+
+      mk('下载', function(){
+        window.open(API.backup_download + '?file=' + encodeURIComponent(b.file), '_blank');
+      }, true);
+      mk('校验', function(){
+        bkSay('正在校验 ' + b.file + ' …');
+        post(API.backup_verify, { file: b.file }, function(rr){
+          bkSay(rr && rr.ok ? ('校验通过：' + b.file) : ('校验失败：' + ((rr && rr.data) || '未知错误')), !(rr && rr.ok));
+        });
+      }, true);
+      mk('恢复', function(){
+        if (!confirm('将用 ' + b.file + ' 覆盖当前配置与数据，并重启网关。\n'
+                   + '系统会先自动做一次还原前快照。继续？')) return;
+        bkSay('正在恢复 ' + b.file + ' …（会先做安全快照，可能需要一会儿）');
+        post(API.restore, { file: b.file }, function(rr){
+          bkSay(rr && rr.ok ? '恢复完成，网关已重启。' : ('恢复失败：' + ((rr && rr.data) || '未知错误')), !(rr && rr.ok));
+          loadBackups();
+        });
+      });
+      mk('删除', function(){
+        if (!confirm('删除备份 ' + b.file + ' ？')) return;
+        post(API.backup_delete, { file: b.file }, function(rr){
+          bkSay(rr && rr.ok ? ('已删除 ' + b.file) : ('删除失败：' + ((rr && rr.data) || '')), !(rr && rr.ok));
+          loadBackups();
+        });
+      }, true);
+
+      tr.appendChild(tdAct);
+      t.appendChild(tr);
+    });
+    host.appendChild(t);
+  });
+}
+
+$('btn-backup').onclick = function(){
+  var nm = $('bk-name').value.trim();
+  var ws = $('bk-ws').checked ? '1' : '0';
+  $('btn-backup').disabled = true;
+  bkSay('正在打包…');
+  post(API.backup_create, { name: nm, workspace: ws }, function(r){
+    $('btn-backup').disabled = false;
+    bkSay(r && r.ok ? '备份已创建。' : ('备份失败：' + ((r && r.data) || (r && r.error) || '未知错误')), !(r && r.ok));
+    loadBackups();
+  });
+};
+
+$('btn-bk-refresh').onclick = loadBackups;
+
+$('btn-bk-upload').onclick = function(){
+  var f = $('bk-file').files && $('bk-file').files[0];
+  if (!f){ alert('请先选择备份文件（.tar.gz）'); return; }
+  if (!confirm('将用上传的备份覆盖当前配置与数据，并重启网关。\n系统会先自动做一次还原前快照。继续？')) return;
+  $('btn-bk-upload').disabled = true;
+  bkSay('正在上传 ' + f.name + ' …');
+  var fd = new FormData();
+  fd.append('archive', f);
+  var x = new XMLHttpRequest();
+  x.open('POST', API.backup_upload, true);
+  // 网络中断/连接被重置时 readyState 也会到 4，但 responseText 为空；
+  // 显式处理 onerror 并恢复按钮，避免用户卡在"上传中"且无法重试。
+  x.onerror = function(){
+    $('btn-bk-upload').disabled = false;
+    bkSay('上传失败：网络错误或连接中断，请重试', true);
+  };
+  x.ontimeout = x.onerror;
+  x.onreadystatechange = function(){
+    if (x.readyState !== 4) return;
+    var r; try { r = JSON.parse(x.responseText); } catch(e){ r = {}; }
+    if (!r.ok){
+      $('btn-bk-upload').disabled = false;
+      bkSay('上传失败：' + (r.error || '未知错误'), true);
+      return;
+    }
+    bkSay('上传完成，正在校验并恢复…');
+    post(API.restore, { uploaded: r.file }, function(rr){
+      $('btn-bk-upload').disabled = false;
+      bkSay(rr && rr.ok ? '恢复完成，网关已重启。' : ('恢复失败：' + ((rr && rr.data) || '未知错误')), !(rr && rr.ok));
+      loadBackups();
+    });
+  };
+  x.send(fd);
+};
+
+loadBackups();
+</script>
+<%+footer%>

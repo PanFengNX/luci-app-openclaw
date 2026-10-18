@@ -18,6 +18,7 @@ function index()
 	entry({"admin", "services", "openclaw", "setup"},    template("openclaw/setup"),    _("设置"),      15)
 	entry({"admin", "services", "openclaw", "model"},    template("openclaw/model"),    _("模型"),      20)
 	entry({"admin", "services", "openclaw", "channels"}, template("openclaw/channels"), _("渠道"),      30)
+	entry({"admin", "services", "openclaw", "backup"},   template("openclaw/backup"),   _("备份"),      35)
 	entry({"admin", "services", "openclaw", "terminal"}, template("openclaw/terminal"), _("命令行"),    40)
 	entry({"admin", "services", "openclaw", "log"},      template("openclaw/log"),      _("日志"),      50)
 

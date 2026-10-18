@@ -94,15 +94,15 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
   </div>
 
   <div class="oc-row" style="margin-top:10px">
-    <label>程序目录</label>
-    <select id="in-ocdir" style="min-width:320px"></select>
-    <input type="text" id="in-ocdir-custom" placeholder="留空 = 安装目录/openclaw" style="min-width:280px">
+    <label>程序位置</label>
+    <input type="text" id="in-ocdir-shown" class="oc-addr" readonly>
+    <button id="btn-ocdir-reset" class="oc-btn gray" style="display:none">恢复默认</button>
   </div>
   <div class="oc-hint" id="in-ocdir-hint">
     <div id="in-ocdir-warn" class="oc-err" style="display:none;margin-bottom:4px"></div>
-    OpenClaw 程序本体（含 node_modules，约 100MB+）的安装位置。
-    <b>留空</b>表示放在安装目录下；也可以单独指定，例如程序放内置存储、数据（会话/工作区）放大容量磁盘。
-    改动此项后需要重新执行安装。
+    OpenClaw 程序本体固定装在 &lt;安装目录&gt;/openclaw，与数据分开存放 —— 卸载时只删程序、保留会话与凭据。
+    <div style="font-size:12px;margin-top:2px">需要把程序与数据分开存放时，请在 SSH 里 uci set openclaw.main.openclaw_dir=... 后重新安装。</div>
+    <div id="in-ocdir-msg" class="oc-ok" style="display:none;margin-top:4px"></div>
   </div>
 
   <div class="oc-row" style="margin-top:14px">
@@ -168,28 +168,8 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
   <div style="margin-top:10px"><button id="btn-save">保存并应用</button></div>
 </div>
 
-<div class="oc-card">
-  <h3>备份与恢复</h3>
-  <div class="oc-hint">
-    备份内容：OpenClaw 配置（模型 / 渠道 / 会话 / 工作区）与 UCI 设置。<br>
-    <b>不含</b> Node.js 运行时与 OpenClaw 程序本体 —— 这两项可重新安装，备份因此很小。<br>
-    <b style="color:#b00">⚠️ 备份文件内含 API Key，请勿外传</b>；归档权限固定为 600。
-  </div>
-  <div style="margin-top:10px">
-    <button id="btn-backup">立即备份</button>
-    <input type="text" id="bk-name" placeholder="备注名（可选）" style="min-width:150px">
-    <label style="margin-left:10px;font-size:12px">
-      <input type="checkbox" id="bk-ws" checked> 包含工作区数据
-    </label>
-    <button id="btn-bk-refresh" class="oc-btn gray">刷新列表</button>
-  </div>
-  <div style="margin-top:10px">
-    <input type="file" id="bk-file" accept=".gz">
-    <button id="btn-bk-upload" class="oc-btn gray">上传并恢复</button>
-    <span class="oc-hint" style="margin-left:6px">（上传的归档会先做安全校验，通过后才允许还原）</span>
-  </div>
-  <div id="bk-status" class="oc-hint" style="margin-top:8px"></div>
-  <div id="bk-list" style="margin-top:8px"></div>
+<div class="oc-hint" style="margin-top:8px">
+  备份与恢复已移到独立页面：<a href="<%=luci.dispatcher.build_url("admin","services","openclaw","backup")%>">备份与恢复</a>
 </div>
 
 <script>
@@ -220,6 +200,10 @@ var API = {
   restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>'
 };
 var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, disc:null, nodeExisting:[], nodeBusy:false,
+  // ocdirCustom：服务端当前保存的自定义程序目录（main.openclaw_dir），空串 = 默认
+  // <安装目录>/openclaw。程序目录不再由用户在页面上编辑，但必须原样回传给
+  // save / install —— 否则会把 SSH 或关联流程设置的值冲掉。
+  ocdirCustom: '',
   // istatSeq：页面初始化时那次 install-status 请求的序号。用户一旦自己点了安装，
   // 就把序号 +1 作废它 —— 否则迟到的响应会把刚写下的「安装已启动」日志覆盖掉。
   istatSeq: 0,
@@ -330,8 +314,21 @@ function setHint(id, msg){
 function currentDirs(){
   return {
     base:  normDir($('in-dir-custom').value || $('in-dir').value),
-    ocdir: normDir($('in-ocdir-custom').value)
+    // 程序目录只来自服务端（SSH / 关联已有安装写入的 UCI），页面上没有输入框
+    ocdir: normDir(state.ocdirCustom)
   };
+}
+
+// 只读展示「程序位置」：默认 <安装目录>/openclaw；服务端保存过自定义值时显示它。
+// 自定义值可能是 SSH 里手工设错的，所以照样过一遍 ocDirProblem() 给出告警。
+function renderOcdir(){
+  var base = normDir($('in-dir-custom').value || $('in-dir').value);
+  var ocdir = normDir(state.ocdirCustom);
+  var shown = ocdir || (base ? base + '/openclaw' : '');
+  $('in-ocdir-shown').value = shown;      // 服务端数据只进 input.value
+  $('btn-ocdir-reset').style.display = ocdir ? '' : 'none';
+  setHint('in-ocdir-msg', '');            // 目录一变，上一次「已恢复默认」的提示就过期了
+  setHint('in-ocdir-warn', ocDirProblem(base, ocdir));
 }
 
 // 刷新两条 hint，并把本次检查结果返回给调用方（提交前拦截用）
@@ -352,12 +349,13 @@ function loadInfo(){
     $('cfg-port').value = d.port||'18789';
     $('cfg-bind').value = d.bind||'lan';
     if (d.base_dir && !$('in-dir-custom').value) $('in-dir-custom').value = d.base_dir;
-    // 程序目录：只在用户还没动过输入框时回填，否则每次轮询都会覆盖用户正在编辑的内容
-    if (d.oc_dir_custom && !state.ocdirTouched) $('in-ocdir-custom').value = d.openclaw_dir || '';
+    // 程序目录是服务端状态：oc_dir_custom 为假表示用默认（<安装目录>/openclaw）
+    state.ocdirCustom = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
     // 记住服务端当前保存的配置值，用于在安装前判断"程序目录是否被改动"
-    state.savedOcdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
+    state.savedOcdir = state.ocdirCustom;
     // 回填后的目录组合也要立刻检查一次（刷新 / 保存后不会残留旧的红字）
     dirCheck();
+    renderOcdir();
   });
 }
 
@@ -379,24 +377,10 @@ function loadMounts(){
       sel.appendChild(o);
     }
 
-    // 程序目录选择：比安装目录多一个"留空 = 默认"的选项
-    var sel2 = $('in-ocdir');
-    var cur2 = $('in-ocdir-custom').value || '';
-    sel2.innerHTML = '';
-    var def = document.createElement('option');
-    def.value = '';
-    def.textContent = '（默认）与安装目录同盘 → <安装目录>/openclaw';
-    if (!cur2) def.selected = true;
-    sel2.appendChild(def);
-    arr.forEach(function(m){
-      var o = document.createElement('option');
-      o.value = m.path.replace(/\/$/,'') + '/OpenClaw';
-      o.textContent = m.path + '  （可用 ' + m.free_mb + ' MB，' + m.dev + '）';
-      if (cur2 && cur2.indexOf(m.path) === 0) o.selected = true;
-      sel2.appendChild(o);
-    });
-    // 下拉框重新生成后，选中的默认值可能变化 —— 重新比对一次
+    // 程序目录不再有下拉：它是内部实现细节，固定为 <安装目录>/openclaw
+    // （需要分离存放时只能在 SSH 里写 UCI）。安装目录下拉重新生成后重新比对一次。
     dirCheck();
+    renderOcdir();
   });
 }
 
@@ -600,7 +584,9 @@ $('btn-reload-versions').onclick = function(){ $('in-engines').textContent='正�
 
 $('btn-install').onclick = function(){
   var dir = $('in-dir-custom').value.trim() || $('in-dir').value;
-  var ocdir = $('in-ocdir-custom').value.trim();
+  // 程序目录页面上不可编辑，但必须原样回传服务端当前值：save 对 openclaw_dir
+  // 是"空值也显式写入"的语义，漏传或传空都会冲掉已有自定义目录。
+  var ocdir = normDir(state.ocdirCustom);
   var nd  = $('in-node').value, oc = $('in-oc').value;
   if (!dir) { alert('请选择安装目录'); return; }
   // 目录问题在提交前就拦住，并把"为什么不行、该怎么改"直接告诉用户；
@@ -617,10 +603,10 @@ $('btn-install').onclick = function(){
     return;
   }
   // 程序目录改了要重新安装，且旧目录不会自动清理 —— 先确认
-  if (state.savedOcdir !== undefined && ocdir !== state.savedOcdir){
+  if (state.savedOcdir !== undefined && state.ocdirCustom !== state.savedOcdir){
     if (!confirm('OpenClaw 程序目录已改动：\n\n'
       + '  原：' + (state.savedOcdir || '（默认，随安装目录）') + '\n'
-      + '  新：' + (ocdir || '（默认，随安装目录）') + '\n\n'
+      + '  新：' + (state.ocdirCustom || '（默认，随安装目录）') + '\n\n'
       + '旧目录不会被自动删除；本次安装会把程序装到新位置。继续？')) return;
   }
   // 先保存设置：save 现在会返回真实结果。目录/端口被安全校验拒绝时
@@ -631,7 +617,8 @@ $('btn-install').onclick = function(){
       $('in-log').textContent = '设置保存失败：服务端拒绝了本次配置。请按下面的提示检查对应输入框：\n'
         + '· 安装目录：必须是数据盘上的绝对路径（如 /mnt/<磁盘>/OpenClaw），\n'
         + '  不能是 /etc、/tmp、/var、/overlay、/rom 等系统路径，也不能是符号链接；\n'
-        + '· 程序目录：留空即可（默认 <安装目录>/openclaw），不能等于安装目录，也不能是它的上级；\n'
+        + '· 程序目录：页面不可修改，默认固定为 <安装目录>/openclaw；\n'
+        + '  若曾在 SSH 里设过 openclaw_dir，请确认它不等于安装目录、也不是它的上级；\n'
         + '· 端口需在 1025-65535。\n';
       return;
     }
@@ -673,25 +660,20 @@ $('btn-save').onclick = function(){
       setTimeout(loadInfo, 2000);
     });
 };
-$('in-dir').onchange = function(){ $('in-dir-custom').value = $('in-dir').value; dirCheck(); };
-$('in-ocdir').onchange = function(){ $('in-ocdir-custom').value = $('in-ocdir').value; dirCheck(); };
-$('in-ocdir-custom').oninput = function(){ state.ocdirTouched = true; dirCheck(); };
-// 安装目录也是"程序目录 == 安装目录"的另一半：两边任一改动都要重新比对
-$('in-dir-custom').oninput = function(){ dirCheck(); };
+$('in-dir').onchange = function(){ $('in-dir-custom').value = $('in-dir').value; dirCheck(); renderOcdir(); };
+// 安装目录变化时「程序位置」要跟着变：默认值 <安装目录>/openclaw 由它推导
+$('in-dir-custom').oninput = function(){ dirCheck(); renderOcdir(); };
 
-// ---------------------------------------------------------------- 备份 / 恢复
-function bkSay(msg, bad){
-  var el = $('bk-status');
-  el.textContent = msg;
-  el.style.color = bad ? '#b00' : '';
-}
+// 恢复默认：清掉内存里的自定义程序目录，保存 / 安装时随请求回传空串
+$('btn-ocdir-reset').onclick = function(){
+  state.ocdirCustom = '';
+  renderOcdir();
+  var base = normDir($('in-dir-custom').value || $('in-dir').value);
+  setHint('in-ocdir-msg', '已恢复默认，安装时会装到 ' + (base ? base + '/openclaw' : '<安装目录>/openclaw'));
+};
 
-function fmtSize(n){
-  if (n >= 1048576) return (n/1048576).toFixed(1) + ' MB';
-  if (n >= 1024) return (n/1024).toFixed(0) + ' KB';
-  return n + ' B';
-}
-
+// fmtTime：设置页的 checkInstallStatusOnLoad 需要显示「上次安装完成于 …」。
+// 备份 / 恢复已拆到独立页面（openclaw/backup.htm），那边自带一份。
 function fmtTime(ts){
   if (!ts) return '-';
   var d = new Date(ts * 1000);
@@ -700,158 +682,6 @@ function fmtTime(ts){
        + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
-function loadBackups(){
-  var host = $('bk-list');
-  get(API.backups, function(r){
-    var arr = jp(r.data || '[]', []);
-    host.innerHTML = '';
-    if (r && r.ok === false && !arr.length){
-      host.textContent = '（读取备份列表失败，请刷新重试）';
-      host.className = 'oc-hint oc-warn';
-      return;
-    }
-    if (!arr.length){
-      host.textContent = '（暂无备份）';
-      host.className = 'oc-hint';
-      return;
-    }
-    host.className = '';
-    var t = document.createElement('table');
-    t.style.width = '100%';
-    t.style.fontSize = '12px';
-    t.style.borderCollapse = 'collapse';
-
-    var head = document.createElement('tr');
-    ['文件', '大小', '时间', '操作'].forEach(function(h){
-      var th = document.createElement('th');
-      th.textContent = h;
-      th.style.textAlign = 'left';
-      th.style.padding = '6px 8px';
-      th.style.borderBottom = '1px solid #ddd';
-      head.appendChild(th);
-    });
-    t.appendChild(head);
-
-    arr.forEach(function(b){
-      var tr = document.createElement('tr');
-
-      var tdName = document.createElement('td');
-      tdName.textContent = b.file;              // 服务端数据只进 textContent
-      tdName.style.padding = '6px 8px';
-      tdName.style.wordBreak = 'break-all';
-      tr.appendChild(tdName);
-
-      var tdSize = document.createElement('td');
-      tdSize.textContent = fmtSize(b.size || 0);
-      tdSize.style.padding = '6px 8px';
-      tr.appendChild(tdSize);
-
-      var tdTime = document.createElement('td');
-      tdTime.textContent = fmtTime(b.mtime);
-      tdTime.style.padding = '6px 8px';
-      tr.appendChild(tdTime);
-
-      var tdAct = document.createElement('td');
-      tdAct.style.padding = '6px 8px';
-      tdAct.style.whiteSpace = 'nowrap';
-
-      var mk = function(label, fn, gray){
-        var btn = document.createElement('button');
-        btn.textContent = label;
-        btn.className = 'oc-btn' + (gray ? ' gray' : '');
-        btn.style.fontSize = '12px';
-        btn.style.padding = '3px 9px';
-        btn.onclick = fn;
-        tdAct.appendChild(btn);
-        tdAct.appendChild(document.createTextNode(' '));
-        return btn;
-      };
-
-      mk('下载', function(){
-        window.open(API.backup_download + '?file=' + encodeURIComponent(b.file), '_blank');
-      }, true);
-      mk('校验', function(){
-        bkSay('正在校验 ' + b.file + ' …');
-        post(API.backup_verify, { file: b.file }, function(rr){
-          bkSay(rr && rr.ok ? ('校验通过：' + b.file) : ('校验失败：' + ((rr && rr.data) || '未知错误')), !(rr && rr.ok));
-        });
-      }, true);
-      mk('恢复', function(){
-        if (!confirm('将用 ' + b.file + ' 覆盖当前配置与数据，并重启网关。\n'
-                   + '系统会先自动做一次还原前快照。继续？')) return;
-        bkSay('正在恢复 ' + b.file + ' …（会先做安全快照，可能需要一会儿）');
-        post(API.restore, { file: b.file }, function(rr){
-          bkSay(rr && rr.ok ? '恢复完成，网关已重启。' : ('恢复失败：' + ((rr && rr.data) || '未知错误')), !(rr && rr.ok));
-          loadBackups();
-          setTimeout(loadInfo, 3000);
-        });
-      });
-      mk('删除', function(){
-        if (!confirm('删除备份 ' + b.file + ' ？')) return;
-        post(API.backup_delete, { file: b.file }, function(rr){
-          bkSay(rr && rr.ok ? ('已删除 ' + b.file) : ('删除失败：' + ((rr && rr.data) || '')), !(rr && rr.ok));
-          loadBackups();
-        });
-      }, true);
-
-      tr.appendChild(tdAct);
-      t.appendChild(tr);
-    });
-    host.appendChild(t);
-  });
-}
-
-$('btn-backup').onclick = function(){
-  var nm = $('bk-name').value.trim();
-  var ws = $('bk-ws').checked ? '1' : '0';
-  $('btn-backup').disabled = true;
-  bkSay('正在打包…');
-  post(API.backup_create, { name: nm, workspace: ws }, function(r){
-    $('btn-backup').disabled = false;
-    bkSay(r && r.ok ? '备份已创建。' : ('备份失败：' + ((r && r.data) || (r && r.error) || '未知错误')), !(r && r.ok));
-    loadBackups();
-  });
-};
-
-$('btn-bk-refresh').onclick = loadBackups;
-
-$('btn-bk-upload').onclick = function(){
-  var f = $('bk-file').files && $('bk-file').files[0];
-  if (!f){ alert('请先选择备份文件（.tar.gz）'); return; }
-  if (!confirm('将用上传的备份覆盖当前配置与数据，并重启网关。\n系统会先自动做一次还原前快照。继续？')) return;
-  $('btn-bk-upload').disabled = true;
-  bkSay('正在上传 ' + f.name + ' …');
-  var fd = new FormData();
-  fd.append('archive', f);
-  var x = new XMLHttpRequest();
-  x.open('POST', API.backup_upload, true);
-  // 网络中断/连接被重置时 readyState 也会到 4，但 responseText 为空；
-  // 显式处理 onerror 并恢复按钮，避免用户卡在"上传中"且无法重试。
-  x.onerror = function(){
-    $('btn-bk-upload').disabled = false;
-    bkSay('上传失败：网络错误或连接中断，请重试', true);
-  };
-  x.ontimeout = x.onerror;
-  x.onreadystatechange = function(){
-    if (x.readyState !== 4) return;
-    var r; try { r = JSON.parse(x.responseText); } catch(e){ r = {}; }
-    if (!r.ok){
-      $('btn-bk-upload').disabled = false;
-      bkSay('上传失败：' + (r.error || '未知错误'), true);
-      return;
-    }
-    bkSay('上传完成，正在校验并恢复…');
-    post(API.restore, { uploaded: r.file }, function(rr){
-      $('btn-bk-upload').disabled = false;
-      bkSay(rr && rr.ok ? '恢复完成，网关已重启。' : ('恢复失败：' + ((rr && rr.data) || '未知错误')), !(rr && rr.ok));
-      loadBackups();
-      setTimeout(loadInfo, 3000);
-    });
-  };
-  x.send(fd);
-};
-
-loadBackups();
 
 loadInfo();
 // 安装可能是上一次启动的（刷新页面 / 从别的菜单进来）：必须主动接管进度，

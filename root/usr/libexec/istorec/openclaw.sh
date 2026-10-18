@@ -116,7 +116,7 @@ diag_body() {
 			printf '\n===== openclaw doctor --fix =====\n'
 			if installed; then
 				HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-					timeout 300 "$(oc_oc_bin)" doctor --fix 2>&1 | tail -n 60
+					oc_timeout 300 "$(oc_oc_bin)" doctor --fix 2>&1 | tail -n 60
 			fi
 			printf '\n===== 一键修复 =====\n'
 			sh "$OC_REPAIR" ;;
@@ -452,6 +452,42 @@ cmd_tasklog() {
 	[ -f "$OC_TASKLOG" ] && tail -n "$n" "$OC_TASKLOG"
 }
 
+cmd_unlock() {
+	# unlock : 只读判断 + 必要时清锁，**不取锁**（取锁就永远解不开了）。
+	# stdout 只允许一行 JSON；说明信息一律走 stderr。
+	local pid cmd reason pidjson
+	if ! oc_locked; then
+		printf '{"ok":true,"locked":false}\n'
+		return 0
+	fi
+
+	pid="$(cat "$OC_LOCK_DIR/pid" 2>/dev/null || true)"
+	if [ -n "$pid" ] && oc_pid_alive "$pid"; then
+		cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
+		cmd="${cmd% }"
+		printf '{"ok":false,"locked":true,"pid":%s,"cmd":"%s","error":"仍有操作在运行，请等待其完成"}\n' \
+			"$pid" "$(oc_json_str "$cmd")"
+		return 2
+	fi
+
+	# 到这里锁已被判定为陈旧：pid 已退出 / 僵尸 / 被复用 / 锁内没有 pid。
+	# 用既有的 oc_lock_release() 清锁（它只删本插件 0700 rundir 下的锁目录，
+	# 不触碰任何用户数据）；不新写删除语句，避免引入新的递归删除模式。
+	if [ -z "$pid" ]; then
+		reason="no-pid"
+	else
+		reason="$OC_PID_REASON"
+	fi
+	case "$pid" in
+		''|*[!0-9]*) pidjson="null" ;;
+		*)           pidjson="$pid" ;;
+	esac
+	oc_lock_release
+	oc_warn "已清理陈旧锁：$OC_LOCK_DIR（pid ${pid:-未知}，$(oc_pid_reason_text "$reason")）"
+	printf '{"ok":true,"locked":false,"cleared":true,"pid":%s,"reason":"stale"}\n' "$pidjson"
+	return 0
+}
+
 cmd_repair() {	# one click repair
 	shift
 	local args=""
@@ -465,7 +501,7 @@ oc_env_doctor() {
 	# run openclaw doctor if available
 	if installed; then
 		HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-			timeout 120 "$(oc_oc_bin)" doctor 2>&1 | tail -n 60
+			oc_timeout 120 "$(oc_oc_bin)" doctor 2>&1 | tail -n 60
 	else
 		printf 'OpenClaw 未安装\n'
 	fi
@@ -484,7 +520,7 @@ cmd_doctor() {
 		printf '\n===== openclaw doctor --fix =====\n'
 		if installed; then
 			HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-				timeout 300 "$(oc_oc_bin)" doctor --fix 2>&1 | tail -n 60
+				oc_timeout 300 "$(oc_oc_bin)" doctor --fix 2>&1 | tail -n 60
 		fi
 		printf '\n===== 一键修复 =====\n'
 		sh "$OC_REPAIR"
@@ -515,7 +551,7 @@ cmd_run() {
 	done
 
 	HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-		timeout 120 "$(oc_oc_bin)" "$@" 2>&1 | tail -n 200
+		oc_timeout 120 "$(oc_oc_bin)" "$@" 2>&1 | tail -n 200
 }
 
 cmd_mounts() {
@@ -1288,13 +1324,9 @@ export_fail() {
 
 export_timeout() {
 	# export_timeout <seconds> <cmd...>
-	# busybox 的 timeout 在部分老版本里没有；缺失时退化为直接执行。
-	local t="$1"; shift
-	if command -v timeout >/dev/null 2>&1; then
-		timeout "$t" "$@"
-	else
-		"$@"
-	fi
+	# 实现已提升到 lib.sh 的 oc_timeout()（带 command -v timeout 检查）；
+	# 这里保留函数名，避免改动 cmd_export 里既有的调用点。
+	oc_timeout "$@"
 }
 
 export_stage_cleanup() {
@@ -1773,6 +1805,7 @@ case "${1:-}" in
 	check)         shift; sh "$OC_VER" check "$@" ;;
 	log)           cmd_log "$@" ;;
 	tasklog)       cmd_tasklog "$@" ;;
+	unlock)        cmd_unlock ;;
 	doctor)        cmd_doctor "$@" ;;
 	fix)           cmd_repair "$@" ;;
 	repair)        cmd_repair "$@" ;;
@@ -1834,6 +1867,8 @@ Usage: openclaw.sh <command> [options]
   backup-path               print the backup directory
   restore <file> [--no-safety]   validate, snapshot, then restore
   log [n] | tasklog [n]
+  unlock                    clear a stale operation lock (refuses while the
+                            lock holder is still running; JSON on stdout)
   export [path]             diagnostic bundle: full logs + system info + redacted
                             openclaw.json / .env / uci (default
                             /tmp/luci-app-openclaw-diag-<ts>.tar.gz, mode 600)

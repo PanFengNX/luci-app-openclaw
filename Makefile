@@ -57,6 +57,7 @@ define Package/$(PKG_NAME)/postinst
 chmod +x /etc/init.d/openclaw 2>/dev/null
 chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null
 chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null
+chmod +x /usr/bin/openclaw 2>/dev/null
 rm -f /tmp/luci-indexcache /tmp/luci-modulecache
 exit 0
 endef

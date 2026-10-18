@@ -94,6 +94,22 @@ oc_warn() { oc_log WARN "$@" >&2; }
 oc_err()  { oc_log ERROR "$@" >&2; }
 oc_raw()  { printf '%s\n' "$*"; }
 
+# ---------------------------------------------------------------- portability
+oc_timeout() {
+	# oc_timeout <seconds> <cmd...>
+	# busybox 的 timeout 在部分老版本 / 精简构建里没有（实机见过
+	# "timeout: not found"）。缺失时退化为直接执行 —— 不设上限，但必须
+	# 在 stderr 留一行告警，否则用户只会看到命令莫名变慢。
+	# 注意用 "$@" 转发，绝不把参数拼成字符串（会破坏含空格的路径）。
+	local t="$1"; shift
+	if command -v timeout >/dev/null 2>&1; then
+		timeout "$t" "$@"
+	else
+		oc_warn "本机无 timeout 命令，已不限制执行时长：$*"
+		"$@"
+	fi
+}
+
 # ---------------------------------------------------------------- uci
 uci_get() {
 	# uci_get <key> [default]
@@ -1114,6 +1130,58 @@ oc_ppid() {
 	awk '{print $4}' "/proc/$1/stat" 2>/dev/null
 }
 
+# Set by oc_pid_alive() on failure: exited | zombie | reused | no-pid.
+# Kept as a global (no `local -n` in ash) so callers can explain *why* a lock
+# was treated as stale.
+OC_PID_REASON=""
+
+oc_pid_alive() {
+	# oc_pid_alive <pid> -> 0 only when <pid> is a live process of this plugin.
+	#
+	# `kill -0` alone is not good enough to decide whether a lock holder still
+	# runs:
+	#   * a zombie (dead, not yet reaped) still accepts signal 0;
+	#   * after the holder exits its pid can be recycled by an unrelated
+	#     process, which also accepts signal 0.
+	# Either case left the lock unbreakable ("另一个操作正在运行", forever).
+	# So require all three: /proc entry, non-zombie state, and an argv that
+	# still names one of our scripts.
+	local pid="${1:-}" statline state cmd
+	OC_PID_REASON=""
+	case "$pid" in ''|*[!0-9]*) OC_PID_REASON="no-pid"; return 1 ;; esac
+	[ -d "/proc/$pid" ] || { OC_PID_REASON="exited"; return 1; }
+
+	statline="$(cat "/proc/$pid/stat" 2>/dev/null)"
+	[ -n "$statline" ] || { OC_PID_REASON="exited"; return 1; }
+	# Field 2 (comm) is wrapped in parens and may itself contain spaces and
+	# parens ("(node) worker"). Strip through the *last* ") " and take the
+	# first remaining field - awk '{print $3}' would read the wrong token.
+	state="${statline##*) }"
+	state="${state%% *}"
+	[ "$state" = "Z" ] && { OC_PID_REASON="zombie"; return 1; }
+
+	cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
+	# kernel threads have an empty cmdline; either way it is not ours
+	[ -n "$cmd" ] || { OC_PID_REASON="reused"; return 1; }
+	case "$cmd" in
+		*istorec/openclaw.sh*|*openclaw/install.sh*|*openclaw/backup.sh*|\
+		*openclaw/models.sh*|*openclaw/channels.sh*|*openclaw/versions.sh*)
+			return 0 ;;
+	esac
+	OC_PID_REASON="reused"
+	return 1
+}
+
+oc_pid_reason_text() {
+	# oc_pid_reason_text <reason> -> human readable (for logs only)
+	case "${1:-}" in
+		zombie) printf '持锁进程已成为僵尸进程' ;;
+		reused) printf 'pid 已被其它进程复用' ;;
+		no-pid) printf '锁内没有有效的 pid 记录' ;;
+		*)      printf '持锁进程已退出' ;;
+	esac
+}
+
 oc_pid_in_ancestry() {
 	# true when <pid> is one of our own parents (stale-lock self recovery)
 	local target="$1" cur depth
@@ -1136,9 +1204,9 @@ oc_lock_acquire() {
 		return 0
 	fi
 
-	local pid
+	local pid reason
 	pid="$(cat "$OC_LOCK_DIR/pid" 2>/dev/null || true)"
-	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+	if [ -n "$pid" ] && oc_pid_alive "$pid"; then
 		if oc_pid_in_ancestry "$pid"; then
 			oc_warn "检测到自身持有的陈旧锁，自动恢复：$OC_LOCK_DIR"
 		else
@@ -1146,7 +1214,13 @@ oc_lock_acquire() {
 			return 2
 		fi
 	else
-		oc_warn "检测到陈旧锁（pid ${pid:-未知} 已退出），自动清理：$OC_LOCK_DIR"
+		# 区分三种“死锁”原因，排查时能直接看出是退出、僵尸还是 pid 复用
+		if [ -z "$pid" ]; then
+			reason="no-pid"
+		else
+			reason="$OC_PID_REASON"
+		fi
+		oc_warn "检测到陈旧锁（pid ${pid:-未知}，$(oc_pid_reason_text "$reason")），自动清理：$OC_LOCK_DIR"
 	fi
 
 	rm -rf "$OC_LOCK_DIR" 2>/dev/null || true

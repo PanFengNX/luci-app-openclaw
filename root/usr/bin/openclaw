@@ -1,0 +1,115 @@
+#!/bin/sh
+# openclaw - 系统命令行入口（SSH / cron / 脚本里直接可用）
+#
+# 纯透传：本脚本不实现任何子命令、不做参数白名单，只负责
+#   1. 载入插件公共库，定位真实的 CLI（<openclaw_dir>/bin/openclaw）
+#   2. 准备好 CLI 需要的 HOME / PATH
+#   3. exec 真实 CLI，把收到的参数原样交给它
+#
+# 这样用户在 SSH 里按官方文档敲 `openclaw devices approve ...` 就能用。
+# CLI 本体仍由 LuCI「OpenClaw 助手 → 设置」里的安装流程部署，本脚本不含任何逻辑。
+#
+# 以 root 调用时会自动降权到服务用户（$OC_USER，见 lib.sh），避免 CLI 写出的
+# 文件属主与网关服务不一致（服务以 openclaw 运行，读不到 root 属主的配置）。
+
+OC_LIB="/usr/libexec/openclaw/lib.sh"
+
+if [ ! -r "$OC_LIB" ]; then
+	printf '%s\n' "openclaw: 插件未正确安装（缺少 $OC_LIB），请重新安装 luci-app-openclaw" >&2
+	exit 127
+fi
+
+# 载入失败时 oc_oc_bin 等函数都不存在，继续往下只会在别处抛出更难懂的错误。
+if ! . "$OC_LIB"; then
+	printf '%s\n' "openclaw: 无法载入 $OC_LIB，请重新安装 luci-app-openclaw" >&2
+	exit 127
+fi
+
+BIN="$(oc_oc_bin)"
+
+# 只装了 LuCI 插件、还没执行安装时，给一条能照做的提示，
+# 而不是让用户看到 "not found" 或一段 node 堆栈。
+if [ ! -f "$BIN" ] || [ ! -x "$BIN" ]; then
+	printf '%s\n' "openclaw: 运行环境尚未安装，请先在 LuCI「OpenClaw 助手 → 设置」里执行安装" >&2
+	exit 127
+fi
+
+# ---------------------------------------------------------------- 防递归
+# main.openclaw_dir 是用户可配置项：设成 /usr 时 oc_oc_bin 正好解析到本脚本，
+# exec 自己会无限套娃，直到 fork 失败把路由器拖死。比较物理路径，
+# 符号链接也逃不掉（oc_oc_bin 本身不做任何安全校验，这里必须兜底）。
+oc_resolve() {
+	# oc_resolve <path> -> 物理路径；解析不出来时原样返回
+	local p
+	p="$(readlink -f "$1" 2>/dev/null)" || p=""
+	[ -n "$p" ] || p="$1"
+	printf '%s' "$p"
+}
+
+SELF="$(oc_resolve "$0")"
+BIN_REAL="$(oc_resolve "$BIN")"
+if [ "$BIN_REAL" = "$SELF" ] || [ "$BIN" = "/usr/bin/openclaw" ] || [ "$BIN" = "$0" ]; then
+	printf '%s\n' "openclaw: 检测到递归调用（CLI 解析为 $BIN，与入口 $0 相同），已中止" >&2
+	printf '%s\n' "openclaw: 请检查 LuCI「OpenClaw 助手 → 设置」里的安装目录，不要指向 /usr" >&2
+	exit 127
+fi
+
+# ---------------------------------------------------------------- 运行时环境
+# HOME 决定 CLI 去哪里找 .openclaw/openclaw.json，必须与网关（init.d）一致，
+# 否则 SSH 里改的配置和 LuCI/服务看到的不是同一份。
+HOME="$(oc_home_dir)"
+export HOME
+
+# private 模式下 node 不在系统 PATH 里，CLI 及其 npm 子进程都要靠这一段。
+# 后面四个是 OpenWrt 的标准路径：不继承调用者的 PATH，保证 root / 普通用户、
+# 交互登录 / cron 下行为一致（root 的 PATH 常被 profile 改写）。
+PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
+
+# ---------------------------------------------------------------- 降权
+# CLI 会在 $HOME/.openclaw 下写配置、凭据和会话文件。这些文件必须属于网关
+# 服务的运行用户，否则 SSH 里改完配置后 LuCI / 服务读不到，devices approve
+# 也不生效。root 调用时用 su 切到 $OC_USER；条件不满足时保持原行为。
+quote_arg() {
+	# quote_arg <arg> -> 单引号形式；参数内部的 ' 按 POSIX 写成 '\''
+	# 纯 shell 实现（不经过 sed / 命令替换），尾随空格和换行不会被吃掉。
+	local rest out
+	rest="$1"
+	out=""
+	while [ -n "$rest" ]; do
+		case "$rest" in
+			*\'*)
+				out="$out${rest%%\'*}'\\''"
+				rest="${rest#*\'}"
+				;;
+			*)
+				out="$out$rest"
+				rest=""
+				;;
+		esac
+	done
+	printf "'%s'" "$out"
+}
+
+if [ "$(id -u 2>/dev/null)" = "0" ] &&
+	[ -n "${OC_USER:-}" ] &&
+	grep -q "^${OC_USER}:" /etc/passwd 2>/dev/null &&
+	command -v su >/dev/null 2>&1; then
+	# busybox su 的用法：su -s /bin/sh <user> -c "<命令字符串>"
+	# 服务用户的登录 shell 是 /bin/false（见 lib.sh 的 oc_ensure_user），
+	# 必须用 -s 指定 /bin/sh，否则 su 会直接失败。
+	#
+	# HOME / PATH 显式写在命令里：su 会按目标用户重设环境，而 CLI 必须看到
+	# 与网关一致的值。每个参数单独 quote_arg，绝不用 "$*" 拼——含空格的
+	# 参数会被拆开，含 shell 元字符的参数会被当成代码执行。
+	oc_cmd="HOME=$(quote_arg "$HOME") PATH=$(quote_arg "$PATH") exec $(quote_arg "$BIN")"
+	for oc_arg in "$@"; do
+		oc_cmd="$oc_cmd $(quote_arg "$oc_arg")"
+	done
+	# exec：shell 被 su 替换，退出码就是 su（进而 CLI）的退出码。
+	exec su -s /bin/sh "$OC_USER" -c "$oc_cmd"
+fi
+
+printf '%s\n' "提示：当前不是以 openclaw 用户运行，CLI 写入的文件属主可能与服务不一致" >&2
+# "$@" 原样保留空格、空参数和 --flag=value；不做任何解析。
+exec "$BIN" "$@"

@@ -329,11 +329,9 @@ oc_cli() {
 
 oc_svc_restart() {
 	[ -x /etc/init.d/openclaw ] || return 0
-	if command -v timeout >/dev/null 2>&1; then
-		timeout 60 /etc/init.d/openclaw restart >/dev/null 2>&1
-	else
-		/etc/init.d/openclaw restart >/dev/null 2>&1
-	fi
+	# oc_timeout 在没有 timeout applet 的 busybox 上会退化为直接执行；
+	# 告警走 stderr，这里按原有约定连同 stdout 一起丢弃（重启是静默步骤）。
+	oc_timeout 60 /etc/init.d/openclaw restart >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------- install
