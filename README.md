@@ -66,14 +66,14 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 | 能力 | 本实现 |
 | --- | --- |
 | 原生部署（procd + Node/npm，非 docker） | ✅ `/etc/init.d/openclaw` |
-| 安装路径可选（自动检测挂载盘与剩余空间） | ✅ 状态页列出挂载点 + 手动输入，安装前写入探针与空间检查 |
+| 安装路径可选（自动检测挂载盘与剩余空间） | ✅ 设置页列出挂载点 + 手动输入，安装前写入探针与空间检查 |
 | 在线安装运行环境 | ✅ 一键拉取 Node.js + npm 安装 OpenClaw，实时日志 |
 | 端口 / 绑定模式 | ✅ 18789，bind: loopback / lan / auto / tailnet / custom |
 | 网关 token 与 Web 控制台入口 | ✅ 状态页直接带 `#token=` 打开 |
 | 微信渠道插件 | ✅ 官方 `@tencent-weixin/openclaw-weixin-cli`（含前置检查） |
 | 命令行页面 | ✅ 任意 `openclaw <子命令>` |
 | 日志 / doctor 体检 | ✅ 含 `doctor --fix` 一键修复 |
-| 程序目录与数据目录可分离 | ✅ `main.openclaw_dir` |
+| 程序目录固定为 `<安装目录>/openclaw` | ✅ 页面上只读；分离存放需 SSH 写 UCI |
 | 一键备份与恢复 | ✅ 归档逐条安全校验 + 还原前自动快照 |
 | UCI 配置 `openclaw.main.*` | ✅ `base_dir`、`openclaw_dir`、`port`、`bind`、`enabled` … |
 | istorec 接口 `install/start/stop/status/port/token` | ✅ `/usr/libexec/istorec/openclaw.sh`（**可选**，供 iStore 显示与控制） |
@@ -223,16 +223,11 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 
 `npm install -g openclaw@<version>`，升级只需换版本号重装，便于长期维护。
 
-### 6. 程序目录可独立配置（新增）
+### 6. 程序目录固定为 `<安装目录>/openclaw`
 
-`main.openclaw_dir` 可把 OpenClaw 程序本体与数据分开放置：
+程序目录已改为只读，页面上不再有下拉或输入框；分离存放时在 SSH 里 `uci set openclaw.main.openclaw_dir=<路径>` 后重新安装（旧目录不会被自动清理，安装前弹确认）。
 
-- 默认 `<安装目录>/openclaw`；留空即默认。
-- 典型用法：程序放内置存储、数据（会话/工作区）放大容量磁盘，或反过来。
-- 状态页「程序目录」下拉列出各挂载点（含"（默认）"选项），也可手动输入。
-- 改动此项后需重新执行安装；旧目录**不会**被自动删除，安装前会弹确认。
-
-安全约束（因为这是个会被 `chown -R` / `rm -rf` 的路径）：
+安全约束（因为这是个会被递归接管属主、递归删除的路径）：
 
 - 保存时用 `oc_validate_base_dir` 校验形状，拒绝系统路径、`..`、符号链接；
 - 拒绝把它设成**安装目录本身或它的上级**（否则卸载会连带删掉数据）；
@@ -241,7 +236,7 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 
 ### 7. 一键备份与恢复（新增）
 
-状态页新增「备份与恢复」卡片：
+「设置 → 备份」页提供「备份与恢复」卡片：
 
 - 一键创建备份，可选备注名、是否包含工作区；
 - 查看、下载、校验、删除历史备份；
@@ -269,7 +264,7 @@ openclaw.sh restore <文件名> [--no-safety]
 iStoreOS 25.12.x 基于 OpenWrt 25.12，包管理器是 **apk-tools v3**，请安装：
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.4.0-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.5.0-r1.apk
 ```
 
 **不要**装 `...-v2.apk` —— 那是 apk-tools 2.x / Alpine 的格式，不是 OpenWrt 25.12 的
@@ -331,26 +326,30 @@ SOURCE_DATE_EPOCH=1700000000 python3 scripts/build_apk.py
 python3 scripts/build_apk.py
 ```
 
-### 10. 设置页拆分与多渠道支持（新增）
+### 10. 菜单结构与多渠道支持
 
-- **首页 / 设置拆分**：状态页专注运行状态、日志与诊断；安装目录、OpenClaw / Node.js
-  版本、端口、绑定模式等配置集中到独立的「设置」页，入口在 LuCI 服务菜单下。
-- **Control UI 入口**：状态页「打开控制台」直接带 token 打开网关 Web 控制台。
+- **父菜单**：状态 / 设置（基础、关联迁移、模型、渠道、备份）/ 命令行 / 日志；「检测到已有 OpenClaw 安装」独立为「关联迁移」页。
+- **状态页**：概览条 + 设备配对一键批准；修复按钮收敛为「体检」与「一键修复」（含 `doctor --fix`）；**设置页**拆成多张卡片，模型页按 Base URL 实时拉取上游模型列表（仅自定义 provider 可见）。
 - **多渠道支持**：渠道页统一管理 **Telegram、飞书、Discord、Slack、微信、钉钉、QQ**
   共 7 个平台，可启用渠道、登录并填写凭据；凭据经 0600 临时文件传递，页面不回填明文。
+
+### 11. 系统命令行入口与 unlock
+
+- `/usr/bin/openclaw` 透传真实 CLI，root 调用自动降权到服务用户，SSH 里改的配置与服务同源。
+- `openclaw.sh unlock` 清理陈旧操作锁（安装中断后 UI 一直显示「运行中」）；锁存活判定已加固，僵尸进程 / pid 复用不再误判，仍有操作在跑时拒绝执行。
 
 ## 安装
 
 ### apk（OpenWrt 25.12+ / apk-tools 3.x）
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.4.0-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.5.0-r1.apk
 ```
 
 ### ipk（opkg）—— **OpenWrt 24.10 及更早、iStoreOS 等 opkg 系统**
 
 ```sh
-opkg install luci-app-openclaw_1.4.0_all.ipk
+opkg install luci-app-openclaw_1.5.0_all.ipk
 ```
 
 在 LuCI / iStore 界面里也可以直接「手动上传安装」这个 ipk。
@@ -374,7 +373,7 @@ opkg install luci-app-openclaw_1.4.0_all.ipk
 ### .run 自解压（无需包管理器）
 
 ```sh
-sh luci-app-openclaw-1.4.0.run
+sh luci-app-openclaw-1.5.0.run
 ```
 
 ### 集成到固件 / SDK 编译
@@ -389,7 +388,7 @@ make package/luci-app-openclaw/compile V=s
 ### 自行生成安装包（无需 SDK）
 
 ```sh
-python3 scripts/build_apk.py --version 1.4.0 --release 1 --sign
+python3 scripts/build_apk.py --version 1.5.0 --release 1 --sign
 python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 / ipk）
 ```
 
@@ -398,8 +397,9 @@ python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 /
 1. LuCI → 服务 → **OpenClaw 助手** →「设置」：选择安装目录、OpenClaw 版本、Node.js 版本 → 安装。
 2. 安装完成后回到「状态」页，点击「打开控制台」（自动带 token）。
 3. 「模型」页选择 `DeepSeek` / `Z.AI` 等，填 Key → 一键安装插件并设为默认。
-4. 出问题时点「一键修复」或「doctor 一键修复」。
+4. 出问题时点「体检」或「一键修复」（后者含 `doctor --fix`）。
 5. 「渠道」页安装微信插件；「命令行」页可执行任意 openclaw 子命令。
+6. 也可以在 SSH 里直接用 `/usr/bin/openclaw <子命令>`，与「命令行」页等价。
 
 ### 命令行
 
@@ -417,6 +417,7 @@ openclaw.sh diag-poll repair                  # {"done":bool,"rc":"0","output":"
 openclaw.sh models catalog|presets|apply deepseek sk-xxx deepseek-v4-flash
 openclaw.sh channels weixin install|weixin login
 openclaw.sh run plugins list
+openclaw.sh unlock                            # 清理陈旧操作锁
 ```
 
 ## 目录结构
@@ -424,7 +425,8 @@ openclaw.sh run plugins list
 ```
 Makefile                                  OpenWrt 包定义（feeds / SDK）
 luasrc/controller/openclaw.lua            LuCI 路由 + JSON API
-luasrc/view/openclaw/*.htm                状态、设置、模型、渠道、命令行、日志
+luasrc/view/openclaw/*.htm                状态、设置（基础/关联迁移/模型/渠道/备份）、命令行、日志
+root/usr/bin/openclaw                    系统命令行入口（透传 CLI，root 自动降权）
 root/etc/config/openclaw                 UCI 默认配置（独立）
 root/etc/init.d/openclaw                 procd 服务
 root/etc/uci-defaults/99-openclaw        首次安装初始化（用户、目录、默认挂载点）
