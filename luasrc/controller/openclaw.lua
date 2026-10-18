@@ -44,6 +44,8 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "mounts"},    call("api_mounts")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "discover"},  call("api_discover")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "node_existing"}, call("api_node_existing")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "devices_pending"}, call("api_devices_pending")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "devices_approve"}, call("api_devices_approve")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "link"},      call("api_link")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "migrate"},   call("api_migrate")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "doctor"},    call("api_doctor")).leaf = true
@@ -573,6 +575,48 @@ function api_node_existing()
 	-- 同样可能较慢（逐候选跑 node -v，helper 用 timeout 封顶），前端必须异步调用、
 	-- 失败或空结果时安静隐藏提示，不弹错误。
 	local r = sh(SH .. " node-existing")
+	out({ ok = true, data = r })
+end
+
+-- ---------------------------------------------------------------- devices
+-- 局域网 / Tailnet 访问 Control UI 时 OpenClaw 要求一次性配对批准
+-- （127.0.0.1 自动批准）。两个端点都只是 openclaw.sh 的薄封装：
+--   * helper 的 stdout 只有 JSON，日志走 stderr；这里把整段 JSON 作为 data
+--     原样透传，前端自己 parse（与 discover / node_existing 一致）。
+--     不在这里 jsonc.parse 后再 stringify：LuCI 的 jsonc 会把空数组重新编码成
+--     {}，前端 Array.isArray() 就失效了。
+--   * requestId 只从 POST body 读取（前端 post() 以表单编码提交），绝不拼进
+--     URL —— uhttpd 会把查询串写进访问日志。
+--   * 控制器侧先做一次白名单校验；shell 侧还有第二道（id 会进入 argv）。
+--     批准是逐条动作，不提供 approve-all。
+local DEVICE_ID = "^[A-Za-z0-9._-]+$"
+
+function api_devices_pending()
+	local r = sh(SH .. " devices-pending")
+	if r == "" then
+		out({ ok = false, error = "设备列表为空（OpenClaw 可能未安装）" })
+		return
+	end
+	out({ ok = true, data = r })
+end
+
+function api_devices_approve()
+	local id = http.formvalue("requestId")
+	if type(id) ~= "string" or id == "" then
+		out({ ok = false, error = "缺少 requestId" })
+		return
+	end
+	-- 与 shell 侧保持同一条白名单：长度 <= 128、只允许 [A-Za-z0-9._-]，
+	-- 且拒绝前导 "-"（会被 CLI 当成选项而不是设备 id）。
+	if #id > 128 or not id:match(DEVICE_ID) or id:sub(1, 1) == "-" then
+		out({ ok = false, error = "requestId 非法" })
+		return
+	end
+	local r = sh(SH .. " devices-approve " .. q(id))
+	if r == "" then
+		out({ ok = false, error = "批准失败（无返回内容）" })
+		return
+	end
 	out({ ok = true, data = r })
 end
 

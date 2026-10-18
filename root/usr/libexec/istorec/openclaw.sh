@@ -594,6 +594,251 @@ cmd_node_existing() {
 	printf '\n'
 }
 
+# ---------------------------------------------------------------- devices
+# 局域网 / Tailnet 访问 Control UI 时 OpenClaw 要求一次性配对批准
+# （127.0.0.1 自动批准）。这两条命令把「SSH 手敲 openclaw devices ...」
+# 降到 LuCI 里的一个按钮。
+#
+# 约定与 discover / node-existing 相同：stdout 只有 JSON，日志一律走 stderr
+# （oc_warn / oc_err / oc_timeout 的告警都写 stderr），前端直接 JSON.parse。
+# 批准是逐条动作：这里刻意不提供 approve-all，避免一次误批陌生设备。
+
+oc_devices_clean() {
+	# stdin -> 去掉 CR 与 ANSI SGR 的纯文本（表格解析前先归一化）
+	tr -d '\r' 2>/dev/null | tr -d '\033' 2>/dev/null | sed 's/\[[0-9;]*m//g' 2>/dev/null
+}
+
+oc_devices_parse() {
+	# stdin: `openclaw devices list` 的纯文本
+	# stdout: 每行 "id<TAB>label<TAB>role<TAB>requestedAt"
+	#
+	# 兼容三种常见形态：
+	#   * ASCII / Unicode 表格（| ... | 或 │ ... │）
+	#   * 两列以上用连续空白分隔的表格
+	#   * 段落标记：只看 pending 段，遇到 paired / approved 段停止
+	# 解析不出来时什么都不输出，由调用方降级为 raw（不报错、不崩溃）。
+	awk '
+	function trim(s) { gsub(/^[ \t]+/, "", s); gsub(/[ \t]+$/, "", s); return s }
+	function valid(id) {
+		if (id == "" || length(id) < 3 || length(id) > 128) return 0
+		if (id !~ /^[A-Za-z0-9._-]+$/ || substr(id, 1, 1) == "-") return 0
+		if (tolower(id) ~ /^(id|request|requestid|device|label|role|status|pending|none)$/) return 0
+		return 1
+	}
+	function emit(id, label, role, req) {
+		id = trim(id); label = trim(label); role = trim(role); req = trim(req)
+		if (!valid(id)) return
+		gsub(/\t/, " ", label); gsub(/\t/, " ", role); gsub(/\t/, " ", req)
+		printf "%s\t%s\t%s\t%s\n", id, label, role, req
+	}
+	function row(m,   i, h, hasid, hasdev, hasrole, hastime, allsep) {
+		if (m < 3) return
+		allsep = 1
+		for (i = 1; i <= m; i++) if (f[i] !~ /^[-=_+ ]+$/) { allsep = 0; break }
+		if (allsep) return
+		hasid = 0; hasdev = 0; hasrole = 0; hastime = 0
+		for (i = 1; i <= m; i++) {
+			h = tolower(f[i]); gsub(/[ _-]+/, "", h)
+			if (h == "requestid" || h == "id" || h == "request" || h == "deviceid") hasid = 1
+			if (h == "device" || h == "label" || h == "name" || h == "devicename") hasdev = 1
+			if (h == "role" || h == "scope") hasrole = 1
+			if (h == "requested" || h == "requestedat" || h == "time" || h == "created" || h == "createdat" || h == "when") hastime = 1
+		}
+		if (!havehdr && hasid && (hasdev || hasrole || hastime)) {
+			# 表头出现后按列名重新映射；没有出现的列留空（不能沿用默认列号，
+			# 否则 "Device ID | Role | Requested" 会把 Role 同时当成 label）
+			idc = 0; labc = 0; rolec = 0; reqc = 0
+			for (i = 1; i <= m; i++) {
+				h = tolower(f[i]); gsub(/[ _-]+/, "", h)
+				if (h == "requestid" || h == "id" || h == "request" || h == "deviceid") idc = i
+				else if (h == "device" || h == "label" || h == "name" || h == "devicename") labc = i
+				else if (h == "role" || h == "scope") rolec = i
+				else if (h == "requested" || h == "requestedat" || h == "time" || h == "created" || h == "createdat" || h == "when") reqc = i
+			}
+			havehdr = 1
+			return
+		}
+		emit(f[idc], f[labc], f[rolec], f[reqc])
+	}
+	BEGIN { inpending = 1; havehdr = 0; idc = 1; labc = 2; rolec = 3; reqc = 4 }
+	{
+		line = $0
+		low = tolower(line)
+		if (line ~ /^[ \t]*$/) next
+		# 段落标记：只在"不是表格行"的文本上判断，避免设备名里带 pending
+		# 的数据行被整行丢弃。pending 段保留，paired / approved 段跳过。
+		if (line !~ /[|│]/ && line !~ /[ \t][ \t]+/) {
+			if (low ~ /(^|[^a-z])(pending|awaiting)/ || low ~ /(待批准|待配对|等待批准)/) { inpending = 1; next }
+			if (low ~ /(^|[^a-z])(paired|approved|trusted)/ || low ~ /(已配对|已批准|已知设备)/) { inpending = 0; next }
+		}
+		if (!inpending) next
+
+		if (line ~ /[|│]/) {
+			gsub(/│/, "|", line)
+			n = split(line, cells, "|")
+			m = 0
+			for (i = 1; i <= n; i++) {
+				c = trim(cells[i])
+				if (c != "") { m++; f[m] = c }
+			}
+			row(m)
+			next
+		}
+
+		# 连续两个以上空白才当作列分隔：普通句子（"No pending requests"）不会被误判
+		if (line ~ /[ \t][ \t]+/) {
+			n = split(line, parts, /[ \t][ \t]+/)
+			m = 0
+			for (i = 1; i <= n; i++) {
+				c = trim(parts[i])
+				if (c != "") { m++; f[m] = c }
+			}
+			row(m)
+		}
+	}'
+}
+
+oc_devices_parse_kv() {
+	# 兜底解析 "Request ID: ... / Device: ... / Role: ... / Requested: ..." 形态。
+	# 只在表格解析没有任何结果时调用；同样解析失败就输出空。
+	awk '
+	function trim(s) { gsub(/^[ \t]+/, "", s); gsub(/[ \t]+$/, "", s); return s }
+	function valid(id) {
+		if (id == "" || length(id) < 3 || length(id) > 128) return 0
+		if (id !~ /^[A-Za-z0-9._-]+$/ || substr(id, 1, 1) == "-") return 0
+		if (tolower(id) ~ /^(id|request|requestid|device|label|role|status|pending|none)$/) return 0
+		return 1
+	}
+	function flush() {
+		if (id != "" && valid(id)) {
+			gsub(/\t/, " ", label); gsub(/\t/, " ", role); gsub(/\t/, " ", req)
+			printf "%s\t%s\t%s\t%s\n", id, label, role, req
+		}
+		id = ""; label = ""; role = ""; req = ""
+	}
+	BEGIN { id = ""; label = ""; role = ""; req = "" }
+	{
+		line = $0
+		low = tolower(line)
+		if (line ~ /^[ \t]*$/) next
+		if (low ~ /^[ \t]*(pending|awaiting)/ || low ~ /(待批准|待配对|等待批准)/) next
+		if (low ~ /^[ \t]*(paired|approved|trusted)/ || low ~ /already paired|paired devices|approved devices|trusted devices/ || low ~ /(已配对|已批准|已知设备)/) { flush(); exit }
+		if (match(line, /^[ \t]*[-*]?[ \t]*"?[A-Za-z][A-Za-z0-9 _-]*"?[ \t]*[:=][ \t]*/)) {
+			key = substr(line, 1, RLENGTH)
+			val = substr(line, RLENGTH + 1)
+			gsub(/^[ \t]*[-*]?[ \t]*"?/, "", key)
+			gsub(/"?[ \t]*[:=][ \t]*$/, "", key)
+			k = tolower(key); gsub(/[ _-]+/, "", k)
+			# 兼容每行一个 JSON 对象："id": "req_abc",
+			sub(/,[ \t]*$/, "", val)
+			val = trim(val)
+			if (val ~ /^".*"$/) { sub(/^"/, "", val); sub(/"$/, "", val) }
+			if (k == "requestid" || k == "id" || k == "request" || k == "deviceid") { flush(); id = val }
+			else if (k == "device" || k == "label" || k == "name" || k == "devicename") label = val
+			else if (k == "role" || k == "scope") role = val
+			else if (k == "requested" || k == "requestedat" || k == "time" || k == "created" || k == "createdat" || k == "when") req = val
+		}
+	}
+	END { flush() }'
+}
+
+cmd_devices_pending() {
+	if ! installed; then
+		printf '{"ok":false,"error":"运行环境尚未安装"}\n'
+		return 1
+	fi
+
+	local raw rc clean rows tailtxt rawjson
+	raw="$(HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+		oc_timeout 20 "$(oc_oc_bin)" devices list 2>&1)"
+	rc=$?
+
+	# 命令本身失败（子命令不存在 / 网关未启动 / 未登录）：把输出尾部交给前端。
+	if [ "$rc" -ne 0 ]; then
+		tailtxt="$(printf '%s\n' "$raw" | tail -n 20)"
+		[ -n "$tailtxt" ] || tailtxt="执行 openclaw devices list 失败（无输出）"
+		printf '{"ok":false,"error":"%s"}\n' "$(printf '%s\n' "$tailtxt" | json_escape)"
+		return 1
+	fi
+
+	clean="$(printf '%s\n' "$raw" | oc_devices_clean)"
+	rows="$(printf '%s\n' "$clean" | oc_devices_parse)"
+	[ -n "$rows" ] || rows="$(printf '%s\n' "$clean" | oc_devices_parse_kv)"
+
+	printf '{"ok":true,"pending":['
+	local first=1 rid rlabel rrole rreq
+	while IFS="$(printf '\t')" read -r rid rlabel rrole rreq; do
+		[ -n "$rid" ] || continue
+		if [ "$first" -eq 1 ]; then first=0; else printf ','; fi
+		printf '{"id":"%s","label":"%s","role":"%s","requestedAt":"%s"}' \
+			"$(oc_json_str "$rid")" "$(oc_json_str "$rlabel")" \
+			"$(oc_json_str "$rrole")" "$(oc_json_str "$rreq")"
+	done <<EOF
+$rows
+EOF
+	printf ']'
+
+	# 解析不出条目但命令确实有输出：把原文（前 40 行）交给前端展示。
+	# 这样 OpenClaw 改了输出格式时用户仍能看到内容并手动处理，而不是面对一个
+	# 永远空着的列表。明确的 "no pending" 文案不算解析失败，不附 raw。
+	if [ -z "$rows" ] && [ -n "$(printf '%s' "$clean" | tr -d '[:space:]')" ]; then
+		case "$(printf '%s' "$clean" | tr 'A-Z' 'a-z')" in
+			*"no pending"*|*"0 pending"*|*"没有"*|*"暂无"*|*"无待"*) ;;
+			*)
+				rawjson="$(printf '%s\n' "$clean" | head -n 40 | json_escape)"
+				[ -z "$rawjson" ] || printf ',"raw":"%s"' "$rawjson"
+				;;
+		esac
+	fi
+	printf '}\n'
+	return 0
+}
+
+cmd_devices_approve() {
+	# devices-approve <requestId>
+	#
+	# requestId 会进入命令行，白名单是硬要求：只允许 [A-Za-z0-9._-]，
+	# 长度 <= 128。另外拒绝前导 "-" —— 它虽然符合白名单，但会被
+	# `openclaw devices approve` 当成选项（例如 --help），而不是设备 id。
+	local id="${2:-}"
+	if [ -z "$id" ]; then
+		printf '{"ok":false,"error":"缺少 requestId"}\n'
+		return 1
+	fi
+	if [ "${#id}" -gt 128 ]; then
+		printf '{"ok":false,"error":"requestId 过长（上限 128）"}\n'
+		return 1
+	fi
+	case "$id" in
+		*[!A-Za-z0-9._-]*)
+			printf '{"ok":false,"error":"requestId 非法（只允许字母数字与 . _ -）"}\n'
+			return 1 ;;
+		-*)
+			printf '{"ok":false,"error":"requestId 非法（不能以 - 开头）"}\n'
+			return 1 ;;
+	esac
+
+	if ! installed; then
+		printf '{"ok":false,"error":"运行环境尚未安装"}\n'
+		return 1
+	fi
+
+	local out rc tailtxt
+	out="$(HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+		oc_timeout 30 "$(oc_oc_bin)" devices approve "$id" 2>&1)"
+	rc=$?
+
+	if [ "$rc" -eq 0 ]; then
+		printf '{"ok":true,"approved":"%s"}\n' "$(oc_json_str "$id")"
+		return 0
+	fi
+
+	tailtxt="$(printf '%s\n' "$out" | tail -n 20)"
+	[ -n "$tailtxt" ] || tailtxt="批准失败（命令无输出）"
+	printf '{"ok":false,"error":"%s"}\n' "$(printf '%s\n' "$tailtxt" | json_escape)"
+	return 1
+}
+
 cmd_link() {
 	# link <dir> : 把本机已有的 OpenClaw 安装「关联」到本插件。
 	#
@@ -1828,6 +2073,8 @@ case "${1:-}" in
 	mounts)        cmd_mounts ;;
 	discover)      cmd_discover ;;
 	node-existing) cmd_node_existing ;;
+	devices-pending) cmd_devices_pending ;;
+	devices-approve) cmd_devices_approve "$@" ;;
 	link)          cmd_link "$@" ;;
 	migrate)       cmd_migrate "$@" ;;
 	save)          cmd_save "$@" ;;
@@ -1882,6 +2129,10 @@ Usage: openclaw.sh <command> [options]
   discover                  JSON array of existing OpenClaw installs / data dirs
   node-existing             JSON array of node runtimes already on this device
                             (path / version / source / usable; read-only, installs nothing)
+  devices-pending           {"ok":true,"pending":[{id,label,role,requestedAt}]}
+                            pending Control UI pairing requests (raw fallback when
+                            the CLI output format is not recognised)
+  devices-approve <id>      approve ONE pending device (no approve-all by design)
   link <dir>                point the config at an existing install (UCI only,
                             nothing is copied: base_dir / state_dir per layout)
   migrate <dir>             copy an existing install into this plugin's default

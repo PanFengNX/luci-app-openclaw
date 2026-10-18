@@ -116,6 +116,12 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
     <button id="btn-open" class="oc-btn gray" disabled title="服务未启动">打开控制台</button>
     <span id="open-hint" class="oc-hint" style="margin-right:8px">服务未启动</span>
   </div>
+  <div class="oc-sub">设备配对</div>
+  <div class="oc-hint">局域网访问控制台需要在浏览器里完成一次配对；本机 127.0.0.1 访问自动批准。</div>
+  <div class="oc-actions">
+    <button id="btn-devices" class="oc-btn gray">检查待批准设备</button>
+  </div>
+  <div id="devices-out" class="oc-out" style="display:none;margin-top:8px"></div>
   <div class="oc-sub">诊断与修复</div>
   <div class="oc-actions">
     <button id="btn-doctor" class="oc-btn gray">体检（只读诊断）</button>
@@ -172,7 +178,9 @@ var API = {
   backup_delete: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_delete")%>',
   backup_upload: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_upload")%>',
   backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
-  restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>'
+  restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>',
+  devices_pending: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","devices_pending")%>',
+  devices_approve: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","devices_approve")%>'
 };
 var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, nodeExisting:[], nodeBusy:false };
 
@@ -609,10 +617,124 @@ function useExistingNode(e, btn){
   });
 }
 
+// ------------------------------------------------- 设备配对（Control UI）
+// 局域网 / Tailnet 访问 Control UI 时 OpenClaw 要求一次性配对批准
+// （127.0.0.1 自动批准）。页面加载时不请求：只有点击按钮才跑 CLI，
+// 避免每次打开状态页都起一个 Node 进程。
+var devBusy = false;
+
+function devBox(){
+  var box = $('devices-out');
+  if (box) box.style.display = '';
+  return box;
+}
+
+function devSay(text, cls){
+  var box = devBox();
+  if (!box) return;
+  box.textContent = '';
+  var d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = text;                  // 服务端数据只进 textContent
+  box.appendChild(d);
+}
+
+function devError(msg){ devSay(msg || '检查失败', 'oc-err'); }
+
+function devApprove(id, btn){
+  if (!id || devBusy) return;
+  if (!confirm('批准设备 ' + id + ' 访问控制台？\n\n请只批准你认识的设备。')) return;
+  devBusy = true;
+  if (btn) btn.disabled = true;
+  post(API.devices_approve, { requestId: id }, function(r){
+    devBusy = false;
+    var d = (r && r.data) ? jp(r.data, {}) : {};
+    if (!r || r.ok === false || d.ok !== true){
+      if (btn) btn.disabled = false;
+      devError((d && d.error) || (r && r.error) || '批准失败');
+      return;
+    }
+    loadDevices();                       // 批准成功后自动重新拉一次列表
+  });
+}
+
+function devList(list){
+  var box = devBox();
+  if (!box) return;
+  box.textContent = '';
+  var shown = 0;
+  list.forEach(function(it){
+    if (!it || !it.id) return;
+    shown++;
+    var row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '8px';
+    row.style.flexWrap = 'wrap';
+    row.style.marginBottom = '6px';
+
+    var txt = document.createElement('span');
+    txt.style.flex = '1';
+    txt.style.minWidth = '200px';
+    var parts = [String(it.id)];
+    if (it.role) parts.push('角色：' + String(it.role));
+    if (it.requestedAt) parts.push('时间：' + String(it.requestedAt));
+    if (it.label) parts.push(String(it.label));
+    txt.textContent = parts.join(' · ');
+    row.appendChild(txt);
+
+    var b = document.createElement('button');
+    b.className = 'oc-btn';
+    b.textContent = '批准';
+    b.onclick = function(){ devApprove(String(it.id), b); };
+    row.appendChild(b);
+    box.appendChild(row);
+  });
+  if (!shown) devSay('当前没有待批准的设备');
+}
+
+function devRaw(raw){
+  var box = devBox();
+  if (!box) return;
+  box.textContent = '';
+  var head = document.createElement('div');
+  head.textContent = '未能识别设备列表格式，以下是原始输出（可据此手动批准）：';
+  box.appendChild(head);
+  var pre = document.createElement('div');
+  pre.style.marginTop = '6px';
+  pre.textContent = String(raw);          // 原文同样只进 textContent
+  box.appendChild(pre);
+}
+
+function loadDevices(){
+  var box = $('devices-out'), btn = $('btn-devices');
+  if (!box || !btn || devBusy) return;
+  btn.disabled = true;
+  devSay('正在检查待批准的设备…');
+  get(API.devices_pending, function(r){
+    btn.disabled = false;
+    if (!r || r.ok === false){
+      devError((r && r.error) || '检查失败（服务无响应）');
+      return;
+    }
+    var d = jp(r.data || '{}', {});
+    if (d.ok === false){
+      devError(d.error || '检查失败');
+      return;
+    }
+    var list = Array.isArray(d.pending) ? d.pending : [];
+    if (list.length){ devList(list); return; }
+    // 解析不出条目但后端给了原文：原样展示，用户仍能看到内容并手动处理
+    if (d.raw && String(d.raw).replace(/\s+$/, '') !== ''){ devRaw(d.raw); return; }
+    devSay('当前没有待批准的设备');
+  });
+}
+
 $('btn-start').onclick   = function(){ post(API.service, {action:'start'},   function(){ setTimeout(loadInfo, 2500); }); };
 $('btn-stop').onclick    = function(){ post(API.service, {action:'stop'},    function(){ setTimeout(loadInfo, 1500); }); };
 $('btn-restart').onclick = function(){ post(API.service, {action:'restart'}, function(){ setTimeout(loadInfo, 3000); }); };
 $('btn-refresh').onclick = function(){ loadInfo(); loadNodeExisting(); };
+$('btn-devices').onclick = loadDevices;
 $('btn-open').onclick = openControl;
 // 只读地址框：聚焦 / 点击即全选，方便直接 Ctrl+C
 ['open-local','open-current'].forEach(function(id){
