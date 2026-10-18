@@ -115,10 +115,10 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
   </div>
   <div class="oc-sub">诊断与修复</div>
   <div class="oc-actions">
-    <button id="btn-doctor" class="oc-btn gray">体检 (doctor)</button>
-    <button id="btn-doctor-fix" class="oc-btn gray">doctor 一键修复</button>
-    <button id="btn-repair" class="oc-btn" style="background:#1a7f37">一键修复</button>
+    <button id="btn-doctor" class="oc-btn gray">体检（只读诊断）</button>
+    <button id="btn-repair" class="oc-btn" style="background:#1a7f37">一键修复（环境 + OpenClaw 自检）</button>
   </div>
+  <div class="oc-hint">体检只检查不改动；一键修复会修复目录/属主/配置，并让 OpenClaw 自检修复其内部配置，最后重启服务。</div>
   <div class="oc-sub">可复制的控制台地址</div>
   <div id="oc-open-addrs" class="oc-hint" style="margin-top:8px">
     <div style="margin-bottom:4px">本机地址
@@ -646,9 +646,8 @@ var diagTimer = null;
 
 function diagStop() {
   if (diagTimer) { clearInterval(diagTimer); diagTimer = null; }
-  $('btn-doctor').disabled = false;        $('btn-doctor').textContent = '体检 (doctor)';
-  $('btn-doctor-fix').disabled = false;    $('btn-doctor-fix').textContent = 'doctor 一键修复';
-  $('btn-repair').disabled = false;        $('btn-repair').textContent = '一键修复';
+  $('btn-doctor').disabled = false;        $('btn-doctor').textContent = '体检（只读诊断）';
+  $('btn-repair').disabled = false;        $('btn-repair').textContent = '一键修复（环境 + OpenClaw 自检）';
 }
 
 function diagPoll(name) {
@@ -675,7 +674,6 @@ function diagRun(name, title) {
   $('diag-out').textContent = '';
   $('diag-box').style.display = '';
   if (name === 'doctor')        { $('btn-doctor').disabled = true;     $('btn-doctor').textContent = '体检中…'; }
-  if (name === 'doctor-fix')    { $('btn-doctor-fix').disabled = true; $('btn-doctor-fix').textContent = '修复中…'; }
   if (name === 'repair')        { $('btn-repair').disabled = true;     $('btn-repair').textContent = '修复中…'; }
 
   post(API.diag_run, { name: name }, function(r){
@@ -694,8 +692,7 @@ function diagRun(name, title) {
 }
 
 $('diag-close').onclick = function(){ $('diag-box').style.display = 'none'; };
-$('btn-doctor').onclick  = function(){ diagRun('doctor', '体检 (doctor)'); };
-$('btn-doctor-fix').onclick = function(){ diagRun('doctor-fix', 'doctor 一键修复'); };
+$('btn-doctor').onclick  = function(){ diagRun('doctor', '体检（只读诊断）'); };
 $('btn-repair').onclick = function(){
   if (!confirm('将检查并修复权限、目录、配置、服务与开机自启，然后重启网关。继续？')) return;
   diagRun('repair', '一键修复');

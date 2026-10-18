@@ -270,7 +270,29 @@ else
 	say OK "LuCI 缓存为空"
 fi
 
-# 13 ------------------------------------------------------------ restart
+# 13 ------------------------------------------------------------ openclaw self-check
+# 先修环境，再让 OpenClaw 修它自己的配置，最后重启 —— 这样 doctor --fix 的
+# 修改能随最后一次重启生效。doctor --fix 可能因个别问题修不了而返回非零，
+# 因此只记 WARN，不让整次 repair 判失败。
+# 等价于 istorec/openclaw.sh 的 installed()：程序与 Node 都可执行才算已安装。
+if [ -x "$OB" ] && [ -x "$NB" ]; then
+	doc_out="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+		oc_timeout 300 "$OB" doctor --fix 2>&1)"
+	doc_rc=$?
+	if [ "$doc_rc" = "0" ]; then
+		say FIX "OpenClaw 自检修复完成"
+	else
+		say WARN "OpenClaw 自检修复未完全成功（退出码 $doc_rc）"
+	fi
+	# 保留最后若干行，便于定位 doctor 修不了的问题。--json 下不能直接
+	# printf 到 stdout（会破坏 finish 输出的 JSON），统一交给 say 收集。
+	doc_tail="$(printf '%s\n' "$doc_out" | tail -n 40)"
+	[ -n "$doc_tail" ] && say OK "$doc_tail"
+else
+	say OK "未安装，跳过 doctor --fix"
+fi
+
+# 14 ------------------------------------------------------------ restart
 if [ "$RESTART" = "1" ] && [ -x "$OB" ] && [ -x "$NB" ]; then
 	"$INITD" restart >/dev/null 2>&1 && say FIX "已重启服务" || say WARN "服务重启失败（见日志）"
 	sleep 1

@@ -421,7 +421,7 @@ cmd_info() {
 		ver="$(HOME="$home" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" "$(oc_oc_bin)" --version 2>/dev/null | head -n1)"
 		nver="$( "$(oc_node_bin)" -v 2>/dev/null)"
 	fi
-	printf '{"status":"%s","installed":%s,"port":"%s","token":"%s","openclaw":"%s","node":"%s","node_mode":"%s","base_dir":"%s","openclaw_dir":"%s","oc_dir_custom":%s,"home":"%s","free_mb":"%s","arch":"%s","musl":%s,"bind":"%s","url":"http://%s:%s/"}\n' \
+	printf '{"status":"%s","installed":%s,"port":"%s","token":"%s","openclaw":"%s","node":"%s","node_mode":"%s","base_dir":"%s","openclaw_dir":"%s","oc_dir_custom":%s,"home":"%s","free_mb":"%s","arch":"%s","musl":%s,"bind":"%s","node_mirror":"%s","url":"http://%s:%s/"}\n' \
 		"$st" \
 		"$(installed && echo true || echo false)" \
 		"$port" "$token" "${ver:-}" "${nver:-}" \
@@ -431,6 +431,7 @@ cmd_info() {
 		"$home" "${free:-0}" \
 		"$(oc_arch)" "$(oc_is_musl && echo 1 || echo 0)" \
 		"$(uci_get main.bind lan)" \
+		"$(oc_json_str "$(uci_get main.node_mirror '')")" \
 		"$(uci -q get network.lan.ipaddr 2>/dev/null || echo 127.0.0.1)" "$port"
 }
 

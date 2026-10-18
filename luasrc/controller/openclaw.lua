@@ -209,6 +209,13 @@ function api_save()
 			args = args .. " --" .. k:gsub("_", "-") .. " " .. q(v)
 		end
 	end
+	-- node_mirror 需要能显式清空（设置页选「自动」）：上面按空值跳过，
+	-- 旧镜像源会一直留在 UCI 里。只有带 node_mirror_clear=1 且没有给出
+	-- 具体地址时才清空，避免「保存基本设置」误清镜像源。
+	local nm = http.formvalue("node_mirror") or ""
+	if nm == "" and http.formvalue("node_mirror_clear") == "1" then
+		args = args .. " --node-mirror " .. q("")
+	end
 	-- openclaw_dir 允许为空：空值表示"恢复默认（<安装目录>/openclaw）"，
 	-- 所以必须显式传递，不能像上面那样把空值跳过。
 	local od = http.formvalue("openclaw_dir")

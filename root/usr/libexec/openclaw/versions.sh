@@ -3,7 +3,7 @@
 #
 # All version data is fetched live from upstream:
 #   * OpenClaw releases + required Node.js range -> npm registry (official package)
-#   * Node.js runtimes (musl / glibc)            -> nodejs.org (unofficial-builds for musl)
+#   * Node.js runtimes (musl only; OpenWrt has no glibc) -> unofficial-builds.nodejs.org
 #
 # Output is JSON so the LuCI controller can pass it straight through.
 
@@ -27,6 +27,18 @@ npm_registry() {
 	printf '%s' "$r"
 }
 
+node_url_is_glibc() {
+	# node_url_is_glibc <base-url> -> 0 when the tree only carries glibc builds
+	local u="${1:-}"
+	u="${u%/}"
+	case "$u" in
+		http://nodejs.org/dist|https://nodejs.org/dist|\
+		http://nodejs.org/download/release|https://nodejs.org/download/release)
+			return 0 ;;
+	esac
+	return 1
+}
+
 node_base_url() {
 	# base url serving index.json + <version>/node-v<version>-linux-<arch>*.tar.xz
 	local m
@@ -34,7 +46,16 @@ node_base_url() {
 	if [ -n "$m" ]; then
 		m="${m%/}"
 		# user supplied in LuCI; fall back to the official mirror when unsafe
-		if oc_safe_url "$m"; then printf '%s' "$m"; return; fi
+		if oc_safe_url "$m"; then
+			# OpenWrt is musl-only: the official nodejs.org release trees have
+			# no musl builds, so honouring this value would install a node that
+			# cannot even start (no ld-linux). Ignore it and use the musl source.
+			if oc_is_musl && node_url_is_glibc "$m"; then
+				oc_warn "配置的 Node 源指向 glibc 构建（$m），OpenWrt 无 glibc，已改用 musl 源"
+			else
+				printf '%s' "$m"; return
+			fi
+		fi
 	fi
 	if oc_is_musl; then
 		printf 'https://unofficial-builds.nodejs.org/download/release'

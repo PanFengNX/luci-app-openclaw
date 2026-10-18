@@ -128,12 +128,12 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
   <div class="oc-row">
     <label>Node.js 源</label>
     <select id="in-nodemirror">
-      <option value="">自动（musl 用 unofficial-builds）</option>
-      <option value="https://unofficial-builds.nodejs.org/download/release">unofficial-builds（musl，官方）</option>
-      <option value="https://nodejs.org/dist">nodejs.org（glibc）</option>
+      <option value="">自动（推荐：按架构选 musl 构建）</option>
+      <option value="https://unofficial-builds.nodejs.org/download/release">unofficial-builds（musl 官方构建）</option>
       <option value="https://registry.npmmirror.com/-/binary/node-unofficial-builds">npmmirror 镜像（国内加速）</option>
     </select>
   </div>
+  <div class="oc-hint" id="in-nodemirror-hint"></div>
   <div class="oc-row">
     <label>HTTP 代理</label>
     <input type="text" id="in-proxy" placeholder="例如 http://127.0.0.1:7890，可留空">
@@ -204,6 +204,10 @@ var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer
   // <安装目录>/openclaw。程序目录不再由用户在页面上编辑，但必须原样回传给
   // save / install —— 否则会把 SSH 或关联流程设置的值冲掉。
   ocdirCustom: '',
+  // nodeMirrorCustom：UCI 里保存、但不在下拉列表中的自定义 Node 源（例如 SSH
+  // 手填的镜像）。下拉只能显示"自动"，保存时必须原样回传这个值 —— 否则用户
+  // 只是打开一次页面再点安装，就会把自定义源冲掉。
+  nodeMirrorCustom: '',
   // istatSeq：页面初始化时那次 install-status 请求的序号。用户一旦自己点了安装，
   // 就把序号 +1 作废它 —— 否则迟到的响应会把刚写下的「安装已启动」日志覆盖掉。
   istatSeq: 0,
@@ -341,6 +345,45 @@ function dirCheck(){
   return { base: baseMsg, ocdir: ocMsg, dirs: d };
 }
 
+// ------------------------------- Node.js 源回填
+// 旧版页面曾提供 nodejs.org（glibc）选项，但 OpenWrt 是 musl 系统：该源只有
+// glibc 构建，装上去缺 ld-linux，必然跑不起来。选项已删除，UCI 里可能仍留着
+// 这个值 —— 回填时按「自动」处理并说明原因，保存时清掉。
+var NODE_MIRROR_GLIBC = 'https://nodejs.org/dist';
+
+function normUrl(u){
+  u = String(u || '').replace(/^\s+|\s+$/g, '');
+  while (u.length > 1 && u.charAt(u.length-1) === '/') u = u.slice(0, -1);
+  return u;
+}
+
+function applyNodeMirror(saved){
+  var sel = $('in-nodemirror'), v = normUrl(saved);
+  state.nodeMirrorCustom = '';
+  if (!v){ sel.value = ''; setHint('in-nodemirror-hint', ''); return; }
+  if (v === NODE_MIRROR_GLIBC){
+    sel.value = '';
+    setHint('in-nodemirror-hint', '已忽略旧的 glibc 源（OpenWrt 无 glibc），改为自动选择 musl 构建');
+    return;
+  }
+  for (var i = 0; i < sel.options.length; i++){
+    if (sel.options[i].value === v){ sel.value = v; setHint('in-nodemirror-hint', ''); return; }
+  }
+  // 列表外的自定义源：下拉只能显示「自动」，但值不能丢，保存时原样回传
+  state.nodeMirrorCustom = v;
+  sel.value = '';
+  setHint('in-nodemirror-hint', '当前自定义源 ' + v + ' 不在列表内，保存后会保留该值。');
+}
+
+// 提交时决定 node_mirror：下拉值优先；下拉是「自动」时保留自定义值；两者都
+// 没有则显式请求服务端清空 —— 否则旧的镜像源会一直生效，与界面显示不符。
+function nodeMirrorSave(){
+  var v = $('in-nodemirror').value;
+  if (v) return { node_mirror: v, clear: '' };
+  if (state.nodeMirrorCustom) return { node_mirror: state.nodeMirrorCustom, clear: '' };
+  return { node_mirror: '', clear: '1' };
+}
+
 // 设置页只回填设置相关控件；状态卡的元素在 openclaw/status 页面。
 function loadInfo(){
   get(API.info, function(r){
@@ -348,6 +391,9 @@ function loadInfo(){
     state.info = d;
     $('cfg-port').value = d.port||'18789';
     $('cfg-bind').value = d.bind||'lan';
+    // Node.js 源是服务端保存的状态（可能是 SSH 手填的），回填后下拉才与
+    // 实际使用的源一致；保存逻辑见 nodeMirrorSave()。
+    applyNodeMirror(d.node_mirror);
     if (d.base_dir && !$('in-dir-custom').value) $('in-dir-custom').value = d.base_dir;
     // 程序目录是服务端状态：oc_dir_custom 为假表示用默认（<安装目录>/openclaw）
     state.ocdirCustom = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
@@ -611,8 +657,10 @@ $('btn-install').onclick = function(){
   }
   // 先保存设置：save 现在会返回真实结果。目录/端口被安全校验拒绝时
   // 必须停下来提示，否则安装会在后面以难懂的方式失败。
+  var nm = nodeMirrorSave();
   post(API.save, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: nd,
-    npm_registry: $('in-registry').value, node_mirror: $('in-nodemirror').value, http_proxy: $('in-proxy').value }, function(sr){
+    npm_registry: $('in-registry').value, node_mirror: nm.node_mirror,
+    node_mirror_clear: nm.clear, http_proxy: $('in-proxy').value }, function(sr){
     if (sr && sr.ok === false){
       $('in-log').textContent = '设置保存失败：服务端拒绝了本次配置。请按下面的提示检查对应输入框：\n'
         + '· 安装目录：必须是数据盘上的绝对路径（如 /mnt/<磁盘>/OpenClaw），\n'
@@ -622,6 +670,9 @@ $('btn-install').onclick = function(){
         + '· 端口需在 1025-65535。\n';
       return;
     }
+    // 保存成功后同步内存状态：改成列表值或清空后，旧的自定义源不再有意义，
+    // 否则用户接着选「自动」会把刚放弃的旧地址又提交回去。
+    if (nm.node_mirror !== state.nodeMirrorCustom) state.nodeMirrorCustom = '';
     $('btn-install').disabled = true;
     // 本次是用户主动发起的安装：作废页面初始化时那次状态查询（迟到的响应
     // 不能覆盖下面的「安装已提交」），并清掉可能残留的接管提示。
