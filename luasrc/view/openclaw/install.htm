@@ -1,0 +1,604 @@
+<%+header%>
+<style>
+/* ===== OpenClaw 统一视图样式（8 个视图共用，逐字节一致） =====
+ * 中性色统一使用半透明 rgba(127,127,127,α)：同一个值在浅色底上呈浅灰、
+ * 在深色底上呈深灰，自动跟随 LuCI 主题，不依赖系统配色方案媒体查询。
+ * 强调色（蓝/绿/橙/红）保持固定十六进制，明暗底上均有足够对比度。 */
+:root{--oc-fg-dim:rgba(127,127,127,.95);--oc-fg-mute:rgba(127,127,127,.72);
+  --oc-line:rgba(127,127,127,.30);--oc-line-soft:rgba(127,127,127,.16);
+  --oc-surface:rgba(127,127,127,.06);--oc-surface-2:rgba(127,127,127,.12);
+  --oc-accent:#0b74d8;--oc-ok:#2f8f3f;--oc-warn:#c05621;--oc-err:#cc2222;}
+
+/* 横向 tab 菜单（药丸式，参考 iStoreOS openclawmgr） */
+.oc-tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px}
+.oc-tab{display:inline-block;padding:6px 14px;font-size:13px;color:var(--oc-fg-dim);text-decoration:none;border:1px solid var(--oc-line);border-radius:8px;background:transparent;white-space:nowrap}
+.oc-tab:hover{background:var(--oc-surface-2);color:inherit;text-decoration:none}
+.oc-tab.active{background:rgba(11,116,216,.12);border-color:rgba(11,116,216,.45);color:var(--oc-accent);font-weight:600}
+
+/* 卡片 */
+.oc-card{border:1px solid var(--oc-line);border-radius:10px;background:var(--oc-surface);padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.oc-card h3{margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--oc-line-soft);font-size:15px;font-weight:600}
+.oc-card h3::before{content:"";display:inline-block;width:3px;height:14px;border-radius:2px;background:var(--oc-accent);margin-right:8px;vertical-align:middle}
+
+/* 渠道卡片头 */
+.oc-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.oc-head h3{margin:0;padding-bottom:0;border-bottom:0;font-size:15px}
+.oc-head .oc-tag:first-of-type{margin-left:auto}
+
+/* 键值区 */
+.oc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.oc-sub{margin:16px 0 8px;font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--oc-fg-mute);text-transform:none}
+.oc-card>.oc-sub:first-of-type{margin-top:0}
+.oc-kv{font-size:13px;line-height:1.5;font-variant-numeric:tabular-nums}
+.oc-kv b{display:block;color:var(--oc-fg-mute);font-weight:normal;font-size:12px;margin-bottom:2px}
+
+/* 概览数字块 */
+.oc-kpi{display:flex;flex-direction:column;align-items:flex-start;gap:2px;font-size:20px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums}
+.oc-kpi .oc-kpi-label{font-size:12px;font-weight:400;color:var(--oc-fg-mute)}
+
+/* 状态徽章 */
+.oc-badge{display:inline-block;border-radius:999px;padding:3px 10px;font-size:12px;color:#fff;white-space:nowrap}
+.oc-badge::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:#fff;margin-right:6px;vertical-align:1px}
+.oc-run{background:var(--oc-ok)}
+.oc-stop{background:#8a8a8a}
+.oc-none{background:var(--oc-warn)}
+
+/* 日志（深色控制台） */
+.oc-log{background:#1b1b1b;color:#e6e6e6;border-radius:8px;padding:12px;height:280px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap}
+.oc-log::-webkit-scrollbar{width:10px;height:10px}
+.oc-log::-webkit-scrollbar-thumb{background:rgba(127,127,127,.55);border-radius:6px}
+.oc-log::-webkit-scrollbar-track{background:transparent}
+
+/* 执行输出 */
+.oc-out{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;background:var(--oc-surface-2);border-radius:8px;padding:10px 12px;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-variant-numeric:tabular-nums}
+
+/* 表单行 */
+.oc-row{margin-bottom:12px}
+.oc-row label{display:inline-block;width:150px;font-size:13px;color:var(--oc-fg-dim);vertical-align:top}
+@media (max-width:600px){.oc-row label{display:block;width:auto;margin-bottom:4px}}
+
+/* 提示与语义文字 */
+.oc-hint{font-size:12px;color:var(--oc-fg-mute);margin-top:4px;line-height:1.6}
+.oc-note{border-left:3px solid var(--oc-accent);background:var(--oc-surface-2);border-radius:4px;padding:8px 10px;font-size:12px;color:var(--oc-fg-dim);margin-top:8px;line-height:1.6}
+.oc-warn{color:var(--oc-warn)}
+.oc-ok{color:var(--oc-ok)}
+.oc-err{color:var(--oc-err)}
+
+/* 小标签 */
+.oc-tag{display:inline-block;border-radius:999px;padding:2px 8px;font-size:12px;background:var(--oc-surface-2);color:var(--oc-fg-dim);white-space:nowrap;vertical-align:middle}
+.oc-tag.ok{color:var(--oc-ok)}
+.oc-tag.warn{color:var(--oc-warn)}
+.oc-tag.off{color:var(--oc-fg-mute)}
+
+/* 按钮 */
+button,.oc-btn{border:0;border-radius:6px;padding:6px 14px;font-size:13px;background:var(--oc-accent);color:#fff;cursor:pointer;margin-right:6px}
+button:hover,.oc-btn:hover{filter:brightness(.94)}
+button:focus-visible,.oc-btn:focus-visible{outline:2px solid var(--oc-accent);outline-offset:2px}
+.oc-btn.gray{background:#6c757d}
+.oc-btn.green{background:var(--oc-ok)}
+.oc-btn.ghost{background:transparent;border:1px solid var(--oc-line);color:inherit;padding:5px 13px}
+.oc-btn.ghost:hover{background:var(--oc-surface-2);filter:none}
+.oc-btn.ghost:disabled{background:transparent;border-color:var(--oc-line-soft);color:var(--oc-fg-mute);opacity:.7;cursor:not-allowed}
+.oc-btn.ghost:disabled:hover{filter:none}
+.oc-btn.danger{background:var(--oc-err)}
+button:disabled,.oc-btn:disabled{background:#9a9a9a;color:#fff;cursor:not-allowed;opacity:.85}
+button:disabled:hover,.oc-btn:disabled:hover{filter:none}
+#btn-open:disabled{background:#bdbdbd;color:#f7f7f7}
+
+/* 操作条 */
+.oc-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.oc-actions button,.oc-actions .oc-btn{margin-right:0}
+
+/* 表单控件 */
+select,input[type=text],input[type=password]{border:1px solid var(--oc-line);border-radius:6px;background:var(--oc-surface);padding:5px 8px;font-size:13px;min-width:260px;color:inherit}
+select:focus,input[type=text]:focus,input[type=password]:focus{border-color:var(--oc-accent);outline:none}
+input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;background:var(--oc-surface-2);min-width:320px}
+</style>
+
+<h2><a id="content" name="content">OpenClaw 助手 · 安装</a></h2>
+
+<div class="oc-tabs">
+  <a class="oc-tab" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","general")%>">基本设置</a>
+  <a class="oc-tab active" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","install")%>">安装</a>
+  <a class="oc-tab" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","adopt")%>">关联迁移</a>
+  <a class="oc-tab" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","model")%>">模型</a>
+  <a class="oc-tab" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","channels")%>">渠道</a>
+  <a class="oc-tab" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","backup")%>">备份与恢复</a>
+</div>
+
+<div class="oc-card">
+  <h3>当前安装位置</h3>
+  <div class="oc-grid">
+    <div class="oc-kv"><b>安装目录</b><span id="in-cur-dir">-</span></div>
+    <div class="oc-kv"><b>程序位置</b><span id="in-cur-ocdir">-</span></div>
+    <div class="oc-kv"><b>OpenClaw 版本</b><span id="in-cur-oc">-</span></div>
+    <div class="oc-kv"><b>Node.js 版本</b><span id="in-cur-node">-</span></div>
+  </div>
+  <div class="oc-hint">
+    目录与版本在「基本设置」页修改（目录需点「保存并应用」才生效）；本页按上面的值原样提交，不再提供编辑。
+  </div>
+</div>
+
+<div class="oc-card">
+  <h3>下载与网络</h3>
+  <div class="oc-row">
+    <label>npm 源</label>
+    <select id="in-registry">
+      <option value="https://registry.npmjs.org">官方 registry.npmjs.org</option>
+      <option value="https://registry.npmmirror.com">npmmirror（国内加速）</option>
+    </select>
+  </div>
+  <div class="oc-row">
+    <label>Node.js 源</label>
+    <select id="in-nodemirror">
+      <option value="">自动（推荐：按架构选 musl 构建）</option>
+      <option value="https://unofficial-builds.nodejs.org/download/release">unofficial-builds（musl 官方构建）</option>
+      <option value="https://registry.npmmirror.com/-/binary/node-unofficial-builds">npmmirror 镜像（国内加速）</option>
+    </select>
+  </div>
+  <div class="oc-hint" id="in-nodemirror-hint"></div>
+  <div class="oc-row">
+    <label>HTTP 代理</label>
+    <input type="text" id="in-proxy" placeholder="例如 http://127.0.0.1:7890，可留空">
+  </div>
+  <div class="oc-hint">
+    npm 源与代理：服务端接口不回传当前保存值，因此未改动时不会提交，已保存的设置保持不变。
+  </div>
+</div>
+
+<div class="oc-card">
+  <h3>安装与日志</h3>
+  <div class="oc-actions" style="margin-top:0">
+    <button id="btn-install">安装 / 修复运行环境</button>
+    <button id="btn-uninstall" class="oc-btn danger">卸载运行时</button>
+  </div>
+
+  <div style="margin-top:14px">
+    <div class="oc-hint">安装日志</div>
+    <div class="oc-log" id="in-log">（尚未开始）</div>
+  </div>
+</div>
+
+<script>
+var API = {
+  info: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","info")%>',
+  versions: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","versions")%>',
+  check: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","check")%>',
+  install: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","install")%>',
+  istatus: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","istatus")%>',
+  ilog: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","ilog")%>',
+  service: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","service")%>',
+  save: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","save")%>',
+  mounts: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","mounts")%>',
+  discover: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","discover")%>',
+  node_existing: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","node_existing")%>',
+  link: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","link")%>',
+  migrate: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate")%>',
+  doctor: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>',
+  repair: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","repair")%>',
+  diag_run: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_run")%>',
+  diag_poll: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_poll")%>',
+  backups: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backups")%>',
+  backup_create: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_create")%>',
+  backup_verify: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_verify")%>',
+  backup_delete: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_delete")%>',
+  backup_upload: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_upload")%>',
+  backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
+  restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>'
+};
+var state = { info:null, baseDir:'', ocVersion:'', nodeVersion:'', logTimer:null,
+  // ocdirCustom：服务端当前保存的自定义程序目录（main.openclaw_dir），空串 = 默认
+  // <安装目录>/openclaw。本页不提供编辑，但安装时必须原样回传 —— 否则会把 SSH
+  // 或关联流程设置的值冲掉。
+  ocdirCustom: '',
+  // nodeMirrorCustom：UCI 里保存、但不在下拉列表中的自定义 Node 源（例如 SSH
+  // 手填的镜像）。下拉只能显示"自动"，保存时必须原样回传这个值。
+  nodeMirrorCustom: '',
+  // registryTouched：npm 源下拉是否被用户改动过。info 不返回 npm_registry，
+  // 回填不了当前值；未改动就不提交，避免把已保存的镜像源覆盖成官方源。
+  registryTouched: false,
+  // istatSeq：页面初始化时那次 install-status 请求的序号。用户一旦自己点了安装，
+  // 就把序号 +1 作废它 —— 否则迟到的响应会把刚写下的「安装已启动」日志覆盖掉。
+  istatSeq: 0,
+  // logHeader：轮询期间固定在日志区顶部的提示行（例如"已自动接管进度显示"）。
+  // 日志每 2 秒整段重写，必须由这里带上，否则第一轮刷新就被冲掉。
+  logHeader: '' };
+
+function $(id){ return document.getElementById(id); }
+// 回调只允许触发一次：readyState==4 与 onerror 在某些浏览器上会同时到达，
+// 没有这个守卫时同一次请求会把按钮禁用/恢复跑两遍。
+function once(cb){
+  var done = false;
+  return function(v){ if (done) return; done = true; cb(v); };
+}
+function post(url, data, cb){
+  var body = [];
+  for (var k in data) body.push(encodeURIComponent(k)+'='+encodeURIComponent(data[k]));
+  var x = new XMLHttpRequest();
+  x.open('POST', url, true);
+  x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+  var fin = once(cb);
+  x.onreadystatechange = function(){
+    if (x.readyState == 4) { try { fin(JSON.parse(x.responseText)); } catch(e){ fin({ok:false}); } }
+  };
+  // 连接被重置 / 请求超时：readyState 可能根本不到 4，回调就永远不来，
+  // 发起方会永久卡在 disabled。用 net:true 标记"这次没拿到数据"。
+  x.onerror   = function(){ fin({ok:false, net:true}); };
+  x.ontimeout = function(){ fin({ok:false, net:true}); };
+  x.send(body.join('&'));
+}
+function get(url, cb){
+  var x = new XMLHttpRequest();
+  x.open('GET', url, true);
+  var fin = once(cb);
+  x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
+  x.onerror   = function(){ fin({ok:false, net:true}); };
+  x.ontimeout = function(){ fin({ok:false, net:true}); };
+  x.send();
+}
+function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }
+
+// ------------------------------- 目录检查（只是提示，最终以后端校验为准）
+// 本页没有目录输入框：安装目录 / 程序目录都来自 info，只做提交前的兜底检查
+// （例如 UCI 里被 SSH 手工写坏的值）。判定逻辑与基本设置页、后端保持一致。
+var OC_SYS_PREFIXES = [
+  ['/bin','是系统程序目录'], ['/sbin','是系统程序目录'], ['/lib','是系统库目录'],
+  ['/usr','是系统程序目录'], ['/etc','是系统配置目录'],
+  ['/proc','是内核虚拟文件系统'], ['/sys','是内核虚拟文件系统'], ['/dev','是设备目录'],
+  ['/run','是运行时临时目录'], ['/tmp','是内存临时目录（重启即清空）'],
+  ['/var','是运行时数据目录'], ['/overlay','是根文件系统的 overlay（系统分区）'],
+  ['/rom','是只读的固件分区'], ['/root','是 root 用户的主目录']
+];
+
+// 与后端一致：去掉首尾空白与尾部斜杠（"/" 本身保留）
+function normDir(p){
+  p = String(p || '').replace(/^\s+|\s+$/g, '');
+  while (p.length > 1 && p.charAt(p.length-1) === '/') p = p.slice(0, -1);
+  return p;
+}
+
+// 返回不适合放应用数据的原因；空字符串 = 这一层看不出问题
+function dirProblem(p){
+  p = normDir(p);
+  if (!p) return '';
+  if (p.charAt(0) !== '/') return '请填写以 / 开头的绝对路径。';
+  if (p === '/') return '根目录是系统分区，不能放应用数据。';
+  // 与后端 oc_validate_base_dir_shape 一致：不允许 . / .. 段（后端还会解析符号链接）
+  if (/(^|\/)\.\.?(\/|$)/.test(p)) return '路径不能包含 . 或 .. 段，请填写规范化后的绝对路径。';
+  for (var i = 0; i < OC_SYS_PREFIXES.length; i++){
+    var pre = OC_SYS_PREFIXES[i][0];
+    if (p !== pre && p.indexOf(pre + '/') !== 0) continue;
+    if (pre === '/overlay')
+      return '/overlay 是系统分区（根文件系统的 overlay），容量有限且与系统配置混在一起，不适合放应用数据。'
+           + '请到「基本设置」改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
+    if (pre === '/rom')
+      return '/rom 是只读的固件分区，无法写入。请到「基本设置」改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
+    return pre + ' ' + OC_SYS_PREFIXES[i][1] + '，不能放应用数据。'
+         + '请到「基本设置」改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
+  }
+  return '';
+}
+
+// 程序目录的冲突检查：留空 = 默认 <安装目录>/openclaw，永远安全
+function ocDirProblem(base, ocdir){
+  base = normDir(base); ocdir = normDir(ocdir);
+  if (!ocdir) return '';
+  var p = dirProblem(ocdir);
+  if (p) return p;
+  if (base && ocdir === base)
+    return '程序目录不能等于安装目录（' + base + '）：那样卸载时会连带删除数据（会话 / 工作区）。'
+         + '请在「基本设置」恢复默认 —— 程序会自动装到 ' + base + '/openclaw。';
+  if (base && base.indexOf(ocdir + '/') === 0)
+    return '程序目录不能是安装目录的上级（' + ocdir + ' 包含 ' + base + '）：'
+         + '卸载时会连同安装目录（含数据）一起删除。请在「基本设置」恢复默认 —— 程序会自动装到 '
+         + base + '/openclaw。';
+  return '';
+}
+
+function currentDirs(){
+  return {
+    base:  normDir(state.baseDir),
+    // 程序目录只来自服务端（SSH / 关联已有安装写入的 UCI），本页没有输入框
+    ocdir: normDir(state.ocdirCustom)
+  };
+}
+
+// 刷新只读展示，并把本次检查结果返回给调用方（提交前拦截用）
+function dirCheck(){
+  var d = currentDirs();
+  var baseMsg = dirProblem(d.base);
+  var ocMsg   = ocDirProblem(d.base, d.ocdir);
+  return { base: baseMsg, ocdir: ocMsg, dirs: d };
+}
+
+// ------------------------------- Node.js 源回填
+// 旧版页面曾提供 nodejs.org（glibc）选项，但 OpenWrt 是 musl 系统：该源只有
+// glibc 构建，装上去缺 ld-linux，必然跑不起来。选项已删除，UCI 里可能仍留着
+// 这个值 —— 回填时按「自动」处理并说明原因，保存时清掉。
+var NODE_MIRROR_GLIBC = 'https://nodejs.org/dist';
+
+function normUrl(u){
+  u = String(u || '').replace(/^\s+|\s+$/g, '');
+  while (u.length > 1 && u.charAt(u.length-1) === '/') u = u.slice(0, -1);
+  return u;
+}
+
+function setHint(id, msg){
+  var el = $(id);
+  if (!el) return;
+  el.textContent = msg || '';            // 服务端数据 / 用户输入只进 textContent
+  el.style.display = msg ? '' : 'none';
+}
+
+function applyNodeMirror(saved){
+  var sel = $('in-nodemirror'), v = normUrl(saved);
+  state.nodeMirrorCustom = '';
+  if (!v){ sel.value = ''; setHint('in-nodemirror-hint', ''); return; }
+  if (v === NODE_MIRROR_GLIBC){
+    sel.value = '';
+    setHint('in-nodemirror-hint', '已忽略旧的 glibc 源（OpenWrt 无 glibc），改为自动选择 musl 构建');
+    return;
+  }
+  for (var i = 0; i < sel.options.length; i++){
+    if (sel.options[i].value === v){ sel.value = v; setHint('in-nodemirror-hint', ''); return; }
+  }
+  // 列表外的自定义源：下拉只能显示「自动」，但值不能丢，保存时原样回传
+  state.nodeMirrorCustom = v;
+  sel.value = '';
+  setHint('in-nodemirror-hint', '当前自定义源 ' + v + ' 不在列表内，保存后会保留该值。');
+}
+
+// 提交时决定 node_mirror：下拉值优先；下拉是「自动」时保留自定义值；两者都
+// 没有则显式请求服务端清空 —— 否则旧的镜像源会一直生效，与界面显示不符。
+function nodeMirrorSave(){
+  var v = $('in-nodemirror').value;
+  if (v) return { node_mirror: v, clear: '' };
+  if (state.nodeMirrorCustom) return { node_mirror: state.nodeMirrorCustom, clear: '' };
+  return { node_mirror: '', clear: '1' };
+}
+
+// ------------------------------- 版本：由「基本设置」页带过来
+// api_info 只返回"已安装"的版本（openclaw / node），不返回 UCI 里保存的
+// oc_version / node_version。基本设置页在用户选择版本时把值写进 sessionStorage
+// （同一标签页内有效），这里优先用它 —— 否则用户在基本设置里选的版本会被
+// 静默忽略，点安装实际装的是 latest。
+var PICK_KEY = 'openclaw.installPick';
+
+function readPick(){
+  try {
+    var s = window.sessionStorage.getItem(PICK_KEY);
+    if (!s) return null;
+    var v = JSON.parse(s);
+    return (v && typeof v === 'object') ? v : null;
+  } catch(e){ return null; }
+}
+
+// 优先用户刚选的版本，其次已安装的版本，最后默认值
+function pickTarget(pick, key, installed, fallback){
+  var v = pick && pick[key] ? String(pick[key]) : '';
+  if (v) return v;
+  if (installed) return String(installed);
+  return fallback;
+}
+
+function renderCurrent(){
+  var d = state.info || {};
+  var base = state.baseDir, ocdir = normDir(state.ocdirCustom);
+  $('in-cur-dir').textContent   = base || '-';
+  $('in-cur-ocdir').textContent = ocdir || (base ? base + '/openclaw' : '-');
+  $('in-cur-oc').textContent    = state.ocVersion
+    + (d.openclaw ? '（已安装 ' + d.openclaw + '）' : '（未安装）');
+  $('in-cur-node').textContent  = state.nodeVersion
+    + (d.node ? '（已安装 ' + d.node + '）' : '（未安装）');
+}
+
+function loadInfo(){
+  get(API.info, function(r){
+    var d = jp(r.data||'{}', {});
+    state.info = d;
+    state.baseDir = normDir(d.base_dir || '');
+    // 程序目录是服务端状态：oc_dir_custom 为假表示用默认（<安装目录>/openclaw）
+    state.ocdirCustom = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
+    var pick = readPick();
+    state.ocVersion   = pickTarget(pick, 'oc',   d.openclaw, 'latest');
+    state.nodeVersion = pickTarget(pick, 'node', d.node, 'auto');
+    renderCurrent();
+    // Node.js 源是服务端保存的状态（可能是 SSH 手填的），回填后下拉才与
+    // 实际使用的源一致；保存逻辑见 nodeMirrorSave()。
+    applyNodeMirror(d.node_mirror);
+  });
+}
+
+// 安装与「更新 Node」共用同一条后端安装流程（install-bg），按钮必须一起恢复，
+// 否则其中一个会永久停在 disabled。「更新 Node」在本页并不存在（在状态页），
+// 用存在性判断保持兼容。
+function setInstallButtons(disabled){
+  $('btn-install').disabled = disabled;
+  if ($('btn-node-update')) $('btn-node-update').disabled = disabled;
+}
+
+function logSay(text){
+  $('in-log').textContent = text;
+  $('in-log').scrollTop = $('in-log').scrollHeight;
+}
+
+// 安装结束后把「仍在进行」的接管提示从日志顶部摘掉：提示本身是页面加载时
+// 写进去的，光清 state.logHeader 不会让它从已经渲染的文本里消失。
+function dropLogHeader(){
+  var h = state.logHeader;
+  state.logHeader = '';
+  if (!h) return;
+  var t = $('in-log').textContent || '';
+  if (t.indexOf(h + '\n') === 0) $('in-log').textContent = t.slice(h.length + 1);
+  else if (t === h) $('in-log').textContent = '';
+}
+
+// 安装日志可能很长（node_modules 阶段），done 只需要一个尾巴。
+function tailLines(s, n){
+  var a = String(s || '').replace(/\s+$/, '').split('\n');
+  if (a.length <= n) return a.join('\n');
+  return '…（仅显示最后 ' + n + ' 行）\n' + a.slice(a.length - n).join('\n');
+}
+
+function startLogPoll(onDone){
+  if (state.logTimer) clearInterval(state.logTimer);
+  state.logTimer = setInterval(function(){
+    get(API.ilog, function(r){
+      $('in-log').textContent = (state.logHeader ? state.logHeader + '\n' : '') + (r.log || '（暂无输出）');
+      $('in-log').scrollTop = $('in-log').scrollHeight;
+    });
+    get(API.istatus, function(r){
+      var d = jp(r.data||'{}', {});
+      if (d.state === 'done' || d.state === 'failed'){
+        clearInterval(state.logTimer); state.logTimer = null;
+        // 已到终态，「仍在进行」的接管提示不应继续留在顶部。
+        dropLogHeader();
+        setInstallButtons(false);
+        $('in-log').textContent += '\n=== 安装' + (d.state==='done'?'完成':'失败') + ' ===';
+        loadInfo();
+        // 调用方（如「使用它」复用本机 Node）可在这里恢复自己的按钮 / 重新探测。
+        if (onDone) onDone(d.state);
+      }
+      // state=lost 说明后台进程已消失且没有完成标记：同样必须停止轮询并恢复按钮，
+      // 否则界面会永远显示"正在安装"，用户既看不到原因也无法重试。
+      else if (d.state === 'lost'){
+        clearInterval(state.logTimer); state.logTimer = null;
+        state.logHeader = '';
+        setInstallButtons(false);
+        logSay('=== 后台安装异常终止 ===\n' + (d.msg || '后端未返回具体原因。')
+             + '\n请重新点击「安装」按钮。');
+        if (onDone) onDone(d.state);
+      }
+    });
+  }, 2000);
+}
+
+// 页面初始化时查一次后台状态：安装可能是上一次启动的（用户刷新过页面、或从别的
+// 菜单进来），不接管就永远停在「（尚未开始）」，看起来像根本没在装。
+function checkInstallStatusOnLoad(){
+  var seq = ++state.istatSeq;
+  get(API.istatus, function(r){
+    if (seq !== state.istatSeq) return;              // 用户已手动开始安装，放弃这次结果
+    if (!r || r.ok === false || !r.data) return;      // 拿不到状态：保持初始文本
+    var d = jp(r.data||'{}', {});
+    var st = d.state || '';
+    var log = d.log || '';
+
+    if (st === 'running'){
+      // 日志每 2 秒整段重写，提示必须放进 logHeader 才会一直留在顶部。
+      state.logHeader = '检测到后台安装仍在进行，已自动接管进度显示';
+      logSay(state.logHeader);
+      setInstallButtons(false);                       // 接管期间按钮可点，重复提交由后端拒绝
+      startLogPoll();
+      return;
+    }
+
+    if (st !== 'done' && st !== 'failed' && st !== 'lost') return;
+
+    state.logHeader = '';
+    setInstallButtons(false);                         // 终态必须显式恢复（bfcache 会带回 disabled）
+    if (st === 'done'){
+      var ts = parseInt(d.done_at, 10);
+      var when = (ts > 0) ? '（' + fmtTime(ts) + '）' : '';
+      logSay('=== 上次安装已完成' + when + ' ===\n'
+           + (log ? tailLines(log, 40) : '（日志为空或已被清理）'));
+    } else if (st === 'failed'){
+      var rc = (d.rc === undefined || d.rc === null || d.rc === '') ? '未知' : String(d.rc);
+      logSay('=== 上次安装失败（rc=' + rc + '）===\n'
+           + (log || '（日志为空或已被清理）'));
+    } else {
+      logSay('=== 后台安装异常终止 ===\n' + (d.msg || '后端未返回具体原因。')
+           + '\n请重新点击「安装」按钮。');
+    }
+  });
+}
+
+// fmtTime：安装日志里显示「上次安装完成于 …」。
+function fmtTime(ts){
+  if (!ts) return '-';
+  var d = new Date(ts * 1000);
+  var p = function(x){ return (x<10?'0':'') + x; };
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' '
+       + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+$('in-registry').onchange = function(){ state.registryTouched = true; };
+
+$('btn-install').onclick = function(){
+  // 目录与版本都来自 info（本页不可编辑）。先做一次兜底检查：UCI 里的值可能
+  // 是 SSH 手工写坏的，提交前就把"为什么不行"说清楚。
+  var chk = dirCheck();
+  if (chk.base || chk.ocdir){
+    var why = chk.base || chk.ocdir;
+    alert('无法继续：' + why);
+    logSay('安装未提交：' + why + '\n');
+    return;
+  }
+  var dir = chk.dirs.base;
+  if (!dir){
+    alert('安装目录为空，请先在「基本设置」页选择安装目录并点「保存并应用」');
+    return;
+  }
+  var ocdir = chk.dirs.ocdir;
+  // 程序目录页面上不可编辑，但必须原样回传服务端当前值：save 对 openclaw_dir
+  // 是"空值也显式写入"的语义，漏传或传空都会冲掉已有自定义目录。
+  var oc = state.ocVersion || 'latest';
+  var nd = state.nodeVersion || 'auto';
+
+  // 先保存设置：save 现在会返回真实结果。目录被安全校验拒绝时必须停下来提示，
+  // 否则安装会在后面以难懂的方式失败。
+  var nm = nodeMirrorSave();
+  var data = { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: nd,
+    node_mirror: nm.node_mirror, node_mirror_clear: nm.clear };
+  // npm 源 / 代理：info 不返回当前保存值，回填不了；未改动就不提交，
+  // 否则会把用户之前保存的镜像源 / 代理冲成默认值。
+  if (state.registryTouched) data.npm_registry = $('in-registry').value;
+  var proxy = String($('in-proxy').value || '').replace(/^\s+|\s+$/g, '');
+  if (proxy) data.http_proxy = proxy;
+
+  post(API.save, data, function(sr){
+    if (sr && sr.ok === false){
+      logSay('设置保存失败：服务端拒绝了本次配置。请按下面的提示检查对应输入框：\n'
+        + '· 安装目录（在「基本设置」）：必须是数据盘上的绝对路径（如 /mnt/<磁盘>/OpenClaw），\n'
+        + '  不能是 /etc、/tmp、/var、/overlay、/rom 等系统路径，也不能是符号链接；\n'
+        + '· 程序目录：页面不可修改，默认固定为 <安装目录>/openclaw；\n'
+        + '  若曾在 SSH 里设过 openclaw_dir，请确认它不等于安装目录、也不是它的上级；\n'
+        + '· npm 源 / 代理需为 http(s) 地址。\n');
+      return;
+    }
+    // 保存成功后同步内存状态：改成列表值或清空后，旧的自定义源不再有意义，
+    // 否则用户接着选「自动」会把刚放弃的旧地址又提交回去。
+    if (nm.node_mirror !== state.nodeMirrorCustom) state.nodeMirrorCustom = '';
+    $('btn-install').disabled = true;
+    // 本次是用户主动发起的安装：作废页面初始化时那次状态查询（迟到的响应
+    // 不能覆盖下面的「安装已提交」），并清掉可能残留的接管提示。
+    state.istatSeq++; state.logHeader = '';
+    $('in-log').textContent = '安装已提交，正在准备…\n';
+    post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: nd }, function(r){
+      if (!r || r.ok === false){
+        $('btn-install').disabled = false;
+        $('in-log').textContent = '安装启动失败：' + ((r && (r.data || r.error)) || '服务无响应，请重试') + '\n';
+        return;
+      }
+      $('in-log').textContent = '安装已启动，日志如下：\n';
+      startLogPoll();
+    });
+  });
+};
+
+$('btn-uninstall').onclick = function(){
+  if (!confirm('将删除 OpenClaw 与 Node.js 运行时（保留配置数据），继续？')) return;
+  post(API.service, { action: 'stop' }, function(){});
+  var x = new XMLHttpRequest();
+  x.open('POST', '<%=luci.dispatcher.build_url("admin","services","openclaw","api","run")%>', true);
+  x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+  x.send('cmd=uninstall');
+  setTimeout(function(){ loadInfo(); }, 3000);
+};
+
+loadInfo();
+// 安装可能是上一次启动的（刷新页面 / 从别的菜单进来）：必须主动接管进度，
+// 否则日志区会一直停在「（尚未开始）」，看起来像根本没在装。
+checkInstallStatusOnLoad();
+</script>
+<%+footer%>

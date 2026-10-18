@@ -18,6 +18,7 @@ function index()
 	-- 「设置」是父节点：点击直接落到「基础」（alias 目标必须真实存在，见下一行）。
 	entry({"admin", "services", "openclaw", "setup"},    firstchild(), _("设置"), 15)
 	entry({"admin", "services", "openclaw", "setup", "general"}, template("openclaw/setup"), _("基础"), 10)
+	entry({"admin", "services", "openclaw", "setup", "install"}, template("openclaw/install"), _("安装"), 15)
 	entry({"admin", "services", "openclaw", "setup", "adopt"},   template("openclaw/adopt"), _("关联迁移"), 20)
 	entry({"admin", "services", "openclaw", "setup", "model"},    template("openclaw/model"),    _("模型"), 30)
 	entry({"admin", "services", "openclaw", "setup", "channels"}, template("openclaw/channels"), _("渠道"), 40)

@@ -9,6 +9,12 @@
   --oc-surface:rgba(127,127,127,.06);--oc-surface-2:rgba(127,127,127,.12);
   --oc-accent:#0b74d8;--oc-ok:#2f8f3f;--oc-warn:#c05621;--oc-err:#cc2222;}
 
+/* 横向 tab 菜单（药丸式，参考 iStoreOS openclawmgr） */
+.oc-tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px}
+.oc-tab{display:inline-block;padding:6px 14px;font-size:13px;color:var(--oc-fg-dim);text-decoration:none;border:1px solid var(--oc-line);border-radius:8px;background:transparent;white-space:nowrap}
+.oc-tab:hover{background:var(--oc-surface-2);color:inherit;text-decoration:none}
+.oc-tab.active{background:rgba(11,116,216,.12);border-color:rgba(11,116,216,.45);color:var(--oc-accent);font-weight:600}
+
 /* 卡片 */
 .oc-card{border:1px solid var(--oc-line);border-radius:10px;background:var(--oc-surface);padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
 .oc-card h3{margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--oc-line-soft);font-size:15px;font-weight:600}
