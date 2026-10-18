@@ -1,6 +1,6 @@
 <%+header%>
 <style>
-/* ===== OpenClaw 统一视图样式（6 个视图共用，逐字节一致） =====
+/* ===== OpenClaw 统一视图样式（8 个视图共用，逐字节一致） =====
  * 中性色统一使用半透明 rgba(127,127,127,α)：同一个值在浅色底上呈浅灰、
  * 在深色底上呈深灰，自动跟随 LuCI 主题，不依赖系统配色方案媒体查询。
  * 强调色（蓝/绿/橙/红）保持固定十六进制，明暗底上均有足够对比度。 */
@@ -12,6 +12,7 @@
 /* 卡片 */
 .oc-card{border:1px solid var(--oc-line);border-radius:10px;background:var(--oc-surface);padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
 .oc-card h3{margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--oc-line-soft);font-size:15px;font-weight:600}
+.oc-card h3::before{content:"";display:inline-block;width:3px;height:14px;border-radius:2px;background:var(--oc-accent);margin-right:8px;vertical-align:middle}
 
 /* 渠道卡片头 */
 .oc-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
@@ -24,6 +25,10 @@
 .oc-card>.oc-sub:first-of-type{margin-top:0}
 .oc-kv{font-size:13px;line-height:1.5;font-variant-numeric:tabular-nums}
 .oc-kv b{display:block;color:var(--oc-fg-mute);font-weight:normal;font-size:12px;margin-bottom:2px}
+
+/* 概览数字块 */
+.oc-kpi{display:flex;flex-direction:column;align-items:flex-start;gap:2px;font-size:20px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums}
+.oc-kpi .oc-kpi-label{font-size:12px;font-weight:400;color:var(--oc-fg-mute)}
 
 /* 状态徽章 */
 .oc-badge{display:inline-block;border-radius:999px;padding:3px 10px;font-size:12px;color:#fff;white-space:nowrap}
@@ -65,6 +70,11 @@ button:hover,.oc-btn:hover{filter:brightness(.94)}
 button:focus-visible,.oc-btn:focus-visible{outline:2px solid var(--oc-accent);outline-offset:2px}
 .oc-btn.gray{background:#6c757d}
 .oc-btn.green{background:var(--oc-ok)}
+.oc-btn.ghost{background:transparent;border:1px solid var(--oc-line);color:inherit;padding:5px 13px}
+.oc-btn.ghost:hover{background:var(--oc-surface-2);filter:none}
+.oc-btn.ghost:disabled{background:transparent;border-color:var(--oc-line-soft);color:var(--oc-fg-mute);opacity:.7;cursor:not-allowed}
+.oc-btn.ghost:disabled:hover{filter:none}
+.oc-btn.danger{background:var(--oc-err)}
 button:disabled,.oc-btn:disabled{background:#9a9a9a;color:#fff;cursor:not-allowed;opacity:.85}
 button:disabled:hover,.oc-btn:disabled:hover{filter:none}
 #btn-open:disabled{background:#bdbdbd;color:#f7f7f7}
@@ -82,7 +92,7 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
 <h2><a id="content" name="content">OpenClaw 助手 · 设置</a></h2>
 
 <div class="oc-card">
-  <h3>安装 / 修复运行环境</h3>
+  <h3>运行环境</h3>
   <div class="oc-row">
     <label>安装目录</label>
     <select id="in-dir" style="min-width:320px"></select>
@@ -96,7 +106,7 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
   <div class="oc-row" style="margin-top:10px">
     <label>程序位置</label>
     <input type="text" id="in-ocdir-shown" class="oc-addr" readonly>
-    <button id="btn-ocdir-reset" class="oc-btn gray" style="display:none">恢复默认</button>
+    <button id="btn-ocdir-reset" class="oc-btn ghost" style="display:none">恢复默认</button>
   </div>
   <div class="oc-hint" id="in-ocdir-hint">
     <div id="in-ocdir-warn" class="oc-err" style="display:none;margin-bottom:4px"></div>
@@ -108,7 +118,7 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
   <div class="oc-row" style="margin-top:14px">
     <label>OpenClaw 版本</label>
     <select id="in-oc"></select>
-    <button id="btn-reload-versions" class="oc-btn gray">重新获取版本</button>
+    <button id="btn-reload-versions" class="oc-btn ghost">重新获取版本</button>
   </div>
   <div class="oc-hint" id="in-engines">在线获取中…</div>
 
@@ -117,8 +127,11 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
     <select id="in-node"></select>
   </div>
   <div class="oc-hint" id="in-node-hint"></div>
+</div>
 
-  <div class="oc-row" style="margin-top:14px">
+<div class="oc-card">
+  <h3>下载与网络</h3>
+  <div class="oc-row">
     <label>npm 源</label>
     <select id="in-registry">
       <option value="https://registry.npmjs.org">官方 registry.npmjs.org</option>
@@ -138,10 +151,13 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
     <label>HTTP 代理</label>
     <input type="text" id="in-proxy" placeholder="例如 http://127.0.0.1:7890，可留空">
   </div>
+</div>
 
-  <div style="margin-top:14px">
+<div class="oc-card">
+  <h3>安装与日志</h3>
+  <div class="oc-actions" style="margin-top:0">
     <button id="btn-install">安装 / 修复运行环境</button>
-    <button id="btn-uninstall" class="oc-btn gray" style="background:#c05621">卸载运行时</button>
+    <button id="btn-uninstall" class="oc-btn danger">卸载运行时</button>
   </div>
 
   <div style="margin-top:14px">
