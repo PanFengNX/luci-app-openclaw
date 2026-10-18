@@ -1,0 +1,335 @@
+<%+header%>
+<style>
+/* ===== OpenClaw 统一视图样式（6 个视图共用，逐字节一致） =====
+ * 中性色统一使用半透明 rgba(127,127,127,α)：同一个值在浅色底上呈浅灰、
+ * 在深色底上呈深灰，自动跟随 LuCI 主题，不依赖系统配色方案媒体查询。
+ * 强调色（蓝/绿/橙/红）保持固定十六进制，明暗底上均有足够对比度。 */
+:root{--oc-fg-dim:rgba(127,127,127,.95);--oc-fg-mute:rgba(127,127,127,.72);
+  --oc-line:rgba(127,127,127,.30);--oc-line-soft:rgba(127,127,127,.16);
+  --oc-surface:rgba(127,127,127,.06);--oc-surface-2:rgba(127,127,127,.12);
+  --oc-accent:#0b74d8;--oc-ok:#2f8f3f;--oc-warn:#c05621;--oc-err:#cc2222;}
+
+/* 卡片 */
+.oc-card{border:1px solid var(--oc-line);border-radius:10px;background:var(--oc-surface);padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.oc-card h3{margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--oc-line-soft);font-size:15px;font-weight:600}
+
+/* 渠道卡片头 */
+.oc-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.oc-head h3{margin:0;padding-bottom:0;border-bottom:0;font-size:15px}
+.oc-head .oc-tag:first-of-type{margin-left:auto}
+
+/* 键值区 */
+.oc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.oc-sub{margin:16px 0 8px;font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--oc-fg-mute);text-transform:none}
+.oc-card>.oc-sub:first-of-type{margin-top:0}
+.oc-kv{font-size:13px;line-height:1.5;font-variant-numeric:tabular-nums}
+.oc-kv b{display:block;color:var(--oc-fg-mute);font-weight:normal;font-size:12px;margin-bottom:2px}
+
+/* 状态徽章 */
+.oc-badge{display:inline-block;border-radius:999px;padding:3px 10px;font-size:12px;color:#fff;white-space:nowrap}
+.oc-badge::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:#fff;margin-right:6px;vertical-align:1px}
+.oc-run{background:var(--oc-ok)}
+.oc-stop{background:#8a8a8a}
+.oc-none{background:var(--oc-warn)}
+
+/* 日志（深色控制台） */
+.oc-log{background:#1b1b1b;color:#e6e6e6;border-radius:8px;padding:12px;height:280px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap}
+.oc-log::-webkit-scrollbar{width:10px;height:10px}
+.oc-log::-webkit-scrollbar-thumb{background:rgba(127,127,127,.55);border-radius:6px}
+.oc-log::-webkit-scrollbar-track{background:transparent}
+
+/* 执行输出 */
+.oc-out{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;background:var(--oc-surface-2);border-radius:8px;padding:10px 12px;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-variant-numeric:tabular-nums}
+
+/* 表单行 */
+.oc-row{margin-bottom:12px}
+.oc-row label{display:inline-block;width:150px;font-size:13px;color:var(--oc-fg-dim);vertical-align:top}
+@media (max-width:600px){.oc-row label{display:block;width:auto;margin-bottom:4px}}
+
+/* 提示与语义文字 */
+.oc-hint{font-size:12px;color:var(--oc-fg-mute);margin-top:4px;line-height:1.6}
+.oc-note{border-left:3px solid var(--oc-accent);background:var(--oc-surface-2);border-radius:4px;padding:8px 10px;font-size:12px;color:var(--oc-fg-dim);margin-top:8px;line-height:1.6}
+.oc-warn{color:var(--oc-warn)}
+.oc-ok{color:var(--oc-ok)}
+.oc-err{color:var(--oc-err)}
+
+/* 小标签 */
+.oc-tag{display:inline-block;border-radius:999px;padding:2px 8px;font-size:12px;background:var(--oc-surface-2);color:var(--oc-fg-dim);white-space:nowrap;vertical-align:middle}
+.oc-tag.ok{color:var(--oc-ok)}
+.oc-tag.warn{color:var(--oc-warn)}
+.oc-tag.off{color:var(--oc-fg-mute)}
+
+/* 按钮 */
+button,.oc-btn{border:0;border-radius:6px;padding:6px 14px;font-size:13px;background:var(--oc-accent);color:#fff;cursor:pointer;margin-right:6px}
+button:hover,.oc-btn:hover{filter:brightness(.94)}
+button:focus-visible,.oc-btn:focus-visible{outline:2px solid var(--oc-accent);outline-offset:2px}
+.oc-btn.gray{background:#6c757d}
+.oc-btn.green{background:var(--oc-ok)}
+button:disabled,.oc-btn:disabled{background:#9a9a9a;color:#fff;cursor:not-allowed;opacity:.85}
+button:disabled:hover,.oc-btn:disabled:hover{filter:none}
+#btn-open:disabled{background:#bdbdbd;color:#f7f7f7}
+
+/* 操作条 */
+.oc-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.oc-actions button,.oc-actions .oc-btn{margin-right:0}
+
+/* 表单控件 */
+select,input[type=text],input[type=password]{border:1px solid var(--oc-line);border-radius:6px;background:var(--oc-surface);padding:5px 8px;font-size:13px;min-width:260px;color:inherit}
+select:focus,input[type=text]:focus,input[type=password]:focus{border-color:var(--oc-accent);outline:none}
+input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;background:var(--oc-surface-2);min-width:320px}
+</style>
+
+<h2><a id="content" name="content">OpenClaw 助手 · 关联与迁移</a></h2>
+
+<div class="oc-hint" style="margin-bottom:12px">
+  本页用于接管本机其它位置已有的 OpenClaw 安装。两种方式只需选一种：<br>
+  <b>关联</b>：只把本插件的配置指向该目录，<b>不复制任何文件</b>；两边共用同一份数据，源目录及其中的文件都不动。<br>
+  <b>迁移</b>：把内容<b>复制</b>到本插件目录，之后两边各自独立；源目录保持不动，确认无误后可自行删除。<br>
+  拿不准时：想继续使用原目录里的会话与凭据、也不想多占空间，选关联；想让本插件完全接管、之后不再依赖原目录，选迁移。
+</div>
+
+<div class="oc-card" id="oc-disc-card" style="display:none">
+  <div class="oc-head">
+    <h3>检测到已有 OpenClaw 安装</h3>
+  </div>
+  <div class="oc-hint">
+    在本机其它位置发现了可用的 OpenClaw 安装 / 数据目录。两种处理方式：<br>
+    <b>关联</b>：只把本插件配置指向它，<b>不复制任何文件</b>（两边共用同一份数据）。<br>
+    <b>迁移</b>：把内容复制到本插件目录，<b>源目录保持不动</b>，确认无误后可自行删除。<br>
+    体积一栏是<b>数据目录</b>的大小，不含程序本体与 Node 运行时；迁移所需空间会比它更大。
+  </div>
+  <div id="oc-disc-list" style="margin-top:10px"></div>
+  <div id="oc-disc-log" class="oc-log" style="display:none;height:auto;max-height:180px;margin-top:10px"></div>
+</div>
+
+<div class="oc-hint" style="margin-top:4px">安装 / 修复运行环境与基本设置见
+  <a href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","general")%>">设置 · 基础</a> 页。
+</div>
+
+<script>
+var API = {
+  info: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","info")%>',
+  versions: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","versions")%>',
+  check: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","check")%>',
+  install: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","install")%>',
+  istatus: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","istatus")%>',
+  ilog: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","ilog")%>',
+  service: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","service")%>',
+  save: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","save")%>',
+  mounts: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","mounts")%>',
+  discover: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","discover")%>',
+  node_existing: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","node_existing")%>',
+  link: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","link")%>',
+  migrate: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate")%>',
+  doctor: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>',
+  repair: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","repair")%>',
+  diag_run: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_run")%>',
+  diag_poll: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_poll")%>',
+  backups: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backups")%>',
+  backup_create: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_create")%>',
+  backup_verify: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_verify")%>',
+  backup_delete: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_delete")%>',
+  backup_upload: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_upload")%>',
+  backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
+  restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>'
+};
+var state = { info:null, disc:null };
+
+function $(id){ return document.getElementById(id); }
+// 回调只允许触发一次：readyState==4 与 onerror 在某些浏览器上会同时到达，
+// 没有这个守卫时同一次请求会把按钮禁用/恢复跑两遍。
+function once(cb){
+  var done = false;
+  return function(v){ if (done) return; done = true; cb(v); };
+}
+function post(url, data, cb){
+  var body = [];
+  for (var k in data) body.push(encodeURIComponent(k)+'='+encodeURIComponent(data[k]));
+  var x = new XMLHttpRequest();
+  x.open('POST', url, true);
+  x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+  var fin = once(cb);
+  x.onreadystatechange = function(){
+    if (x.readyState == 4) { try { fin(JSON.parse(x.responseText)); } catch(e){ fin({ok:false}); } }
+  };
+  // 连接被重置 / 请求超时：readyState 可能根本不到 4，回调就永远不来，
+  // 发起方（例如迁移）会永久卡在 disabled。用 net:true 标记，
+  // 让调用方知道"这次没拿到数据"而不是"服务端说失败了"。
+  x.onerror   = function(){ fin({ok:false, net:true}); };
+  x.ontimeout = function(){ fin({ok:false, net:true}); };
+  x.send(body.join('&'));
+}
+function get(url, cb){
+  var x = new XMLHttpRequest();
+  x.open('GET', url, true);
+  var fin = once(cb);
+  x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
+  x.onerror   = function(){ fin({ok:false, net:true}); };
+  x.ontimeout = function(){ fin({ok:false, net:true}); };
+  x.send();
+}
+function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }
+function fields(v){ var a=(v||'0.0.0').replace(/^v/,'').split('.'); for(var i=0;i<3;i++){ a[i]=parseInt((a[i]||'0').replace(/[^0-9].*$/,''),10)||0; } return a; }
+
+// 本页只需要安装目录（base_dir）：discover 的结果要按它过滤掉本插件自己的目录。
+// 状态页那套 st-* 渲染逻辑不在这里，避免引用本页不存在的元素。
+function loadInfo(){
+  get(API.info, function(r){
+    state.info = jp(r.data||'{}', {});
+    // info 与 discover 谁后到谁重绘一次：晚到的 base_dir 会把本插件目录过滤掉。
+    renderDiscover(state.disc || []);
+  });
+}
+
+// ------------------------------------------- 已有 OpenClaw 安装：关联 / 迁移
+// 后端 openclaw.sh discover 输出 JSON 数组，元素形如
+//   {path,kind,has_program,has_node,has_data,size_mb}
+// kind 只有 ours / istore / data 三种取值，这里统一翻成中文说明。
+var DISC_KIND = {
+  ours:   '本插件布局（程序 + 数据）',
+  istore: 'iStoreOS OpenClawMgr 布局（数据在 data/.openclaw）',
+  data:   '仅数据目录（.openclaw，不含程序本体）'
+};
+
+function discSay(msg, bad){
+  var box = $('oc-disc-log');
+  if (!box) return;
+  box.style.display = '';
+  box.textContent = msg;                     // 服务端数据只进 textContent
+  box.style.color = bad ? '#ffb4b4' : '';
+}
+
+// 可做的操作 / 内容摘要：把 has_program / has_node / has_data 说人话。
+function discCaps(e){
+  var caps = [];
+  if (e.has_program) caps.push('含程序本体');
+  if (e.has_node)    caps.push('含私有 Node 运行时');
+  if (e.has_data)    caps.push('含数据');
+  var s = caps.length ? caps.join(' / ') : '内容未知';
+  if (!e.has_program) s += '（不含程序本体，关联或迁移后仍需在本插件内安装一次）';
+  return s;
+}
+
+function discRow(e){
+  var wrap = document.createElement('div');
+  wrap.style.cssText = 'border:1px solid #eee;border-radius:4px;padding:10px 12px;margin-bottom:8px';
+
+  var path = document.createElement('div');
+  path.style.cssText = 'font-family:monospace;font-size:13px;word-break:break-all;color:#222';
+  path.textContent = e.path;                 // 服务端数据只进 textContent
+  wrap.appendChild(path);
+
+  var meta = document.createElement('div');
+  meta.className = 'oc-hint';
+  meta.textContent = '类型：' + (DISC_KIND[e.kind] || e.kind || '未知')
+    + '　数据体积：' + (e.size_mb || 0) + ' MB　' + discCaps(e);
+  wrap.appendChild(meta);
+
+  var acts = document.createElement('div');
+  acts.style.marginTop = '8px';
+
+  var bLink = document.createElement('button');
+  bLink.textContent = '关联';
+  bLink.className = 'oc-btn gray';
+  bLink.onclick = function(){ doLink(e, bLink); };
+  acts.appendChild(bLink);
+  acts.appendChild(document.createTextNode(' '));
+
+  var bMig = document.createElement('button');
+  bMig.textContent = '迁移';
+  bMig.onclick = function(){ doMigrate(e); };
+  acts.appendChild(bMig);
+
+  wrap.appendChild(acts);
+  return wrap;
+}
+
+function renderDiscover(arr){
+  var card = $('oc-disc-card'), host = $('oc-disc-list');
+  if (!card || !host) return;
+  var cur = ((state.info && state.info.base_dir) || '').replace(/\/$/, '');
+  // 本插件自己当前的安装目录不算"检测到的已有安装"，列出来只会让人误点迁移
+  // （后端也会以"源目录就是本插件的安装目录"拒绝）。
+  var items = (arr || []).filter(function(e){
+    if (!e || !e.path) return false;
+    return !(cur && String(e.path).replace(/\/$/, '') === cur);
+  });
+  host.innerHTML = '';
+  if (!items.length){ card.style.display = 'none'; return; }
+  items.forEach(function(e){ host.appendChild(discRow(e)); });
+  card.style.display = '';
+}
+
+function loadDiscover(){
+  get(API.discover, function(r){
+    // 失败 / 解析不出数组 / 没有结果：安静隐藏整张卡片，不弹窗、不报错。
+    if (!r || r.ok === false || r.net){ state.disc = []; renderDiscover([]); return; }
+    state.disc = jp(r.data || '[]', []);
+    renderDiscover(state.disc);
+  });
+}
+
+function doLink(e, btn){
+  if (btn) btn.disabled = true;
+  discSay('正在关联 ' + e.path + ' …（只改配置，不复制文件）');
+  post(API.link, { dir: e.path }, function(r){
+    if (btn) btn.disabled = false;
+    var d = jp((r && r.data) || '{}', {});
+    if (!r || r.ok === false || !d.ok){
+      discSay('关联失败：' + (d.error || (r && r.error) || '服务无响应，请重试'), true);
+      return;
+    }
+    discSay('已关联 ' + e.path
+      + (d.base_dir ? '\n安装目录 → ' + d.base_dir : '')
+      + (d.state_dir ? '\n数据目录 → ' + d.state_dir : '')
+      + '\n若状态页显示的目录没有变化，请到「基本设置」检查安装目录 / 程序目录是否残留了旧值。');
+    // 关联只改 UCI：刷新安装目录信息，稍后再重新探测一次
+    loadInfo();
+    setTimeout(loadDiscover, 800);
+  });
+}
+
+function doMigrate(e){
+  if (!confirm('将把\n\n  ' + e.path + '\n\n的内容复制到本插件的安装目录。\n'
+             + '· 源目录保持不动，确认无误后你可以自行删除；\n'
+             + '· 若数据目录 / 程序目录当前指向安装目录之外，会一并搬到默认位置并清除对应的 UCI 设置；\n'
+             + '· 目标已有的数据会先自动做一次安全快照；\n'
+             + '· 大目录可能需要数分钟，期间请勿关闭页面。\n\n继续？')) return;
+
+  // 重操作：先禁用卡片上所有按钮，避免并发点击（后端也会取锁拒绝）
+  var btns = $('oc-disc-list').getElementsByTagName('button');
+  for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
+  discSay('正在迁移 ' + e.path + ' → 本插件目录 …\n（复制 + 原子换入，可能需要数分钟，请勿关闭页面）');
+
+  post(API.migrate, { dir: e.path }, function(r){
+    var d = jp((r && r.data) || '{}', {});
+    if (!r || r.ok === false || !d.ok){
+      discSay('迁移失败：' + (d.error || (r && r.error) || '服务无响应，请重试')
+        + '\n源目录 ' + e.path + ' 未被改动，可稍后重试。', true);
+    } else {
+      // 后端在来源位于安装目录之外时会把数据/程序目录搬到默认位置并清掉
+      // 对应的 UCI 项；relocations 用来如实展示「已从 X 搬到 Y」。
+      var rel = d.relocations || [];
+      var extra = '';
+      for (var i = 0; i < rel.length; i++) {
+        var it = rel[i] || {};
+        if (it.key && it.from && it.to) {
+          extra += '\n已重定位 ' + it.key + '：' + it.from + ' → ' + it.to;
+        }
+      }
+      discSay('迁移完成：' + (d.from || e.path) + ' → ' + (d.to || '本插件目录')
+        + extra
+        + '\n源目录保持原样，确认无误后可自行删除。');
+    }
+    for (var j = 0; j < btns.length; j++) btns[j].disabled = false;
+    loadInfo();
+    setTimeout(loadDiscover, 1500);
+  });
+}
+
+loadInfo();
+// discover 会扫描挂载点、可能很慢，而且 uhttpd 的 Lua 请求是串行的：
+// 放到最后并延后一点发起，先让 info 请求排出去，慢扫描就不会把首屏挤在后面。
+setTimeout(loadDiscover, 600);
+</script>
+<%+footer%>

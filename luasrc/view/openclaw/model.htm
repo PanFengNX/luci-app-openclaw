@@ -109,11 +109,11 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
     <label>API Key</label>
     <input type="text" id="m-key" placeholder="sk-..." style="min-width:340px">
   </div>
-  <div class="oc-row">
-    <label>Base URL（可选）</label>
-    <input type="text" id="m-base" placeholder="默认使用服务商官方地址，留空即可">
+  <div class="oc-row" id="m-base-row" style="display:none">
+    <label>Base URL</label>
+    <input type="text" id="m-base" placeholder="例如 https://api.example.com/v1">
   </div>
-  <div class="oc-hint" id="m-base-hint"></div>
+  <div class="oc-hint" id="m-base-hint" style="display:none"></div>
 
   <div style="margin-top:14px">
     <button id="btn-apply" class="oc-btn green">安装插件 · 写入 Key · 设为默认</button>
@@ -148,6 +148,8 @@ var CATALOG = [];
 var UPSTREAM = [];       // 当前 provider 从上游拉到的模型 id
 var FETCH_SEQ = 0;       // 切换 provider 时丢弃过期的异步响应
 var MANUAL_OPEN = false; // 用户是否主动展开了「手动输入模型 ID」
+var MODEL_USER_PICKED = false; // 用户是否手动选过模型（之后不再自动覆盖）
+var MODEL_AUTO_PICKED = '';    // 最近一次自动选中的模型 id（空表示未自动选）
 function $(id){ return document.getElementById(id); }
 function hasKey(o, k){ return Object.prototype.hasOwnProperty.call(o, k); }
 function get(url, cb){ var x=new XMLHttpRequest(); x.open('GET',url,true); x.onreadystatechange=function(){ if(x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({});} } }; x.send(); }
@@ -223,10 +225,36 @@ function updateCustomRow(){
     ($('m-provider').value === 'custom' || MANUAL_OPEN) ? '' : 'none';
 }
 
+// Base URL 只对「自定义」或没有预设地址的 Provider 有意义。其余 Provider
+// 整行隐藏，但 #m-base 的值保留：apply 仍会提交它（即该 Provider 的预设地址），
+// 后端在空值时也会回退到预设，所以隐藏不会影响保存结果。
+function providerNeedsBase(p){
+  return !!p && (p.id === 'custom' || !p.baseUrl);
+}
+
+function updateBaseRow(){
+  var p = curProvider();
+  var show = providerNeedsBase(p);
+  $('m-base-row').style.display = show ? '' : 'none';
+  var hint = $('m-base-hint');
+  hint.style.display = show ? '' : 'none';
+  if (!show){ hint.textContent = ''; return; }
+  hint.textContent = (p.id === 'custom')
+    ? '自定义 Provider 必须填写 Base URL，且为 [OI] 兼容接口。'
+    : '该 Provider 没有预设 Base URL，请填写 [OI] 兼容接口地址。';
+}
+
+// 自动选中提示：只有当前选中项确实来自自动选择、且用户没手动改过时才显示。
+function autoPickText(){
+  var id = $('m-model').value;
+  if (MODEL_USER_PICKED || !MODEL_AUTO_PICKED || id !== MODEL_AUTO_PICKED) return '';
+  return '已自动选择 ' + id + '（可下拉更换）';
+}
+
 // 上游条目在前，原有的 configured / live / preset 条目在后，按 id 去重。
 // 全部通过 DOM 节点写入，服务端返回的 id 只进 value / textContent。
 function fillModels(upstream){
-  var p = curProvider(); if (!p) return;
+  var p = curProvider(); if (!p) return '';
   var sel = $('m-model');
   var keep = sel.value;
   sel.innerHTML = '';
@@ -245,10 +273,23 @@ function fillModels(upstream){
     var o = document.createElement('option');
     o.value = ''; o.textContent = '（该服务商无固定清单，请手动输入模型 ID）';
     sel.appendChild(o);
-    return;
+    MODEL_AUTO_PICKED = '';
+    return '';
   }
-  if (keep && hasKey(seen, keep)) sel.value = keep;
-  else if (def && hasKey(seen, def)) sel.value = def;
+  // 用户手动选过的项只要还在清单里就保留；否则优先 Provider 默认模型，
+  // 再否则选第一个可用项。自动选择的结果记在 MODEL_AUTO_PICKED 里，
+  // 供 autoPickText() 判断是否展示「已自动选择」。
+  var auto = '';
+  if (keep && hasKey(seen, keep)){
+    sel.value = keep;
+  } else if (!MODEL_USER_PICKED && def && hasKey(seen, def)){
+    sel.value = def; auto = def;
+  } else if (!MODEL_USER_PICKED){
+    sel.value = sel.options[0].value; auto = sel.options[0].value;
+  }
+  if (auto) MODEL_AUTO_PICKED = auto;
+  else if (MODEL_AUTO_PICKED && sel.value !== MODEL_AUTO_PICKED) MODEL_AUTO_PICKED = '';
+  return auto;
 }
 
 // 失败不弹框：安静回退到原有列表，并在 .oc-hint 里说明原因。
@@ -257,7 +298,8 @@ function fetchUpstream(){
   if (!p) return;
   var seq = ++FETCH_SEQ;
   setModelBusy(true);
-  setModelHint('正在获取上游模型列表…');
+  var autoBusy = autoPickText();
+  setModelHint('正在获取上游模型列表…' + (autoBusy ? ' ' + autoBusy : ''));
   get(API.models_url + '?provider=' + encodeURIComponent(p), function(r){
     if (seq !== FETCH_SEQ) return;   // provider 已切换，丢弃过期响应
     setModelBusy(false);
@@ -265,12 +307,16 @@ function fetchUpstream(){
     if (!r || r.ok !== true || !list.length){
       UPSTREAM = [];
       fillModels([]);
-      setModelHint('未能从上游获取模型列表：' + ((r && r.error) || '上游未返回模型') + '，可手动填写。');
+      var fail = '未能从上游获取模型列表：' + ((r && r.error) || '上游未返回模型') + '，可手动填写。';
+      var autoFail = autoPickText();
+      setModelHint(fail + (autoFail ? ' ' + autoFail : ''));
       return;
     }
     UPSTREAM = list.slice();
     fillModels(UPSTREAM);
-    setModelHint('已从上游获取 ' + UPSTREAM.length + ' 个模型（标注「上游」）。');
+    var okMsg = '已从上游获取 ' + UPSTREAM.length + ' 个模型（标注「上游」）。';
+    var autoOk = autoPickText();
+    setModelHint(okMsg + (autoOk ? ' ' + autoOk : ''));
   });
 }
 
@@ -300,21 +346,36 @@ function renderProvider(){
     }
   }
   $('m-base').value = p.baseUrl || '';
-  $('m-base-hint').textContent = (p.id==='custom')
-    ? '自定义 Provider 必须填写 Base URL，且为 OpenAI 兼容接口。'
-    : ('默认 Base URL：' + (p.baseUrl || '-'));
+  updateBaseRow();
 
   // 切换 provider 后旧的上游清单不再适用：先渲染本地清单，再异步补上游条目。
   UPSTREAM = [];
   fillModels([]);
+  var auto = autoPickText();
+  if (auto) setModelHint(auto);
   updateCustomRow();
   fetchUpstream();
 }
 
 $('m-provider').onchange = function(){
   MANUAL_OPEN = false;
+  MODEL_USER_PICKED = false;
+  MODEL_AUTO_PICKED = '';
   $('m-model').innerHTML = '';   // 不把上一个 provider 的选中项带过来
   renderProvider();
+};
+
+// 用户一旦自己选过模型，后续刷新列表只保留他的选择，不再自动覆盖。
+$('m-model').onchange = function(){
+  MODEL_USER_PICKED = true;
+  setModelHint('已选择 ' + $('m-model').value + '（可下拉更换）。');
+};
+
+// 手动输入的模型 ID 优先于下拉项，同样算作「用户已选」。
+$('m-model-custom').oninput = function(){
+  MODEL_USER_PICKED = true;
+  var v = $('m-model-custom').value.trim();
+  setModelHint(v ? ('将使用手动输入的模型 ID：' + v + '。') : '');
 };
 
 $('btn-refresh-models').onclick = function(){ fetchUpstream(); };

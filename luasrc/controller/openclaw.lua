@@ -15,7 +15,10 @@ local MODELS = "/usr/libexec/openclaw/models.sh"
 function index()
 	entry({"admin", "services", "openclaw"}, firstchild(), _("OpenClaw 助手"), 60).dependent = false
 	entry({"admin", "services", "openclaw", "status"},   template("openclaw/status"),   _("状态"),      10)
-	entry({"admin", "services", "openclaw", "setup"},    template("openclaw/setup"),    _("设置"),      15)
+	-- 「设置」是父节点：点击直接落到「基础」（alias 目标必须真实存在，见下一行）。
+	entry({"admin", "services", "openclaw", "setup"},    alias("admin", "services", "openclaw", "setup", "general"), _("设置"), 15)
+	entry({"admin", "services", "openclaw", "setup", "general"}, template("openclaw/setup"), _("基础"), 10)
+	entry({"admin", "services", "openclaw", "setup", "adopt"},   template("openclaw/adopt"), _("关联迁移"), 20)
 	entry({"admin", "services", "openclaw", "model"},    template("openclaw/model"),    _("模型"),      20)
 	entry({"admin", "services", "openclaw", "channels"}, template("openclaw/channels"), _("渠道"),      30)
 	entry({"admin", "services", "openclaw", "backup"},   template("openclaw/backup"),   _("备份"),      35)
