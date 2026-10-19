@@ -8,6 +8,7 @@ OC_LOGDIR="/var/log"
 OC_LOGFILE="$OC_LOGDIR/openclaw.log"
 OC_INSTALLLOG="$OC_LOGDIR/openclaw-install.log"
 OC_TASKLOG="$OC_LOGDIR/openclaw-task.log"
+OC_BKUPLOG="$OC_LOGDIR/openclaw-backup.log"
 
 OC_USER="openclaw"
 OC_GROUP="openclaw"

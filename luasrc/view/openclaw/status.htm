@@ -163,6 +163,10 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
     <span id="node-update-text"></span>
     <button id="btn-node-update" class="oc-btn" style="margin-left:8px">更新 Node</button>
   </div>
+  <div id="oc-update" class="oc-hint" style="display:none;margin-top:10px">
+    <span id="oc-update-text"></span>
+    <button id="btn-oc-update" class="oc-btn" style="margin-left:8px">更新 OpenClaw</button>
+  </div>
   <div id="st-op-hint" class="oc-hint" style="display:none;margin-top:10px"></div>
   <div id="diag-box" style="display:none;margin-top:12px">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
@@ -347,8 +351,9 @@ function loadInfo(){
     $('st-url').textContent = (d.status=='running') ? (d.url || '-') : '-';
     // 「打开控制台」的导航目标与两个可复制地址：用浏览器主机名现拼，见 renderOpen()。
     renderOpen();
-    // 当前版本已知，结合（可能更晚到达的）版本列表决定是否提示更新 Node
+    // 当前版本已知，结合（可能更晚到达的）版本列表决定是否提示更新 Node / OpenClaw
     renderNodeUpdate();
+    renderOcUpdate();
     // 探测结果可能比 info / 版本列表先到，node_mode 与 engines 都影响提示内容。
     renderNodeExisting();
   });
@@ -394,6 +399,7 @@ function loadVersions(refresh){
     state.nodeList = jp(r.node||'[]', []);
     // 版本列表可能比 info 更晚返回；两处都调用，先到的那次不满足条件时安静不显示。
     renderNodeUpdate();
+    renderOcUpdate();
     // engines 到位后，已有 Node 的提示要重新判定（可能从"可用"变成"版本不满足"）。
     renderNodeExisting();
   });
@@ -457,6 +463,53 @@ function renderNodeUpdate(){
   box.style.display = '';
 }
 
+// ------------------------------------------------- OpenClaw 更新提示
+// OpenClaw 的版本可能比 Node 多一段（2026.10.4.1），fields()/cmpVer() 只取前三段，
+// 直接复用会把 2026.10.4.1 与 2026.10.4 判成同一个版本。这里另写一个四段比较，
+// 不改动 fields()/cmpVer()，Node 侧的行为保持原样。
+function ocSeg4(v){
+  var s = String(v == null ? '' : v).replace(/^\s+|\s+$/g, '').replace(/^v/, '');
+  if (!/^\d+\.\d+\.\d+(\.\d+)?$/.test(s)) return null;   // 只认正式版本，跳过 pre-release
+  var a = s.split('.');
+  for (var i = 0; i < 4; i++) a[i] = parseInt(a[i] || '0', 10) || 0;
+  return a;
+}
+function cmpVer4(a, b){
+  var x = ocSeg4(a), y = ocSeg4(b);
+  if (!x || !y) return 0;
+  for (var i = 0; i < 4; i++){ if (x[i] !== y[i]) return x[i] > y[i] ? 1 : -1; }
+  return 0;
+}
+
+function ocUpdateCandidate(){
+  var d = state.info;
+  if (!d) return null;
+  var cur = String(d.openclaw || '').replace(/^\s+|\s+$/g, '').replace(/^v/, '');
+  if (!ocSeg4(cur)) return null;                  // 未安装 / 版本号不可解析：不谈更新
+  if (!state.ocList || !state.ocList.length) return null;   // 离线 / 解析失败：安静降级
+
+  var best = null;
+  state.ocList.forEach(function(x){
+    var num = String((x && x.version) || '').replace(/^v/, '');
+    if (!ocSeg4(num)) return;                     // 跳过预发布 / 带后缀的版本
+    if (!best || cmpVer4(num, best) > 0) best = num;
+  });
+  if (!best) return null;
+  if (cmpVer4(best, cur) <= 0) return null;       // 已是最新
+  return { current: cur, latest: best };
+}
+
+function renderOcUpdate(){
+  var box = $('oc-update');
+  if (!box) return;
+  var c = ocUpdateCandidate();
+  if (!c){ box.style.display = 'none'; return; }
+  // 服务端数据只进 textContent，绝不拼 HTML
+  $('oc-update-text').textContent = '发现更新的 OpenClaw：v' + c.latest
+    + '（当前 v' + c.current + '）';
+  box.style.display = '';
+}
+
 // 安装类操作的进度提示：安装日志已移到「设置」页，本页只显示一行状态。
 function stOpSay(msg, bad){
   var el = $('st-op-hint');
@@ -474,8 +527,10 @@ function startInstallPoll(what, onDone){
       var d = jp(r.data||'{}', {});
       if (d.state === 'done' || d.state === 'failed'){
         clearInterval(state.logTimer); state.logTimer = null;
-        // 「更新 Node」复用同一轮流程，结束时也必须恢复，否则按钮永久禁用。
+        // 安装类操作共用这一轮流程：所有「更新」按钮都在这里统一恢复，
+        // 否则只恢复其中一个，另一个会永久禁用。
         if ($('btn-node-update')) $('btn-node-update').disabled = false;
+        if ($('btn-oc-update'))   $('btn-oc-update').disabled = false;
         stOpSay(what + (d.state==='done' ? '完成。' : '失败，请到设置页查看安装日志。'),
                 d.state==='failed');
         loadInfo();
@@ -513,6 +568,38 @@ function startNodeUpdate(){
     }
     stOpSay('Node.js 更新已启动，完成后本页会自动刷新。');
     startInstallPoll('Node.js 更新');
+  });
+}
+
+function startOcUpdate(){
+  var c = ocUpdateCandidate();
+  if (!c){ renderOcUpdate(); return; }
+  if (!confirm('将把 OpenClaw 更新到 v' + c.latest + '（当前 v' + c.current + '）。\n\n'
+             + '· 会重新安装 OpenClaw 程序，过程中网关会短暂停止；\n'
+             + '· 配置与会话保留，不会删除数据。\n\n继续？')) return;
+
+  // 复用现有安装端点：oc_version 传目标版本，node_version 保持当前运行时不变。
+  var d = state.info || {};
+  var dir   = d.base_dir || '';
+  var ocdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
+  if (!dir){ alert('未获取到安装目录，请到设置页刷新后重试'); return; }
+  // 与 startNodeUpdate 同一套判断：只有形如 v1.2.3 的正式版本才回填（后端 info 的
+  // node 带 v 前缀，install.sh 拼下载地址时需要它）；否则交给后端按 engines 自动选择。
+  // 传当前版本时 install.sh 发现运行时已是该版本会跳过下载，不会换掉现有 Node。
+  var nd = /^v?\d+\.\d+\.\d+$/.test(String(d.node || '')) ? String(d.node) : 'auto';
+
+  $('btn-oc-update').disabled = true;
+  stOpSay('正在更新 OpenClaw 到 v' + c.latest + ' …（完整日志见「设置」页）');
+  post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: c.latest,
+                      node_version: nd }, function(r){
+    if (!r || r.ok === false){
+      $('btn-oc-update').disabled = false;
+      stOpSay('OpenClaw 更新启动失败：'
+        + ((r && (r.data || r.error)) || '服务无响应，请重试'), true);
+      return;
+    }
+    stOpSay('OpenClaw 更新已启动，完成后本页会自动刷新。');
+    startInstallPoll('OpenClaw 更新');
   });
 }
 
@@ -775,6 +862,7 @@ $('btn-open').onclick = openControl;
   el.onclick = function(){ this.select(); };
 });
 $('btn-node-update').onclick = startNodeUpdate;
+$('btn-oc-update').onclick   = startOcUpdate;
 // ---- asynchronous diagnostics -------------------------------------------
 // doctor / repair run detached on the router; we poll for partial output so a
 // slow run never hits the HTTP request timeout.

@@ -20,6 +20,11 @@
 #   backup.sh path
 #
 # 所有输出均为单行 JSON（除 path）。
+#
+# 审计日志：每次 create / verify / restore / delete 的结果追加到
+#   $OC_BKUPLOG（/var/log/openclaw-backup.log），格式：
+#   YYYY-MM-DD HH:MM:SS <ACTION> <RESULT> <detail>
+# 读取用 istorec/openclaw.sh 的 backup-log [N] 子命令。
 
 OC_LIB="/usr/libexec/openclaw/lib.sh"
 [ -f "$OC_LIB" ] || OC_LIB="$(dirname "$0")/lib.sh"
@@ -40,7 +45,96 @@ jstr() { oc_json_str "${1:-}"; }
 # 否则一行进度就会把 JSON 破坏掉。
 blog() { printf '%s [INFO] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 
+# ---------------------------------------------------------------- audit log
+# 一行一条：YYYY-MM-DD HH:MM:SS <ACTION> <RESULT> <detail>
+#   ACTION: CREATE / RESTORE / DELETE / VERIFY / PRUNE
+#           （PRUNE 是保留字：轮转只做 mv，不删除归档，当前没有调用点）
+#   RESULT: OK / FAIL
+# detail 只放文件名、体积、重启状态这类信息，绝不放凭据。
+#
+# 写失败绝不能影响主流程：/var/log 在只读根文件系统上可能不可写，
+# 所以整条链路以 2>/dev/null || true 收尾，函数恒定返回 0。
+oc_bklog() {
+	local action="$1" result="$2" detail="${3:-}" size
+	case "$action" in
+		CREATE|RESTORE|DELETE|VERIFY|PRUNE) ;;
+		*) return 0 ;;
+	esac
+	case "$result" in
+		OK|FAIL) ;;
+		*) return 0 ;;
+	esac
+	# 日志按行解析：detail 里的换行/控制字符可以伪造出另一条记录，
+	# 必须在写盘前全部剥掉（与 oc_json_str 的处理口径一致）。
+	detail="$(printf '%s' "$detail" | tr -d '\000-\037\177')"
+	[ -n "$detail" ] || detail="-"
+
+	# 轮转：超过 512KB 就把当前文件改名保留一份，再重新开始。
+	# 不用 rm、不用 logrotate：始终只留 .1 一份历史。
+	if [ -f "$OC_BKUPLOG" ]; then
+		size="$(wc -c <"$OC_BKUPLOG" 2>/dev/null | tr -d ' ')"
+		case "$size" in ''|*[!0-9]*) size=0 ;; esac
+		[ "$size" -le 524288 ] || mv -f "$OC_BKUPLOG" "$OC_BKUPLOG.1" 2>/dev/null || true
+	fi
+
+	printf '%s %s %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" \
+		"$action" "$result" "$detail" >>"$OC_BKUPLOG" 2>/dev/null || true
+	return 0
+}
+
+# 当前动作的审计状态。失败记录集中在两个"出口"上，不在每个 if 分支里重复：
+#   * die_json()        —— create/verify/restore/delete 的全部业务失败
+#   * bk_require_dir()  —— oc_require_dir 的 exit 2（不经过 die_json）
+#   * oc_restore_abort()—— INT/TERM/HUP 中断
+# 成功路径在动作末尾显式调用一次 bk_finish_ok()。BK_DONE 保证每个动作
+# 最多写一条记录（成功后再走到 die_json 也不会重复记 FAIL）。
+BK_ACTION=""
+BK_DETAIL=""
+BK_DONE=0
+
+bk_begin() { BK_ACTION="$1"; BK_DETAIL="${2:-}"; BK_DONE=0; }
+bk_detail() { BK_DETAIL="${1:-}"; }
+
+bk_finish_ok() {
+	[ "$BK_DONE" = "1" ] && return 0
+	[ -n "$BK_ACTION" ] || return 0
+	BK_DONE=1
+	oc_bklog "$BK_ACTION" OK "$BK_DETAIL"
+}
+
+bk_finish_fail() {
+	[ "$BK_DONE" = "1" ] && return 0
+	[ -n "$BK_ACTION" ] || return 0
+	BK_DONE=1
+	oc_bklog "$BK_ACTION" FAIL "$BK_DETAIL"
+}
+
+bk_size_h() {
+	# bk_size_h <bytes> -> "12.3MB" / "512B"
+	local b="${1:-0}"
+	case "$b" in ''|*[!0-9]*) b=0 ;; esac
+	awk -v b="$b" 'BEGIN {
+		if (b >= 1048576) printf "%.1fMB", b / 1048576
+		else printf "%dB", b
+	}'
+}
+
+bk_require_dir() {
+	# oc_require_dir 失败时直接 exit 2：既不输出 JSON，也不经过 die_json。
+	# 放进子 shell 里跑，既保留原有的 stderr 文案与退出码，又能在退出前
+	# 补一条 FAIL 审计记录。
+	if ( oc_require_dir "${1:-}" ); then
+		return 0
+	fi
+	BK_DETAIL="${BK_DETAIL:+$BK_DETAIL }安装目录不可用"
+	bk_finish_fail
+	exit 2
+}
+
 die_json() {
+	# 所有业务失败的唯一出口：先把原因补进 detail，再记 FAIL。
+	BK_DETAIL="${BK_DETAIL:+$BK_DETAIL }$1"
+	bk_finish_fail
 	printf '{"ok":false,"error":"%s"}\n' "$(jstr "$1")"
 	exit 1
 }
@@ -165,7 +259,8 @@ cmd_create() {
 		esac
 	done
 
-	oc_require_dir "$(oc_base_dir)"
+	bk_begin CREATE
+	bk_require_dir "$(oc_base_dir)"
 	local base home data dir stamp out stage ts
 	base="$(oc_base_dir)"
 	home="$(oc_home_dir)"
@@ -208,6 +303,8 @@ cmd_create() {
 	else
 		out="$dir/openclaw-backup-$stamp.tar.gz"
 	fi
+	# 后续失败（空间不足、复制失败、打包失败）都能带上目标文件名
+	bk_detail "$(basename "$out")"
 
 	# 需要的空间 ≈ 数据目录大小；先粗查一下
 	local need
@@ -291,6 +388,8 @@ cmd_create() {
 	case "$size" in ''|*[!0-9]*) size=0 ;; esac
 
 	blog "已创建备份 $out (${size} 字节)"
+	bk_detail "$(basename "$out") $(bk_size_h "$size")"
+	bk_finish_ok
 	printf '{"ok":true,"file":"%s","size":%s,"created":%s,"mode":"%s","contains_secrets":true}\n' \
 		"$(jstr "$(basename "$out")")" "$size" "$ts" "$(jstr "${mode:-unknown}")"
 }
@@ -319,6 +418,7 @@ cmd_list() {
 # ---------------------------------------------------------------- verify
 cmd_verify() {
 	local in="$1" p
+	bk_begin VERIFY "$in"
 	p="$(oc_backup_resolve "$in")" || die_json "非法的备份文件引用：$in"
 	[ -f "$p" ] || die_json "备份不存在：$in"
 
@@ -331,6 +431,8 @@ cmd_verify() {
 	local vsize
 	vsize="$(wc -c <"$p" 2>/dev/null | tr -d ' ')"
 	case "$vsize" in ''|*[!0-9]*) vsize=0 ;; esac
+	bk_detail "$(basename "$p") $(bk_size_h "$vsize")"
+	bk_finish_ok
 	printf '{"ok":true,"file":"%s","size":%s}\n' "$(jstr "$(basename "$p")")" "$vsize"
 }
 
@@ -343,9 +445,10 @@ cmd_restore() {
 			*) [ -z "$in" ] && in="$1"; shift ;;
 		esac
 	done
+	bk_begin RESTORE "$in"
 	[ -n "$in" ] || die_json "未指定备份文件"
 
-	oc_require_dir "$(oc_base_dir)"
+	bk_require_dir "$(oc_base_dir)"
 	local p
 	p="$(oc_backup_resolve "$in")" || die_json "非法的备份文件引用：$in"
 
