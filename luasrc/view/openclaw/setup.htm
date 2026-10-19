@@ -238,6 +238,8 @@ function post(url, data, cb){
   // 发起方会永久卡在 disabled。用 net:true 标记，让调用方知道"这次没拿到数据"。
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
+  // 有界等待：保存/迁移是分钟级操作。
+  x.timeout = 900000;
   x.send(body.join('&'));
 }
 function get(url, cb){
@@ -247,6 +249,7 @@ function get(url, cb){
   x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
+  x.timeout = 20000;
   x.send();
 }
 function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }

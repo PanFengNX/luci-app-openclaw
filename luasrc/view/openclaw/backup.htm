@@ -322,6 +322,8 @@ var API = {
   restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>',
   cloud_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_status")%>',
   cloud_install: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_install")%>',
+  cloud_install_bg: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_install_bg")%>',
+  cloud_install_poll: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_install_poll")%>',
   cloud_login_url: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_login_url")%>',
   cloud_login_code: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_login_code")%>',
   cloud_logout: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_logout")%>',
@@ -362,6 +364,8 @@ function post(url, data, cb){
   // 让轮询类调用方知道"这次没拿到数据"而不是"服务端说失败了"。
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
+  // 有界等待：备份/恢复/云端上传都是分钟级操作，不能设短；但也不能无限挂。
+  x.timeout = 900000;
   x.send(body.join('&'));
 }
 function get(url, cb){
@@ -371,6 +375,8 @@ function get(url, cb){
   x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
+  // 状态与轮询：20 秒拿不到就当这次失败，让调用方重试。
+  x.timeout = 20000;
   x.send();
 }
 function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }
@@ -532,6 +538,8 @@ $('btn-bk-upload').onclick = function(){
       loadBackups();
     });
   };
+  // 上传归档可能很大，给 30 分钟。
+  x.timeout = 1800000;
   x.send(fd);
 };
 
@@ -1198,7 +1206,94 @@ function clDoRestore(it, pass, panel){
 }
 
 // ---------------------------------------------------------------- 第一步：安装
+// 安装要下载 14MB 安装器再运行它，同步请求会一直挂到结束（uhttpd 超时后
+// 页面只剩一个秒表）。改成：POST 启动后台任务 -> 每秒轮询日志，直到 done。
+var clInstallTimer = null;
+var clInstallFails = 0;
+var clInstallPolls = 0;
+var clInstallLast  = '';
+var clInstallShown = false;
+var CL_INSTALL_POLL_MS  = 1000;
+var CL_INSTALL_MAX_FAILS = 8;      // 连续失败超过这个次数就停止轮询
+var CL_INSTALL_MAX_POLLS = 1800;   // 约 30 分钟：后端状态异常时不要无限轮询
+
+function clInstallShowLog(text){
+  var el = $('cl-out');
+  if (!el) return;
+  el.style.display = '';
+  // 服务端日志只进 textContent；不拼 HTML。
+  el.textContent = text || '';
+  // 自动滚到底部，否则用户看不到最新一行。
+  el.scrollTop = el.scrollHeight;
+  // #cl-out 在第三步下面：第一次出现时把它带进视野，否则用户以为没反应。
+  if (!clInstallShown){
+    clInstallShown = true;
+    if (typeof el.scrollIntoView === 'function'){
+      el.scrollIntoView({ block: 'nearest' });
+    }
+  }
+}
+
+function clInstallStop(){
+  if (clInstallTimer){ clearTimeout(clInstallTimer); clInstallTimer = null; }
+  CL.busy = false;
+  var btn = $('btn-cl-install');
+  if (btn) btn.textContent = '安装网盘组件（约 14 MB）';
+  clRender();
+}
+
+function clInstallPoll(){
+  clInstallTimer = null;
+  clInstallPolls++;
+  if (clInstallPolls > CL_INSTALL_MAX_POLLS){
+    clInstallStop();
+    $('cl-install-hint').style.display = 'none';
+    clErr('cl-err1', '安装耗时过长，已停止读取进度；请刷新页面查看当前状态。');
+    return;
+  }
+  // 加时间戳：避免浏览器 / 中间层缓存住上一次的轮询结果。
+  get(API.cloud_install_poll + '?t=' + Date.now(), function(r){
+    if (!r || !r.ok){
+      clInstallFails++;
+      if (clInstallFails >= CL_INSTALL_MAX_FAILS){
+        clInstallStop();
+        $('cl-install-hint').style.display = 'none';
+        clErr('cl-err1', '读取安装进度失败（连续 ' + clInstallFails
+          + ' 次），请刷新页面查看结果。' + clNet(r));
+        return;
+      }
+      clInstallTimer = setTimeout(clInstallPoll, CL_INSTALL_POLL_MS);
+      return;
+    }
+    clInstallFails = 0;
+    var d   = r.data || {};
+    var log = (typeof d.log === 'string') ? d.log : '';
+    if (log !== clInstallLast){
+      clInstallLast = log;
+      if (log) clInstallShowLog(log);
+    }
+    if (d.done === true){
+      var rc = (d.rc === undefined || d.rc === null) ? '' : String(d.rc);
+      var hint = $('cl-install-hint');
+      clInstallStop();
+      if (rc === '0'){
+        hint.style.display = '';
+        hint.textContent = '安装完成。';
+        clErr('cl-err1', '');
+        clStatus();
+      } else {
+        hint.style.display = 'none';
+        clInstallShowLog((log ? (log + '\n') : '') + '安装失败（rc=' + (rc || '?') + '）。');
+        clErr('cl-err1', '安装失败（rc=' + (rc || '?') + '），详情见上方日志。');
+      }
+      return;
+    }
+    clInstallTimer = setTimeout(clInstallPoll, CL_INSTALL_POLL_MS);
+  });
+}
+
 function clInstall(){
+  if (CL.busy) return;
   var btn  = $('btn-cl-install');
   var hint = $('cl-install-hint');
   CL.busy = true;
@@ -1207,26 +1302,38 @@ function clInstall(){
   CL.cliWarn = '';
   clErr('cl-err1', '');
   hint.style.display = '';
-  hint.textContent = '已等待 0 秒…';
+  hint.textContent = '正在启动安装…';
+  clOutReset();
+  clInstallLast  = '';
+  clInstallFails = 0;
+  clInstallPolls = 0;
+  clInstallShown = false;
 
-  var t0 = Date.now();
-  var timer = setInterval(function(){
-    hint.textContent = '已等待 ' + Math.round((Date.now() - t0) / 1000) + ' 秒…';
-  }, 1000);
-
-  post(API.cloud_install, {}, function(r){
-    clearInterval(timer);
-    CL.busy = false;
-    btn.textContent = '安装网盘组件（约 14 MB）';
+  post(API.cloud_install_bg, {}, function(r){
     if (r && r.ok){
-      hint.textContent = '安装完成。';
-      clErr('cl-err1', '');
-      clStatus();
-    } else {
-      hint.style.display = 'none';
-      clErr('cl-err1', (r && r.error) || '安装失败' + clNet(r));
-      clRender();
+      hint.textContent = '正在安装，请稍候…';
+      clInstallTimer = setTimeout(clInstallPoll, 300);
+      return;
     }
+    var d = (r && r.data) || {};
+    if (r && r.net){
+      // 启动请求没拿到回应：后台可能已经跑起来了。继续轮询，由 poll 判断
+      // 真实状态，而不是在这里直接报「启动失败」。
+      hint.textContent = '正在确认安装状态…';
+      clInstallFails = 0;
+      clInstallTimer = setTimeout(clInstallPoll, 800);
+      return;
+    }
+    if (d.busy === true){
+      // 已经有一个后台安装在跑：接着看它的日志，不要并发。
+      hint.textContent = '已有安装任务在运行，正在读取进度…';
+      clInstallFails = 0;
+      clInstallTimer = setTimeout(clInstallPoll, 300);
+      return;
+    }
+    clInstallStop();
+    hint.style.display = 'none';
+    clErr('cl-err1', ((r && r.error) || '启动安装失败') + clNet(r));
   });
 }
 

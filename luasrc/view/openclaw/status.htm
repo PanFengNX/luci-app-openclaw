@@ -261,6 +261,8 @@ function post(url, data, cb){
   // 让轮询类调用方知道"这次没拿到数据"而不是"服务端说失败了"。
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
+  // 有界等待：启停网关可能要几十秒。
+  x.timeout = 900000;
   x.send(body.join('&'));
 }
 function get(url, cb){
@@ -270,6 +272,7 @@ function get(url, cb){
   x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
+  x.timeout = 20000;
   x.send();
 }
 function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }

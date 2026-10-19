@@ -7,6 +7,8 @@
 # 用法：
 #   cloud.sh status
 #   cloud.sh install-cli
+#   cloud.sh install-cli-bg [ver]   后台安装；立刻返回，进度用 install-cli-poll 读
+#   cloud.sh install-cli-poll        {"ok":..,"running":..,"done":..,"rc":"..","log":".."}
 #   cloud.sh cli-check          探测官方 CDN 上可用的最新组件版本
 #   cloud.sh cli-update [ver]   更新组件（不给版本时用 cli-check 探测到的 latest）
 #   cloud.sh login-url
@@ -898,6 +900,130 @@ cloud_installer_has_flag() {
 	' "$1"
 }
 
+# ---- 后台安装的运行目录 / 进度辅助 ----
+# 全部放在 $OC_RUNDIR 下，名字统一带 cloud-install 前缀；锁目录只做 mkdir/rmdir，
+# 临时文件只用 rm -f。
+CLOUD_INSTALL_LOG="$OC_RUNDIR/cloud-install.log"
+CLOUD_INSTALL_RC="$OC_RUNDIR/cloud-install.rc"
+CLOUD_INSTALL_PID="$OC_RUNDIR/cloud-install.pid"
+CLOUD_INSTALL_LOCK="$OC_RUNDIR/cloud-install.lock"
+CLOUD_INSTALL_STAGE="$OC_RUNDIR/cloud-install.stage"
+
+cloud_install_mb() {
+	# cloud_install_mb <bytes> -> "X.X"（MB，一位小数）
+	local b="${1:-0}"
+	case "$b" in ''|*[!0-9]*) b=0 ;; esac
+	awk -v b="$b" 'BEGIN { printf "%.1f", b / 1048576 }'
+}
+
+cloud_install_total() {
+	# cloud_install_total <url> -> Content-Length（拿不到时输出空）
+	# 只做一次 HEAD，短超时；失败绝不影响真正的下载。
+	local url="$1" proxy len=""
+	oc_safe_url "$url" || return 0
+	proxy="$(uci_get main.http_proxy '')"
+	if [ -n "$proxy" ]; then
+		oc_safe_url "$proxy" || proxy=""
+	fi
+	if command -v curl >/dev/null 2>&1; then
+		if [ -n "$proxy" ]; then
+			len="$(oc_timeout 10 curl -sIL --connect-timeout 4 --max-time 8 \
+				-x "$proxy" "$url" 2>/dev/null \
+				| awk 'tolower($1) == "content-length:" { v = $2 } END { print v }')"
+		else
+			len="$(oc_timeout 10 curl -sIL --connect-timeout 4 --max-time 8 \
+				"$url" 2>/dev/null \
+				| awk 'tolower($1) == "content-length:" { v = $2 } END { print v }')"
+		fi
+	elif command -v wget >/dev/null 2>&1; then
+		len="$(oc_timeout 10 wget -q --spider -S -T 8 "$url" 2>&1 \
+			| awk 'tolower($1) == "content-length:" { v = $2 } END { print v }')"
+	fi
+	len="$(printf '%s' "$len" | tr -d ' \r\n')"
+	case "$len" in ''|*[!0-9]*) return 0 ;; esac
+	[ "$len" -gt 0 ] 2>/dev/null || return 0
+	printf '%s' "$len"
+}
+
+cloud_install_stage_set() {
+	# 只有后台安装会设置 OC_INSTALL_STAGE；同步安装时这里什么都不做。
+	[ -n "${OC_INSTALL_STAGE:-}" ] || return 0
+	printf '%s\n' "$1" >"$OC_INSTALL_STAGE" 2>/dev/null || true
+	return 0
+}
+
+cloud_install_alive() {
+	# cloud_install_alive <pid> -> 0 when the pid is a live (non-zombie) worker.
+	# 不用 oc_pid_alive：它要求 cmdline 里出现 "openclaw/cloud.sh"，而命令行
+	# 用相对路径启动时（例如 ./cloud.sh install-cli-bg）就匹配不上，会把活着
+	# 的 worker 误判成已退出。这里放宽成「cmdline 里含 cloud.sh」，既能认出
+	# 相对路径启动的 worker，又不会被 pid 回收后的无关进程骗到。
+	local pid="${1:-}" statline state cmd
+	case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+	[ -d "/proc/$pid" ] || return 1
+	statline="$(cat "/proc/$pid/stat" 2>/dev/null)"
+	[ -n "$statline" ] || return 1
+	state="${statline##*) }"
+	state="${state%% *}"
+	[ "$state" = "Z" ] && return 1
+	cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
+	case "$cmd" in
+		*cloud.sh*) return 0 ;;
+	esac
+	return 1
+}
+
+cloud_install_progress_loop() {
+	# cloud_install_progress_loop <dest> <log> <stage> <total>
+	# 下载期间每秒写一行；阶段离开 download（或 worker 被 kill）就退出。
+	# 三重退出条件，保证它绝不会变成孤儿进程：
+	#   1) 阶段不再是 download（正常结束 / 失败返回）；
+	#   2) 记录在 pid 文件里的 worker 已经不在了（被 kill -9 之类）；
+	#   3) 达到硬上限（下载本身最多 600 秒）。
+	local dest="$1" log="$2" stage="$3" total="$4" n st wpid i=0
+	while [ "$i" -lt 900 ]; do
+		i=$((i + 1))
+		st="$(cat "$stage" 2>/dev/null)"
+		case "$st" in
+			''|download) ;;
+			*) break ;;
+		esac
+		wpid="$(cat "$CLOUD_INSTALL_PID" 2>/dev/null | head -n1 | tr -d ' \r\n')"
+		if [ -n "$wpid" ] && ! cloud_install_alive "$wpid"; then
+			break
+		fi
+		n=0
+		if [ -f "$dest" ]; then
+			n="$(wc -c <"$dest" 2>/dev/null | tr -d ' \r\n')"
+		fi
+		case "$n" in ''|*[!0-9]*) n=0 ;; esac
+		if [ -n "$total" ]; then
+			printf '已下载 %s MB / %s MB\n' \
+				"$(cloud_install_mb "$n")" "$(cloud_install_mb "$total")" \
+				>>"$log" 2>/dev/null
+		else
+			printf '已下载 %s MB\n' "$(cloud_install_mb "$n")" \
+				>>"$log" 2>/dev/null
+		fi
+		sleep 1
+	done
+}
+
+cloud_install_log_tail() {
+	# cloud_install_log_tail <log> -> 尾部（最多 8KB，按行对齐后脱敏）
+	local log="$1" size out
+	[ -f "$log" ] || return 0
+	size="$(wc -c <"$log" 2>/dev/null | tr -d ' \r\n')"
+	case "$size" in ''|*[!0-9]*) size=0 ;; esac
+	if [ "$size" -gt 8192 ]; then
+		# 从中间截断时丢掉第一行，避免把 UTF-8 字符切成两半。
+		out="$(tail -c 8192 "$log" 2>/dev/null | sed '1d')"
+	else
+		out="$(cat "$log" 2>/dev/null)"
+	fi
+	printf '%s' "$out" | cloud_redact
+}
+
 cloud_install_version() {
 	# cloud_install_version <ver>
 	# 下载 -> 校验 -> 安装，只写 $OC_CLOUD_DIR（安装器 -dir）。
@@ -943,8 +1069,11 @@ cloud_install_version() {
 
 	url="$(cloud_installer_url "$ver")"
 
-	dest="$OC_RUNDIR/bdpan-installer-$arch.$$"
+	# 后台安装会通过 OC_INSTALL_DEST 指定目标路径，进度循环据此读取文件大小；
+	# 同步安装沿用原来的 $$ 命名。
+	dest="${OC_INSTALL_DEST:-$OC_RUNDIR/bdpan-installer-$arch.$$}"
 	rm -f "$dest" 2>/dev/null
+	cloud_install_stage_set download
 	cblog "下载百度网盘组件安装器：$url"
 	if ! oc_fetch "$url" "$dest" 600; then
 		rm -f "$dest" 2>/dev/null
@@ -955,6 +1084,8 @@ cloud_install_version() {
 		OC_INSTALL_ERR="下载安装器失败：文件不存在"
 		return 1
 	fi
+	cloud_install_stage_set verify
+	cblog "下载完成，校验文件"
 
 	size="$(wc -c <"$dest" 2>/dev/null | tr -d ' ')"
 	case "$size" in ''|*[!0-9]*) size=0 ;; esac
@@ -1050,6 +1181,8 @@ cloud_install_version() {
 
 	out="$OC_RUNDIR/bdpan-install-$$.log"
 	rm -f "$out" 2>/dev/null
+	cloud_install_stage_set install
+	cblog "校验通过，运行安装器"
 	cblog "运行安装器（$dirflag=$OC_CLOUD_DIR${yesflag:+，$yesflag}，临时 HOME=$ihome）"
 	(
 		export HOME="$ihome"
@@ -1108,6 +1241,7 @@ cloud_install_version() {
 
 	OC_INSTALL_PATH="$bin"
 	OC_INSTALL_VER="$ver_out"
+	cloud_install_stage_set done
 	return 0
 }
 
@@ -1130,6 +1264,151 @@ cmd_install_cli() {
 
 	printf '{"ok":true,"path":"%s","version":"%s","arch":"%s"}\n' \
 		"$(jstr "$OC_INSTALL_PATH")" "$(jstr "$OC_INSTALL_VER")" "$arch"
+}
+
+cloud_install_bg_worker() {
+	# cloud_install_bg_worker <ver> <dest>
+	# 在后台子 shell 里跑：复用 cloud_install_version，只把过程写进日志。
+	local ver="$1" dest="$2" total rc mp
+
+	cblog "开始下载安装器" >>"$CLOUD_INSTALL_LOG" 2>&1
+	total="$(cloud_install_total "$(cloud_installer_url "$ver")")"
+
+	cloud_install_progress_loop "$dest" "$CLOUD_INSTALL_LOG" \
+		"$CLOUD_INSTALL_STAGE" "$total" &
+	mp=$!
+
+	# 让 cloud_install_version 用固定的目标路径 / 阶段文件；这两个变量只在
+	# 本 worker 子 shell 里生效。
+	OC_INSTALL_DEST="$dest"
+	OC_INSTALL_STAGE="$CLOUD_INSTALL_STAGE"
+	cloud_install_version "$ver" >>"$CLOUD_INSTALL_LOG" 2>&1
+	rc=$?
+
+	# 下载结束（或失败）后立刻收掉进度循环，绝不留孤儿进程。
+	kill "$mp" 2>/dev/null
+	wait "$mp" 2>/dev/null
+
+	if [ "$rc" -eq 0 ]; then
+		cblog "安装完成" >>"$CLOUD_INSTALL_LOG" 2>&1
+		printf '0\n' >"$CLOUD_INSTALL_RC" 2>/dev/null
+	else
+		cblog "失败：${OC_INSTALL_ERR:-未知错误}" >>"$CLOUD_INSTALL_LOG" 2>&1
+		printf '%s\n' "$rc" >"$CLOUD_INSTALL_RC" 2>/dev/null
+	fi
+
+	rm -f "$CLOUD_INSTALL_PID" 2>/dev/null
+	rmdir "$CLOUD_INSTALL_LOCK" 2>/dev/null
+}
+
+cmd_install_cli_bg() {
+	# 后台安装：前置校验与 install-cli 一致，通过后立刻返回 started。
+	# 版本号参数可选；不给时与 install-cli 一样取 UCI 值。
+	local ver="${1:-}" arch pid dest
+
+	if [ -z "$ver" ]; then
+		ver="$(uci_get main.bdpan_version "$OC_CLOUD_DEFAULT_VERSION")"
+		[ -n "$ver" ] || ver="$OC_CLOUD_DEFAULT_VERSION"
+	fi
+	cloud_version_valid "$ver" || cloud_fail "bdpan 版本号非法：$ver" 2
+
+	arch="$(cloud_arch)"
+	[ "$arch" != "unsupported" ] || \
+		cloud_fail "不支持的架构：$(uname -m 2>/dev/null)" 2
+
+	if ! oc_validate_base_dir "$(oc_base_dir)"; then
+		cloud_fail "安装目录不可用：$(oc_base_dir)" 2
+	fi
+	if [ ! -d "$OC_RUNDIR" ] || [ ! -w "$OC_RUNDIR" ]; then
+		cloud_fail "临时目录不可用：$OC_RUNDIR" 2
+	fi
+	cloud_ensure_dirs || cloud_fail "无法创建云备份目录：$OC_CLOUD_ROOT" 2
+
+	# 已有安装在跑：锁存在且 pid 还活着，直接报 busy。
+	if [ -d "$CLOUD_INSTALL_LOCK" ]; then
+		pid="$(cat "$CLOUD_INSTALL_PID" 2>/dev/null | head -n1 | tr -d ' \r\n')"
+		if [ -n "$pid" ] && { oc_pid_alive "$pid" || cloud_install_alive "$pid"; }; then
+			printf '{"busy":true}\n'
+			return 0
+		fi
+		rm -f "$CLOUD_INSTALL_PID" 2>/dev/null
+		if ! rmdir "$CLOUD_INSTALL_LOCK" 2>/dev/null; then
+			printf '{"ok":false,"error":"%s"}\n' \
+				"$(jstr "无法清理旧的安装锁：$CLOUD_INSTALL_LOCK")"
+			return 1
+		fi
+	fi
+	if ! mkdir "$CLOUD_INSTALL_LOCK" 2>/dev/null; then
+		# 目录已经存在 = 别人抢先一步；否则是真的建不出来（权限 / 只读）。
+		if [ -d "$CLOUD_INSTALL_LOCK" ]; then
+			printf '{"busy":true}\n'
+			return 0
+		fi
+		printf '{"ok":false,"error":"%s"}\n' \
+			"$(jstr "无法创建安装锁：$CLOUD_INSTALL_LOCK")"
+		return 1
+	fi
+	chmod 700 "$CLOUD_INSTALL_LOCK" 2>/dev/null || true
+
+	# 先写占位 pid：并发 start 在 spawn 之前不会把新锁误判成陈旧锁。
+	printf '%s\n' "$$" >"$CLOUD_INSTALL_PID" 2>/dev/null || true
+	rm -f "$CLOUD_INSTALL_RC" 2>/dev/null
+	if ! : >"$CLOUD_INSTALL_LOG" 2>/dev/null; then
+		rm -f "$CLOUD_INSTALL_PID" 2>/dev/null
+		rmdir "$CLOUD_INSTALL_LOCK" 2>/dev/null
+		cloud_fail "无法写入安装日志：$CLOUD_INSTALL_LOG"
+	fi
+	printf 'download\n' >"$CLOUD_INSTALL_STAGE" 2>/dev/null || true
+
+	dest="$OC_RUNDIR/bdpan-installer-$arch.$$"
+	( cloud_install_bg_worker "$ver" "$dest" ) >/dev/null 2>&1 </dev/null &
+	pid=$!
+	# 子 shell 里的 $$ 仍是父进程 pid，所以 worker 的真实 pid 取 $!。
+	printf '%s\n' "$pid" >"$CLOUD_INSTALL_PID" 2>/dev/null || true
+
+	printf '{"ok":true,"started":true}\n'
+}
+
+cmd_install_cli_poll() {
+	local pid running=false done=false rc="" out=""
+
+	# 从未启动过：不返回 done，避免前端把「没开始」当成「已中断」。
+	if [ ! -f "$CLOUD_INSTALL_LOG" ] && [ ! -f "$CLOUD_INSTALL_RC" ] && \
+		[ ! -f "$CLOUD_INSTALL_PID" ]; then
+		printf '{"ok":true,"running":false,"done":false,"rc":"","log":""}\n'
+		return 0
+	fi
+
+	pid="$(cat "$CLOUD_INSTALL_PID" 2>/dev/null | head -n1 | tr -d ' \r\n')"
+	if [ -n "$pid" ] && { oc_pid_alive "$pid" || cloud_install_alive "$pid"; }; then
+		running=true
+	fi
+
+	# worker 还在跑就先不下结论：它写完 rc 才会清理 pid 文件，而新一轮启动
+	# 也可能在删除旧 rc 之前被轮询到。以「进程是否还活着」为准，最多多等一轮。
+	if [ "$running" = "true" ]; then
+		:
+	elif [ -f "$CLOUD_INSTALL_RC" ]; then
+		done=true
+		rc="$(head -n1 "$CLOUD_INSTALL_RC" 2>/dev/null | tr -d ' \r\n')"
+		case "$rc" in ''|*[!0-9]*) rc=1 ;; esac
+	else
+		# worker 已消失但没有退出码：按被中断处理，并落盘 rc 防止重复追加。
+		done=true
+		rc=124
+		# 两个页面同时轮询时可能同时走到这里；用日志里的标记保证只追加一次。
+		if ! grep -qF "安装进程已中断" "$CLOUD_INSTALL_LOG" 2>/dev/null; then
+			printf '%s\n' "安装进程已中断（可能被终止或超时），以上为已产生的日志。" \
+				>>"$CLOUD_INSTALL_LOG" 2>/dev/null
+		fi
+		printf '124\n' >"$CLOUD_INSTALL_RC" 2>/dev/null || true
+		rm -f "$CLOUD_INSTALL_PID" 2>/dev/null
+		rmdir "$CLOUD_INSTALL_LOCK" 2>/dev/null
+	fi
+
+	out="$(cloud_install_log_tail "$CLOUD_INSTALL_LOG")"
+	printf '{"ok":true,"running":%s,"done":%s,"rc":"%s","log":"%s"}\n' \
+		"$running" "$done" "$(jstr "$rc")" "$(jstr "$out")"
 }
 
 # ---------------------------------------------------------------- check / update
@@ -2554,6 +2833,8 @@ cmd_backup_run() {
 case "${1:-}" in
 	status)      cmd_status ;;
 	install-cli) cmd_install_cli ;;
+	install-cli-bg) shift; cmd_install_cli_bg "$@" ;;
+	install-cli-poll) cmd_install_cli_poll ;;
 	cli-check)   cmd_cli_check ;;
 	cli-update)  shift; cmd_cli_update "$@" ;;
 	login-url)   cmd_login_url ;;
@@ -2577,7 +2858,7 @@ case "${1:-}" in
 	*)
 		printf '{"ok":false,"error":"%s"}\n' "$(jstr "未知动作：${1:-}")"
 		cat >&2 <<EOF
-Usage: cloud.sh {status|install-cli|cli-check|cli-update [version]|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|download-dec <name> <local>|rm <name>|pass-status|set-pass|clear-pass|encrypt-status|set-encrypt|schedule-status|schedule-apply|schedule-set|schedule-clear|backup-run}
+Usage: cloud.sh {status|install-cli|install-cli-bg [version]|install-cli-poll|cli-check|cli-update [version]|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|download-dec <name> <local>|rm <name>|pass-status|set-pass|clear-pass|encrypt-status|set-encrypt|schedule-status|schedule-apply|schedule-set|schedule-clear|backup-run}
 EOF
 		exit 2 ;;
 esac

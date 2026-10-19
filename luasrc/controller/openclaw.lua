@@ -70,6 +70,9 @@ function index()
 	-- 百度网盘云备份：业务全部在 cloud.sh 里，这里只做参数校验与透传
 	entry({"admin", "services", "openclaw", "api", "cloud_status"},  call("api_cloud_status")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_install"}, call("api_cloud_install")).leaf = true
+	-- 后台安装 + 轮询：请求只负责启动 worker，进度从 cloud.sh 的日志文件读
+	entry({"admin", "services", "openclaw", "api", "cloud_install_bg"}, call("api_cloud_install_bg")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_install_poll"}, call("api_cloud_install_poll")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_login_url"},  call("api_cloud_login_url")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_login_code"}, call("api_cloud_login_code")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_logout"}, call("api_cloud_logout")).leaf = true
@@ -1042,6 +1045,37 @@ function api_cloud_install()
 		return
 	end
 	cloud_reply(cloud_exec("install-cli"))
+end
+
+-- 版本号只允许 x.y.z：它会作为参数拼进 shell 命令，虽然 q() 已经转义，
+-- 这里仍然按白名单拒绝掉奇怪的值（与 cloud.sh 的校验互为两道防线）。
+local CLOUD_VER_RE = "^[0-9]+%.[0-9]+%.[0-9]+$"
+
+function api_cloud_install_bg()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	local ver = http.formvalue("version") or ""
+	-- formvalue 遇到 version[]=... 会返回 table；先拒掉，避免 trim 抛错变成 500。
+	if type(ver) ~= "string" then
+		out({ ok = false, error = "版本号格式不正确（应为 x.y.z）" })
+		return
+	end
+	ver = util.trim(ver)
+	if ver ~= "" and not ver:match(CLOUD_VER_RE) then
+		out({ ok = false, error = "版本号格式不正确（应为 x.y.z）" })
+		return
+	end
+	local args = "install-cli-bg"
+	if ver ~= "" then
+		args = args .. " " .. q(ver)
+	end
+	cloud_reply(cloud_exec(args))
+end
+
+function api_cloud_install_poll()
+	cloud_reply(cloud_exec("install-cli-poll"))
 end
 
 function api_cloud_login_url()
