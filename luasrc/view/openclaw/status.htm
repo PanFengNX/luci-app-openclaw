@@ -132,16 +132,16 @@ select,input[type=text],input[type=password]{min-height:30px}
     <h3>运行状态</h3>
     <span id="st-badge">加载中…</span>
   </div>
-  <div class="oc-actions" style="gap:24px;align-items:flex-end;margin:4px 0 6px">
+  <div class="oc-kpi-strip">
     <div class="oc-kpi"><span id="kpi-state" class="oc-badge oc-none">-</span>
       <span class="oc-kpi-label">服务状态</span></div>
-    <div class="oc-kpi"><span id="kpi-ver">-</span><span class="oc-kpi-label">OpenClaw 版本</span></div>
+    <div class="oc-kpi"><span id="kpi-ver" class="oc-pill accent">-</span><span class="oc-kpi-label">OpenClaw 版本</span></div>
     <div class="oc-kpi"><span id="kpi-port">-</span><span class="oc-kpi-label">端口</span></div>
   </div>
   <div class="oc-sub">运行环境</div>
   <div class="oc-grid">
-    <div class="oc-kv"><b>OpenClaw 版本</b><span id="st-oc">-</span></div>
-    <div class="oc-kv"><b>Node.js</b><span id="st-node">-</span><span id="st-node-mode" class="oc-hint" style="display:block"></span></div>
+    <div class="oc-kv"><b>OpenClaw 版本</b><span class="oc-pill"><span id="st-oc">-</span></span></div>
+    <div class="oc-kv"><b>Node.js</b><span class="oc-pill"><span id="st-node">-</span></span><span id="st-node-mode" class="oc-hint" style="display:block"></span></div>
     <div class="oc-kv"><b>架构 / libc</b><span id="st-arch">-</span></div>
     <div class="oc-kv"><b>安装目录</b><span id="st-dir">-</span></div>
     <div class="oc-kv"><b>程序目录</b><span id="st-ocdir">-</span></div>
@@ -184,9 +184,11 @@ select,input[type=text],input[type=password]{min-height:30px}
   <div id="oc-open-addrs" class="oc-hint" style="margin-top:8px">
     <div style="margin-bottom:4px">本机地址
       <input type="text" id="open-local" class="oc-addr" readonly placeholder="-">
+      <button class="oc-copy" data-copy="open-local" type="button" style="margin-left:6px">复制</button>
     </div>
     <div>当前访问地址
       <input type="text" id="open-current" class="oc-addr" readonly placeholder="-">
+      <button class="oc-copy" data-copy="open-current" type="button" style="margin-left:6px">复制</button>
     </div>
   </div>
   <div id="node-update" class="oc-hint" style="display:none;margin-top:10px">
@@ -806,6 +808,17 @@ function devApprove(id, btn){
   });
 }
 
+// 空状态：用 .oc-empty 虚线框占位，文字只进 textContent。
+function devEmpty(){
+  var box = devBox();
+  if (!box) return;
+  box.textContent = '';
+  var d = document.createElement('div');
+  d.className = 'oc-empty';
+  d.textContent = '暂无待批准设备 —— 局域网内新浏览器首次访问控制台时会出现在这里';
+  box.appendChild(d);
+}
+
 function devList(list){
   var box = devBox();
   if (!box) return;
@@ -838,7 +851,7 @@ function devList(list){
     row.appendChild(b);
     box.appendChild(row);
   });
-  if (!shown) devSay('当前没有待批准的设备');
+  if (!shown) devEmpty();
 }
 
 function devRaw(raw){
@@ -874,7 +887,7 @@ function loadDevices(){
     if (list.length){ devList(list); return; }
     // 解析不出条目但后端给了原文：原样展示，用户仍能看到内容并手动处理
     if (d.raw && String(d.raw).replace(/\s+$/, '') !== ''){ devRaw(d.raw); return; }
-    devSay('当前没有待批准的设备');
+    devEmpty();
   });
 }
 
@@ -890,6 +903,49 @@ $('btn-open').onclick = openControl;
   if (!el) return;
   el.onfocus = function(){ this.select(); };
   el.onclick = function(){ this.select(); };
+});
+
+// ------------------------------- 地址复制按钮（.oc-copy）
+// 事件委托只绑一次；按钮自身不承载任何服务端数据，复制的永远是已有 input 的 value。
+// 路由器一般用 http:// 局域网地址访问，属于非安全上下文：navigator.clipboard
+// 可能不存在，也可能存在但 writeText 被拒绝，所以必须保留 execCommand 退化路径。
+function ocCopySay(btn, text){
+  if (!btn) return;
+  if (!btn.getAttribute('data-label')) btn.setAttribute('data-label', btn.textContent);
+  if (btn._ocCopyTimer){ clearTimeout(btn._ocCopyTimer); btn._ocCopyTimer = null; }
+  btn.textContent = text;
+  btn._ocCopyTimer = setTimeout(function(){
+    btn._ocCopyTimer = null;
+    btn.textContent = btn.getAttribute('data-label') || '复制';
+  }, 1200);
+}
+
+// 退化路径：聚焦 + 全选 + execCommand('copy')；不支持或被拒绝时返回 false。
+function ocCopyFallback(input){
+  try {
+    input.focus();
+    input.select();
+    return document.execCommand('copy') === true;
+  } catch(e){ return false; }
+}
+
+document.addEventListener('click', function(e){
+  var t = e.target;
+  var btn = (t && t.closest) ? t.closest('.oc-copy') : null;
+  if (!btn) return;
+  var id = btn.getAttribute('data-copy') || '';
+  var input = id ? $(id) : null;
+  if (!input){ ocCopySay(btn, '复制失败'); return; }
+  var text = String(input.value == null ? '' : input.value);
+  if (!text){ ocCopySay(btn, '复制失败'); return; }
+  var ok   = function(){ ocCopySay(btn, '已复制'); };
+  var fail = function(){ if (ocCopyFallback(input)) ok(); else ocCopySay(btn, '复制失败'); };
+  if (navigator.clipboard && navigator.clipboard.writeText){
+    try { navigator.clipboard.writeText(text).then(ok, fail); }
+    catch(e2){ fail(); }
+  } else {
+    fail();
+  }
 });
 $('btn-node-update').onclick = startNodeUpdate;
 $('btn-oc-update').onclick   = startOcUpdate;

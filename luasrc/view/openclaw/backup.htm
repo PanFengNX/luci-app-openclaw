@@ -241,55 +241,46 @@ function loadBackups(){
   get(API.backups, function(r){
     var arr = jp(r.data || '[]', []);
     host.innerHTML = '';
+    host.className = '';                    // 每次重绘先复位，避免上一次的 oc-empty / oc-warn 残留
     if (r && r.ok === false && !arr.length){
       host.textContent = '（读取备份列表失败，请刷新重试）';
       host.className = 'oc-hint oc-warn';
       return;
     }
     if (!arr.length){
-      host.textContent = '（暂无备份）';
-      host.className = 'oc-hint';
+      // 空状态：.oc-empty 虚线框，文字只进 textContent
+      host.textContent = '暂无备份。点上方「立即备份」创建第一份。';
+      host.className = 'oc-empty';
       return;
     }
-    host.className = '';
-    var t = document.createElement('table');
-    t.style.width = '100%';
-    t.style.fontSize = '12px';
-    t.style.borderCollapse = 'collapse';
-
-    var head = document.createElement('tr');
-    ['文件', '大小', '时间', '操作'].forEach(function(h){
-      var th = document.createElement('th');
-      th.textContent = h;
-      th.style.textAlign = 'left';
-      th.style.padding = '6px 8px';
-      th.style.borderBottom = '1px solid #ddd';
-      head.appendChild(th);
-    });
-    t.appendChild(head);
 
     arr.forEach(function(b){
-      var tr = document.createElement('tr');
+      // 一行 = 文件名（左） + 体积 / 时间 / 操作（右）
+      var row = document.createElement('div');
+      row.className = 'oc-rowline';
+      row.style.flexWrap = 'wrap';            // 窄屏下右侧操作区整体换行，不挤压文件名
 
-      var tdName = document.createElement('td');
-      tdName.textContent = b.file;              // 服务端数据只进 textContent
-      tdName.style.padding = '6px 8px';
-      tdName.style.wordBreak = 'break-all';
-      tr.appendChild(tdName);
+      var name = document.createElement('span');
+      name.textContent = b.file;              // 服务端数据只进 textContent
+      // .oc-rowline>span 默认 nowrap，长文件名需要允许换行
+      name.style.whiteSpace = 'normal';
+      name.style.wordBreak = 'break-all';
+      name.style.color = 'var(--oc-fg-dim)';
+      row.appendChild(name);
 
-      var tdSize = document.createElement('td');
-      tdSize.textContent = fmtSize(b.size || 0);
-      tdSize.style.padding = '6px 8px';
-      tr.appendChild(tdSize);
+      var act = document.createElement('div');
+      act.style.display = 'flex';
+      act.style.alignItems = 'center';
+      act.style.gap = '8px';
+      act.style.flexWrap = 'wrap';
+      act.style.justifyContent = 'flex-end';
 
-      var tdTime = document.createElement('td');
-      tdTime.textContent = fmtTime(b.mtime);
-      tdTime.style.padding = '6px 8px';
-      tr.appendChild(tdTime);
-
-      var tdAct = document.createElement('td');
-      tdAct.style.padding = '6px 8px';
-      tdAct.style.whiteSpace = 'nowrap';
+      var meta = document.createElement('span');
+      meta.className = 'oc-hint';
+      meta.style.marginTop = '0';
+      meta.style.whiteSpace = 'nowrap';
+      meta.textContent = fmtSize(b.size || 0) + ' · ' + fmtTime(b.mtime);
+      act.appendChild(meta);
 
       var mk = function(label, fn, gray){
         var btn = document.createElement('button');
@@ -298,8 +289,7 @@ function loadBackups(){
         btn.style.fontSize = '12px';
         btn.style.padding = '3px 9px';
         btn.onclick = fn;
-        tdAct.appendChild(btn);
-        tdAct.appendChild(document.createTextNode(' '));
+        act.appendChild(btn);
         return btn;
       };
 
@@ -329,10 +319,9 @@ function loadBackups(){
         });
       }, true);
 
-      tr.appendChild(tdAct);
-      t.appendChild(tr);
+      row.appendChild(act);
+      host.appendChild(row);
     });
-    host.appendChild(t);
   });
 }
 

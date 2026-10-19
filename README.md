@@ -24,7 +24,11 @@ LuCI 入口：**服务 → OpenClaw 助手**（`/cgi-bin/luci/admin/services/ope
 
 因此**不需要** `replaces` / `conflicts` 声明，也不会出现
 `trying to overwrite ... owned by` 之类的文件冲突。两者的 Node 运行时、
-OpenClaw 程序与数据各自独立，**不共享任何文件**。
+OpenClaw 程序与数据各自独立，**默认不共享任何文件**。
+
+> 例外：若两者指向同一个安装目录，会共用该目录下的 `openclaw.json`。
+> 此时需要留意旧包写回的废弃配置键，详见下文
+> [「与 iStoreOS 自带的 OpenClawMgr 共存」](#与-istoreos-自带的-openclawmgr-共存)。
 
 > `usr/libexec/istorec/openclaw.sh` 只是为了让 iStore 能显示/控制本包而实现的
 > **可选**接口；不装 iStore 也完全可用。
@@ -264,7 +268,7 @@ openclaw.sh restore <文件名> [--no-safety]
 iStoreOS 25.12.x 基于 OpenWrt 25.12，包管理器是 **apk-tools v3**，请安装：
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.5.0-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.6.0-r1.apk
 ```
 
 **不要**装 `...-v2.apk` —— 那是 apk-tools 2.x / Alpine 的格式，不是 OpenWrt 25.12 的
@@ -343,13 +347,13 @@ python3 scripts/build_apk.py
 ### apk（OpenWrt 25.12+ / apk-tools 3.x）
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.5.0-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.6.0-r1.apk
 ```
 
 ### ipk（opkg）—— **OpenWrt 24.10 及更早、iStoreOS 等 opkg 系统**
 
 ```sh
-opkg install luci-app-openclaw_1.5.0_all.ipk
+opkg install luci-app-openclaw_1.6.0_all.ipk
 ```
 
 在 LuCI / iStore 界面里也可以直接「手动上传安装」这个 ipk。
@@ -373,7 +377,7 @@ opkg install luci-app-openclaw_1.5.0_all.ipk
 ### .run 自解压（无需包管理器）
 
 ```sh
-sh luci-app-openclaw-1.5.0.run
+sh luci-app-openclaw-1.6.0.run
 ```
 
 ### 集成到固件 / SDK 编译
@@ -388,9 +392,30 @@ make package/luci-app-openclaw/compile V=s
 ### 自行生成安装包（无需 SDK）
 
 ```sh
-python3 scripts/build_apk.py --version 1.5.0 --release 1 --sign
+python3 scripts/build_apk.py --version 1.6.0 --release 1 --sign
 python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 / ipk）
 ```
+
+### 与 iStoreOS 自带的 OpenClawMgr 共存
+
+本插件（`luci-app-openclaw`）与 iStoreOS 自带的 `luci-app-openclawmgr` **完全独立**：
+UCI 配置分别是 `/etc/config/openclaw` 与 `/etc/config/openclawmgr`，服务名与数据目录
+也不同，两者可以同时安装。
+
+**但它们可能共用同一份 `openclaw.json`**（位于 `<安装目录>/home/.openclaw/`）。
+旧版 openclawmgr 的 `ensure_gateway_config` 每次启动、停止、安装或打开管理页，都会写入
+`gateway.controlUi.allowInsecureAuth`、`dangerouslyDisableDeviceAuth`、
+`dangerouslyAllowHostHeaderOriginFallback` 这三个键。
+
+OpenClaw 2026.10 起已删除这三个键。配置里只要出现任意一个，整份配置就会被判为无效
+（`Unrecognized key`），**网关拒绝启动**。手动删掉一次没有用 —— 下次打开 openclawmgr
+的管理页又会被写回来。
+
+本插件从 1.6.0 起，会在安装和「一键修复」时自动检测并清理这三个键（仅在已安装
+OpenClaw >= 2026.10.0 时执行，清理前会备份成 `openclaw.json.legacy.bak.<时间戳>`）。
+
+如果网关仍然起不来，请查看 `<安装目录>/home/.openclaw/openclaw.json` 里是否还有这三个键；
+也可以先停用 openclawmgr，再启动本插件的服务。
 
 ## 使用
 
