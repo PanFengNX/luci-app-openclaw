@@ -224,9 +224,13 @@ select,input[type=text],input[type=password]{min-height:30px}
   <div class="oc-sub">第三步：备份与恢复</div>
   <div class="oc-actions">
     <button id="btn-cl-backup" disabled>立即备份到云端</button>
+    <label style="font-size:12px;display:inline-flex;align-items:center;gap:6px">
+      <input type="checkbox" id="cl-ws" checked> 包含工作区
+    </label>
     <button id="btn-cl-refresh" class="oc-btn ghost" disabled>刷新云端列表</button>
     <span id="cl-enc-note" class="oc-hint" style="margin-top:0">本次上传：不加密</span>
   </div>
+  <div class="oc-hint">不勾选「包含工作区」时备份体积小很多，但恢复后工作区文件（会话附件等）不会回来。</div>
   <div id="cl-out" class="oc-out" style="margin-top:8px;display:none"></div>
   <div id="cl-err3" class="oc-err" style="font-size:12px;margin-top:6px"></div>
   <div id="cl-list" style="margin-top:10px"></div>
@@ -1403,14 +1407,17 @@ function clLogout(){
 
 // ---------------------------------------------------------------- 第三步：上传
 function clBackup(){
-  if (!confirm('将在本机创建一份备份并上传到网盘 openclaw-backups/，过程中会占用带宽。\n继续？')) return;
+  var ws = $('cl-ws').checked ? '1' : '0';
+  var scope = ws === '1' ? '配置 + 会话 + 工作区' : '配置 + 会话（不含工作区）';
+  if (!confirm('将在本机创建一份备份并上传到网盘 openclaw-backups/，过程中会占用带宽。\n'
+             + '本次备份范围：' + scope + '\n继续？')) return;
   CL.busy = true;
   clRender();
   clErr('cl-err3', '');
   clOutReset();
-  clOut('① 正在本机打包备份（配置 + 会话 + 工作区）…');
+  clOut('① 正在本机打包备份（' + scope + '）…');
 
-  post(API.backup_create, { name: '', workspace: '1' }, function(r){
+  post(API.backup_create, { name: '', workspace: ws }, function(r){
     var d = jp(r && r.data, {});
     if (!r || !r.ok || !d.file){
       CL.busy = false;
@@ -1451,6 +1458,9 @@ function clPassSave(){
     clErr('cl-err-pass', '两次输入的口令不一致');
     return;
   }
+  // 换口令后，用旧口令加密的云端备份将永久无法解密；与 clPassClear 的口径一致，
+  // 覆盖前必须让用户明确确认。首次设置（CL.passSet 为 false）不打扰。
+  if (CL.passSet && !confirm('本机已保存加密口令，继续将替换它。\n用旧口令加密的云端备份将无法再解密。\n继续？')) return;
   clErr('cl-err-pass', '');
   CL.busy = true;
   clRender();

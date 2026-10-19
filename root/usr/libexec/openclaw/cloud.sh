@@ -2330,6 +2330,7 @@ EOF
 
 cmd_backup_run() {
 	local enabled bin out errf file dir local_path remote pruned rc
+	local local_removed drop_reason dir_phys par_phys
 
 	# ---- 前置：启用 / 组件 / 登录；任一不满足都只记日志 + JSON + exit 0 ----
 	cloud_sched_vals
@@ -2431,8 +2432,49 @@ cmd_backup_run() {
 			pruned=0 ;;
 	esac
 
+	# ---- d) 本机副本：上传已确认成功，删掉本次创建的归档 ----
+	# 定时任务每天跑一次，若不在本地清理，含工作区的 tar.gz 会无限堆积。
+	# 三重校验，任一不满足都保留并记日志；删除失败也不让任务失败。
+	local_removed=false
+	drop_reason=""
+	case "$local_path" in
+		/*) ;;
+		*) drop_reason="本地路径不是绝对路径：$local_path" ;;
+	esac
+	case "$file" in
+		openclaw-*.tar.gz) ;;
+		*) [ -n "$drop_reason" ] || drop_reason="文件名不符合 openclaw-*.tar.gz：$file" ;;
+	esac
+	case "$file" in
+		*/*|*..*) [ -n "$drop_reason" ] || drop_reason="文件名含路径分隔符或 ..：$file" ;;
+	esac
+	if [ -z "$drop_reason" ]; then
+		# 规范化后再比较：cd -P 会解析符号链接，避免 /a/../ 之类绕过。
+		dir_phys="$(oc_canonical_dir "$dir" 2>/dev/null)" || dir_phys=""
+		par_phys="$(oc_canonical_dir "$(dirname "$local_path")" 2>/dev/null)" || par_phys=""
+		if [ -z "$dir_phys" ] || [ -z "$par_phys" ]; then
+			drop_reason="无法解析备份目录：${dir:-?}"
+		else
+			dir_phys="${dir_phys%/}"
+			[ -n "$dir_phys" ] || dir_phys="/"
+			case "$par_phys/" in
+				"$dir_phys"/*) ;;
+				*) drop_reason="本地归档不在备份目录下：$local_path" ;;
+			esac
+		fi
+	fi
+	if [ -n "$drop_reason" ]; then
+		br_log "保留本机副本：$drop_reason"
+	elif rm -f "$local_path" 2>/dev/null; then
+		local_removed=true
+		br_log "已删除本机副本：$file（已确认上传成功，云端保留 $OC_SCH_KEEP 份）"
+	else
+		br_log "警告：删除本机副本失败（$file），已保留"
+	fi
+
 	br_log "完成：已上传 $remote；清理 $pruned 份旧备份（保留 $OC_SCH_KEEP 份）"
-	printf '{"ok":true,"uploaded":"%s","pruned":%s}\n' "$(jstr "$remote")" "$pruned"
+	printf '{"ok":true,"uploaded":"%s","pruned":%s,"local_removed":%s}\n' \
+		"$(jstr "$remote")" "$pruned" "$local_removed"
 	exit 0
 }
 
