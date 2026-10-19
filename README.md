@@ -240,7 +240,7 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 
 ### 7. 一键备份与恢复（新增）
 
-「设置 → 备份」页提供「备份与恢复」卡片：
+「备份与恢复」（顶层菜单）页提供「备份与恢复」卡片：
 
 - 一键创建备份，可选备注名、是否包含工作区；
 - 查看、下载、校验、删除历史备份；
@@ -268,7 +268,7 @@ openclaw.sh restore <文件名> [--no-safety]
 iStoreOS 25.12.x 基于 OpenWrt 25.12，包管理器是 **apk-tools v3**，请安装：
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.6.0-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.7.0-r1.apk
 ```
 
 **不要**装 `...-v2.apk` —— 那是 apk-tools 2.x / Alpine 的格式，不是 OpenWrt 25.12 的
@@ -332,7 +332,7 @@ python3 scripts/build_apk.py
 
 ### 10. 菜单结构与多渠道支持
 
-- **父菜单**：状态 / 设置（基础、迁移、模型、渠道、备份）/ 命令行 / 日志；「检测到已有 OpenClaw 安装」独立为「迁移」页（只提供迁移，统一在本插件自己的目录下运行）。
+- **父菜单**：状态 / 设置（基础、安装、迁移、模型、渠道、更新说明）/ **备份与恢复** / 命令行 / 日志。备份与恢复保持顶层菜单，不放进「设置」子菜单；「检测到已有 OpenClaw 安装」独立为「迁移」页（只提供迁移，统一在本插件自己的目录下运行）。
 - **状态页**：概览条 + 设备配对一键批准；修复按钮收敛为「体检」与「一键修复」（含 `doctor --fix`）；**设置页**拆成多张卡片，模型页按 Base URL 实时拉取上游模型列表（仅自定义 provider 可见）。
 - **多渠道支持**：渠道页统一管理 **Telegram、飞书、Discord、Slack、微信、钉钉、QQ**
   共 7 个平台，可启用渠道、登录并填写凭据；凭据经 0600 临时文件传递，页面不回填明文。
@@ -342,18 +342,41 @@ python3 scripts/build_apk.py
 - `/usr/bin/openclaw` 透传真实 CLI，root 调用自动降权到服务用户，SSH 里改的配置与服务同源。
 - `openclaw.sh unlock` 清理陈旧操作锁（安装中断后 UI 一直显示「运行中」）；锁存活判定已加固，僵尸进程 / pid 复用不再误判，仍有操作在跑时拒绝执行。
 
+### 12. 百度网盘云备份（新增）
+
+「备份与恢复」页按三步引导完成，任何一步都可单独重做：
+
+1. **安装网盘组件** —— 按设备架构（`aarch64` → arm64、`x86_64` → amd64）自动下载对应的
+   静态二进制，约 14 MB，解压后放在数据盘的组件目录里，不依赖 glibc，也不需要额外装依赖。
+2. **登录百度账号** —— 点「获取授权链接」打开百度授权页，授权后复制页面给出的授权码
+   粘贴回页面完成登录。**授权链接 10 分钟内有效**，过期重新获取即可。登录态保存在私有
+   HOME 目录，本插件不会读取或显示其中的 access_token。
+3. **备份 / 恢复** —— 手动备份到网盘，或开启定时备份；恢复时从云端列表里选择备份下载回来。
+
+要点：
+
+- **备份范围**：配置 + 会话 + 工作区（与本地备份一致），**不含** OpenClaw 程序与 Node.js 运行时，
+  因此归档很小，适合放网盘。
+- **口令加密**：可设置口令，上传前用 **AES-256-GCM** 加密，云端只存密文（文件名追加 `.enc`）。
+  口令**只保存在本机**（0600 私有文件），插件**不会把口令保存到网盘**；
+  **口令丢失后备份无法恢复**，请自行另存。
+- **定时备份**：可设每天 / 每周、具体时间与保留份数（1–30）。计划写入系统 crontab，
+  只维护一行且行尾带 `# openclaw-cloud` 标记，**不碰其它行**；轮转清理时也只删符合
+  `openclaw-*.tar.gz[.enc]` 命名规则的备份，其它文件一律不动。
+- 定时任务与安装 / 修复 / 还原共用同一把操作锁，不会重叠执行；失败只记日志，不阻塞后续计划。
+
 ## 安装
 
 ### apk（OpenWrt 25.12+ / apk-tools 3.x）
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.6.0-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.7.0-r1.apk
 ```
 
 ### ipk（opkg）—— **OpenWrt 24.10 及更早、iStoreOS 等 opkg 系统**
 
 ```sh
-opkg install luci-app-openclaw_1.6.0_all.ipk
+opkg install luci-app-openclaw_1.7.0_all.ipk
 ```
 
 在 LuCI / iStore 界面里也可以直接「手动上传安装」这个 ipk。
@@ -377,7 +400,7 @@ opkg install luci-app-openclaw_1.6.0_all.ipk
 ### .run 自解压（无需包管理器）
 
 ```sh
-sh luci-app-openclaw-1.6.0.run
+sh luci-app-openclaw-1.7.0.run
 ```
 
 ### 集成到固件 / SDK 编译
@@ -392,7 +415,7 @@ make package/luci-app-openclaw/compile V=s
 ### 自行生成安装包（无需 SDK）
 
 ```sh
-python3 scripts/build_apk.py --version 1.6.0 --release 1 --sign
+python3 scripts/build_apk.py --version 1.7.0 --release 1 --sign
 python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 / ipk）
 ```
 
@@ -411,7 +434,7 @@ OpenClaw 2026.10 起已删除这三个键。配置里只要出现任意一个，
 （`Unrecognized key`），**网关拒绝启动**。手动删掉一次没有用 —— 下次打开 openclawmgr
 的管理页又会被写回来。
 
-本插件从 1.6.0 起，会在安装和「一键修复」时自动检测并清理这三个键（仅在已安装
+本插件会在安装和「一键修复」时自动检测并清理这三个键（仅在已安装
 OpenClaw >= 2026.10.0 时执行，清理前会备份成 `openclaw.json.legacy.bak.<时间戳>`）。
 
 如果网关仍然起不来，请查看 `<安装目录>/home/.openclaw/openclaw.json` 里是否还有这三个键；
@@ -450,7 +473,7 @@ openclaw.sh unlock                            # 清理陈旧操作锁
 ```
 Makefile                                  OpenWrt 包定义（feeds / SDK）
 luasrc/controller/openclaw.lua            LuCI 路由 + JSON API
-luasrc/view/openclaw/*.htm                状态、设置（基础/迁移/模型/渠道/备份）、命令行、日志
+luasrc/view/openclaw/*.htm                状态、设置（基础/安装/迁移/模型/渠道/更新说明）、备份与恢复、命令行、日志
 root/usr/bin/openclaw                    系统命令行入口（透传 CLI，root 自动降权）
 root/etc/config/openclaw                 UCI 默认配置（独立）
 root/etc/init.d/openclaw                 procd 服务
@@ -462,6 +485,7 @@ root/usr/libexec/openclaw/install.sh   安装流程
 root/usr/libexec/openclaw/models.sh    模型目录、插件安装、Key 写入、设为默认
 root/usr/libexec/openclaw/repair.sh    一键修复（13 项检查）
 root/usr/libexec/openclaw/backup.sh    备份与恢复（归档安全校验 + 安全快照）
+root/usr/libexec/openclaw/cloud.sh     百度网盘云备份（组件安装/登录/加密上传/定时）
 root/usr/libexec/openclaw/channels.sh  微信等渠道
 root/usr/share/openclaw/model-presets.json
 root/usr/share/rpcd/acl.d/luci-app-openclaw.json
