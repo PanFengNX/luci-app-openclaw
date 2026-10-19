@@ -162,7 +162,18 @@ select,input[type=text],input[type=password]{min-height:30px}
   <div class="oc-sub">第一步：网盘组件</div>
   <div class="oc-rowline">
     <span>组件</span>
-    <span><span id="cl-step1-state">读取中…</span> <span id="cl-step1-pill" class="oc-pill" style="display:none"></span></span>
+    <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+      <span id="cl-step1-state">读取中…</span>
+      <span id="cl-step1-pill" class="oc-pill" style="display:none"></span>
+      <button id="btn-cl-cli-check" class="oc-btn ghost" style="display:none">检查更新</button>
+      <button id="btn-cl-cli-update" style="display:none">更新组件</button>
+    </span>
+  </div>
+  <div class="oc-row" id="cl-cli-ver-wrap" style="display:none;margin-top:8px">
+    <label for="cl-cli-ver">指定版本</label>
+    <input type="text" id="cl-cli-ver" maxlength="32" autocomplete="off"
+           spellcheck="false" placeholder="" style="min-width:150px">
+    <span class="oc-hint">留空则用探测到的最新版</span>
   </div>
   <div class="oc-actions">
     <button id="btn-cl-install" disabled>安装网盘组件（约 14 MB）</button>
@@ -254,18 +265,17 @@ select,input[type=text],input[type=password]{min-height:30px}
 
   <!-- 定时备份 -->
   <div class="oc-sub">定时备份</div>
-  <div class="oc-hint">该功能将在下一版本启用（当前后端只提供读取与 crontab 应用，尚无写入定时参数的接口）。</div>
   <div class="oc-row">
     <label>启用</label>
-    <input type="checkbox" id="cl-sch-enabled" disabled> <span class="oc-hint">勾选后按下面的周期自动备份</span>
+    <input type="checkbox" id="cl-sch-enabled"> <span class="oc-hint">勾选后按下面的周期自动备份</span>
   </div>
   <div class="oc-row">
     <label>周期</label>
-    <select id="cl-sch-period" disabled>
+    <select id="cl-sch-period">
       <option value="daily">每天</option>
       <option value="weekly">每周</option>
     </select>
-    <select id="cl-sch-weekday" disabled style="min-width:110px;margin-left:6px">
+    <select id="cl-sch-weekday" style="min-width:110px;margin-left:6px">
       <option value="0">周日</option><option value="1">周一</option><option value="2">周二</option>
       <option value="3">周三</option><option value="4">周四</option><option value="5">周五</option>
       <option value="6">周六</option>
@@ -273,16 +283,17 @@ select,input[type=text],input[type=password]{min-height:30px}
   </div>
   <div class="oc-row">
     <label>时间</label>
-    <input type="time" id="cl-sch-time" disabled>
+    <input type="time" id="cl-sch-time">
   </div>
   <div class="oc-row">
     <label>保留份数</label>
-    <input type="number" id="cl-sch-keep" min="1" max="30" value="7" disabled style="min-width:90px">
+    <input type="number" id="cl-sch-keep" min="1" max="30" value="7" style="min-width:90px">
   </div>
   <div class="oc-actions">
-    <button id="btn-cl-sch-save" disabled>保存定时设置</button>
+    <button id="btn-cl-sch-save">保存定时设置</button>
   </div>
   <div id="cl-sch-hint" class="oc-hint"></div>
+  <div id="cl-sch-note" class="oc-hint"></div>
   <div id="cl-err-sch" class="oc-err" style="font-size:12px;margin-top:6px"></div>
 </div>
 
@@ -325,7 +336,10 @@ var API = {
   cloud_pass_clear: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_pass_clear")%>',
   cloud_encrypt_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_encrypt_status")%>',
   cloud_encrypt_set: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_encrypt_set")%>',
-  cloud_schedule_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_schedule_status")%>'
+  cloud_schedule_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_schedule_status")%>',
+  cloud_schedule_set: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_schedule_set")%>',
+  cloud_cli_check: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_cli_check")%>',
+  cloud_cli_update: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_cli_update")%>'
 };
 
 function $(id){ return document.getElementById(id); }
@@ -542,7 +556,12 @@ var CL = {
   encKnown: false,     // encrypt-status 是否已成功读取
   busy: false,
   arch: '',
-  verText: ''
+  verText: '',
+  cliUpdateTo: '',     // cli-check 探测到的可更新版本（空 = 未知 / 已最新）
+  cliLatest: '',       // 最近一次 cli-check 的 latest（只用于展示）
+  cliWarn: '',         // 更新后要保留在第一步错误区的 warn（clStatus 会清空该区）
+  schBusy: false,      // 定时设置保存中（只影响定时区块）
+  schNote: ''          // 保存成功后的一句说明
 };
 
 function clErr(id, msg){
@@ -581,15 +600,11 @@ function clFmtTime(v){
   return s;
 }
 
-// 版本号只取 x.y.z；架构直接来自 cloud.sh status 的 arch 字段。
+// 版本号只取 x.y.z；架构单独展示（状态行写成「已安装 vX（arch）」）。
 function clVersion(v){
-  var out = '';
-  if (v){
-    var m = String(v).match(/[0-9]+(\.[0-9]+)+/);
-    out = m ? ('v' + m[0]) : String(v);
-  }
-  if (CL.arch) out = out ? (out + '，' + CL.arch) : CL.arch;
-  return out;
+  if (!v) return '';
+  var m = String(v).match(/[0-9]+(\.[0-9]+)+/);
+  return m ? ('v' + m[0]) : String(v);
 }
 
 // ---------------------------------------------------------------- 状态渲染
@@ -600,22 +615,45 @@ function clRender(){
   // 第一步
   var st   = $('cl-step1-state');
   var pill = $('cl-step1-pill');
+  var arch = CL.arch ? ('（' + CL.arch + '）') : '';
   if (!CL.statusKnown){
     st.textContent = CL.statusTried ? '读取失败' : '读取中…';
     pill.style.display = 'none';
   } else if (inst){
-    var vt = CL.verText ? ('（' + CL.verText + '）') : '';
-    st.textContent = '已安装' + vt;
-    pill.style.display = '';
-    pill.className = 'oc-pill ok';
-    pill.textContent = '✓';
+    st.textContent = '已安装' + (CL.verText ? (' ' + CL.verText) : '') + arch;
+    // 有 cli-check 结论时保留结论药丸；否则只显示一个「已安装」对勾。
+    if (!CL.cliLatest){
+      pill.style.display = '';
+      pill.className = 'oc-pill ok';
+      pill.textContent = '✓';
+    }
   } else {
-    st.textContent = '未安装';
+    st.textContent = '未安装' + arch;
     pill.style.display = 'none';
   }
   var btnInstall = $('btn-cl-install');
   btnInstall.style.display = (CL.statusKnown && inst) ? 'none' : '';
   btnInstall.disabled = !CL.statusKnown || inst || CL.busy;
+
+  // 检查更新 / 更新组件：只在已安装时出现。
+  var showCli = CL.statusKnown && inst;
+  var btnCheck  = $('btn-cl-cli-check');
+  var btnUpdate = $('btn-cl-cli-update');
+  btnCheck.style.display  = showCli ? '' : 'none';
+  btnUpdate.style.display = showCli ? '' : 'none';
+  $('cl-cli-ver-wrap').style.display = showCli ? '' : 'none';
+  btnCheck.disabled  = !showCli || CL.busy;
+  // 需求：检查到更新后才启用「更新组件」。填了指定版本时也允许直接更新
+  // （降级 / 固定版本是合理诉求），最终仍由服务端做白名单校验。
+  var typed = ($('cl-cli-ver').value || '').replace(/^\s+|\s+$/g, '');
+  btnUpdate.disabled = !showCli || CL.busy || (!CL.cliUpdateTo && !typed);
+  // 探测到新版本时按钮文字跟着变；执行期间由调用方改成「正在更新…」，
+  // 所以这里只在空闲时改写，避免把进度文案冲掉。
+  if (!CL.busy){
+    btnUpdate.textContent = CL.cliUpdateTo ? ('更新到 ' + CL.cliUpdateTo) : '更新组件';
+  }
+  $('cl-cli-ver').disabled = !showCli || CL.busy;
+  $('cl-cli-ver').placeholder = CL.verText || '';
 
   // 第二步：未登录时始终显示登录区；第一步未完成时整体禁用并给出提示。
   $('cl-login-box').style.display   = logged ? 'none' : '';
@@ -634,8 +672,10 @@ function clRender(){
   $('btn-cl-pass-clear').disabled = !inst || CL.busy || !CL.passSet;
   // 加密开关只写 UCI，不依赖网盘组件；执行期间统一置灰。
   clRenderEncrypt();
-  // 定时备份：后端没有写入定时参数的接口，保存按钮始终保持禁用。
-  $('btn-cl-sch-save').disabled = true;
+  // 定时备份只写 UCI + crontab，组件没装也能保存（会提示执行会失败），
+  // 所以这里不跟 inst / logged 绑定，只跟本区块自己的 busy 走。
+  clRenderSch();
+  clSchNote();
 
   // 列表里的「恢复 / 删除」不在 clRender 的直接管辖内，这里统一跟着 busy 走，
   // 避免执行期间重复点击。
@@ -675,7 +715,12 @@ function clStatus(){
     CL.verText     = clVersion(cli.version);
     $('cl-user').textContent = auth.user || '（后端未返回用户名）';
     $('cl-exp').textContent  = auth.expires || '未知';
-    clErr('cl-err1', '');
+    // 组件更新后如果后端报告「登录信息丢失」，这条 warn 要保留在第一步，
+    // 不能被下面的「读取成功就清空错误区」抹掉。显示一次后即清掉，
+    // 之后再刷新状态就按真实登录态显示。
+    var warn = CL.cliWarn;
+    CL.cliWarn = '';
+    clErr('cl-err1', warn || '');
     clRender();
     if (CL.installed && CL.logged) clLoadList();
     else clEmptyList(CL.installed ? '请先登录百度网盘' : '请先安装组件');
@@ -779,6 +824,45 @@ function clEncryptToggle(){
   });
 }
 
+// ---------------------------------------------------------------- 定时备份
+// 控件形态：启用 = checkbox；周期 = select(daily|weekly)；星期 = select(0-6)；
+// 时间 = 单个 <input type="time">（值为 "HH:MM"）；保留份数 = number。
+// 服务端字段与控件一一对应，时间在提交前拆成 hour / minute。
+var SCH_WD = ['周日','周一','周二','周三','周四','周五','周六'];
+
+function clSchSyncWeekday(){
+  // 只有「每周」才显示星期几；切换周期时立即生效（不用等下一次回填）。
+  $('cl-sch-weekday').style.display =
+    ($('cl-sch-period').value === 'weekly') ? '' : 'none';
+}
+
+// 定时区块的可用性：只跟本区块自己的 busy 走。组件未安装 / 未登录时仍允许
+// 保存（后端只写 UCI + crontab），但由 clSchNote() 给出会执行失败的提示。
+function clRenderSch(){
+  var busy = CL.schBusy === true;
+  $('cl-sch-enabled').disabled = busy;
+  $('cl-sch-period').disabled  = busy;
+  $('cl-sch-weekday').disabled = busy;
+  $('cl-sch-time').disabled    = busy;
+  $('cl-sch-keep').disabled    = busy;
+  $('btn-cl-sch-save').disabled = busy;
+}
+
+function clSchNote(){
+  var el = $('cl-sch-note');
+  if (!el) return;
+  var parts = [];
+  if (CL.schNote) parts.push(CL.schNote);
+  // 勾了启用但当前跑不起来：保存本身没问题（后端只写 UCI + crontab），
+  // 但要让用户知道这次定时任务执行时会失败。
+  if ($('cl-sch-enabled').checked && CL.statusKnown && (!CL.installed || !CL.logged)){
+    parts.push(CL.installed
+      ? '组件未登录，定时任务会执行失败。'
+      : '组件未安装，定时任务会执行失败。');
+  }
+  el.textContent = parts.join(' ');
+}
+
 function clSchStatus(){
   get(API.cloud_schedule_status, function(r){
     if (!r || !r.ok){
@@ -788,16 +872,80 @@ function clSchStatus(){
     var d = r.data || {};
     $('cl-sch-enabled').checked = (d.enabled === true);
     $('cl-sch-period').value = (d.period === 'weekly') ? 'weekly' : 'daily';
-    $('cl-sch-weekday').value = String(d.weekday === undefined || d.weekday === null ? 0 : d.weekday);
-    var hh = ('0' + (d.hour === undefined || d.hour === null ? 4 : d.hour)).slice(-2);
-    var mm = ('0' + (d.minute === undefined || d.minute === null ? 30 : d.minute)).slice(-2);
-    $('cl-sch-time').value = hh + ':' + mm;
-    $('cl-sch-keep').value = (d.keep === undefined || d.keep === null) ? 7 : d.keep;
-    // 「每周」才显示星期几（只读展示；控件本身是禁用的）。
-    $('cl-sch-weekday').style.display = ($('cl-sch-period').value === 'weekly') ? '' : 'none';
-    $('cl-sch-hint').textContent = d.installed
-      ? ('当前 crontab：' + (d.line || ''))
-      : '当前未安装定时任务。';
+    var wd = parseInt(d.weekday, 10);
+    if (isNaN(wd) || wd < 0 || wd > 6) wd = 0;
+    $('cl-sch-weekday').value = String(wd);
+    var hh = parseInt(d.hour, 10);
+    var mm = parseInt(d.minute, 10);
+    if (isNaN(hh) || hh < 0 || hh > 23) hh = 4;
+    if (isNaN(mm) || mm < 0 || mm > 59) mm = 30;
+    $('cl-sch-time').value = ('0' + hh).slice(-2) + ':' + ('0' + mm).slice(-2);
+    var kp = parseInt(d.keep, 10);
+    $('cl-sch-keep').value = (isNaN(kp) || kp < 1 || kp > 30) ? 7 : kp;
+    clSchSyncWeekday();
+    // crontab 行由后端给出；为空说明当前没有任何生效的定时任务。
+    $('cl-sch-hint').textContent = (d.line && String(d.line).length)
+      ? ('当前 crontab：' + d.line)
+      : '当前未启用';
+    clRenderSch();
+    clSchNote();
+  });
+}
+
+function clSchSave(){
+  var hh = $('cl-sch-time').value || '';
+  var m  = hh.match(/^([0-9]{1,2}):([0-9]{1,2})$/);
+  var hour = m ? parseInt(m[1], 10) : NaN;
+  var min  = m ? parseInt(m[2], 10) : NaN;
+  if (isNaN(hour) || hour < 0 || hour > 23 || isNaN(min) || min < 0 || min > 59){
+    clErr('cl-err-sch', '时间不合法：小时需为 0-23，分钟需为 0-59');
+    return;
+  }
+  var keep = parseInt($('cl-sch-keep').value, 10);
+  if (isNaN(keep) || keep < 1 || keep > 30){
+    clErr('cl-err-sch', '保留份数不合法：需为 1-30');
+    return;
+  }
+  var enabled = $('cl-sch-enabled').checked ? '1' : '0';
+  var period  = $('cl-sch-period').value === 'weekly' ? 'weekly' : 'daily';
+  var weekday = parseInt($('cl-sch-weekday').value, 10);
+  if (isNaN(weekday) || weekday < 0 || weekday > 6) weekday = 0;
+
+  clErr('cl-err-sch', '');
+  CL.schNote = '';
+  CL.schBusy = true;
+  clRenderSch();
+  clSchNote();
+
+  post(API.cloud_schedule_set, {
+    enabled: enabled, period: period, weekday: String(weekday),
+    hour: String(hour), minute: String(min), keep: String(keep)
+  }, function(r){
+    CL.schBusy = false;
+    if (!r || !r.ok){
+      clErr('cl-err-sch', '保存定时设置失败：' +
+        ((r && r.error) || '未知错误') + clNet(r));
+      clRenderSch();
+      return;
+    }
+    if (enabled === '1'){
+      // 以后端回读值为准（schedule-set 会回读 UCI）；字段缺失时退回本次提交值。
+      var sd = (r.data && typeof r.data === 'object') ? r.data : {};
+      var sPeriod = (sd.period === 'weekly' || sd.period === 'daily') ? sd.period : period;
+      var sWd = parseInt(sd.weekday, 10);
+      if (isNaN(sWd) || sWd < 0 || sWd > 6) sWd = weekday;
+      var sH = parseInt(sd.hour, 10);
+      if (isNaN(sH) || sH < 0 || sH > 23) sH = hour;
+      var sM = parseInt(sd.minute, 10);
+      if (isNaN(sM) || sM < 0 || sM > 59) sM = min;
+      var when = (sPeriod === 'weekly') ? ('每周' + (SCH_WD[sWd] || '')) : '每天';
+      CL.schNote = '将在' + when + ' ' + ('0' + sH).slice(-2) + ':' +
+        ('0' + sM).slice(-2) + ' 自动备份到网盘';
+    }
+    clErr('cl-err-sch', '');
+    clRenderSch();
+    // 回读一次：crontab 行与生效参数以服务端为准，不用前端推断。
+    clSchStatus();
   });
 }
 
@@ -1058,6 +1206,7 @@ function clInstall(){
   CL.busy = true;
   btn.disabled = true;
   btn.textContent = '正在下载并安装…';
+  CL.cliWarn = '';
   clErr('cl-err1', '');
   hint.style.display = '';
   hint.textContent = '已等待 0 秒…';
@@ -1080,6 +1229,103 @@ function clInstall(){
       clErr('cl-err1', (r && r.error) || '安装失败' + clNet(r));
       clRender();
     }
+  });
+}
+
+// ---------------------------------------------------------------- 第一步：检查更新 / 更新组件
+// cli-check 只探测官方 CDN 上的可用版本（不下载），cli-update 会重新下载
+// 并安装组件。登录态与加密口令在独立目录，更新器不写不删。
+function clCliCheck(){
+  var btn = $('btn-cl-cli-check');
+  var old = btn.textContent;
+  CL.busy = true;
+  CL.cliWarn = '';
+  clErr('cl-err1', '');
+  btn.textContent = '检查中…';
+  clRender();
+
+  get(API.cloud_cli_check, function(r){
+    CL.busy = false;
+    btn.textContent = old;
+    clRender();
+    if (!r || !r.ok){
+      clErr('cl-err1', '检查更新失败：' + ((r && r.error) || '未知错误') + clNet(r));
+      return;
+    }
+    var d = r.data || {};
+    var latest = clVersion(d.latest);
+    CL.cliLatest = latest;
+    var pill = $('cl-step1-pill');
+    if (d.update === true && latest){
+      // 有更新：提示可更新，并把「更新组件」按钮切到「更新到 vX」。
+      CL.cliUpdateTo = latest;
+      clRender();
+      pill.style.display = '';
+      pill.className = 'oc-pill warn';
+      pill.textContent = '可更新到 ' + latest;
+    } else {
+      CL.cliUpdateTo = '';
+      clRender();
+      pill.style.display = '';
+      pill.className = 'oc-pill ok';
+      pill.textContent = '已是最新';
+    }
+  });
+}
+
+function clCliUpdate(){
+  var typed = ($('cl-cli-ver').value || '').replace(/^\s+|\s+$/g, '');
+  // 前端只做形态校验；服务端还会再校验一次，并且非法值不会拼进命令。
+  if (typed && !/^[0-9A-Za-z._-]{1,32}$/.test(typed)){
+    clErr('cl-err1', '版本号格式不正确（只允许字母、数字与 . _ -，长度 1-32）');
+    return;
+  }
+  var ver = typed || CL.cliUpdateTo || '';
+  var msg = '将重新下载并安装网盘组件，约 14 MB；\n'
+          + '登录状态与加密口令保存在独立目录，不会被覆盖。\n'
+          + (ver ? ('目标版本：' + ver + '\n') : '目标版本：探测到的最新版\n')
+          + '继续？';
+  if (!confirm(msg)) return;
+
+  var btn = $('btn-cl-cli-update');
+  var hint = $('cl-install-hint');
+  CL.busy = true;
+  btn.textContent = '正在更新…';
+  clErr('cl-err1', '');
+  hint.style.display = '';
+  hint.textContent = '已等待 0 秒…';
+  clRender();
+
+  var t0 = Date.now();
+  var timer = setInterval(function(){
+    hint.textContent = '已等待 ' + Math.round((Date.now() - t0) / 1000) + ' 秒…';
+  }, 1000);
+
+  var body = ver ? { version: ver } : {};
+  post(API.cloud_cli_update, body, function(r){
+    clearInterval(timer);
+    CL.busy = false;
+    btn.textContent = '更新组件';
+    if (!r || !r.ok){
+      hint.style.display = 'none';
+      clErr('cl-err1', '更新失败：' + ((r && r.error) || '未知错误') + clNet(r));
+      clRender();
+      return;
+    }
+    var d = r.data || {};
+    var to = clVersion(d.to || d.current || ver);
+    CL.cliUpdateTo = '';
+    CL.cliLatest = '';
+    // warn（登录信息丢失）要在 clStatus() 之后仍然可见：clStatus 成功时会
+    // 清空 cl-err1，所以先记到 CL.cliWarn，由 clStatus 回填。
+    CL.cliWarn = d.warn ? String(d.warn) : '';
+    var pill = $('cl-step1-pill');
+    pill.style.display = 'none';
+    hint.textContent = to ? ('已更新到 ' + to) : '更新完成。';
+    clRender();
+    // 版本号与登录态都以服务端回读为准；若 warn 存在，这一步会刷新出
+    // 「未登录」，并保留上面的提示。
+    clStatus();
   });
 }
 
@@ -1283,6 +1529,10 @@ document.addEventListener('click', function(e){
 
 // ---------------------------------------------------------------- 事件绑定
 $('btn-cl-install').onclick    = clInstall;
+$('btn-cl-cli-check').onclick  = clCliCheck;
+$('btn-cl-cli-update').onclick = clCliUpdate;
+// 指定版本输入框只影响「更新组件」按钮的可用性；不在这里发请求。
+$('cl-cli-ver').oninput = function(){ clRender(); };
 $('btn-cl-loginurl').onclick   = clLoginUrl;
 $('btn-cl-logincode').onclick  = clLoginCode;
 $('btn-cl-logout').onclick     = clLogout;
@@ -1291,7 +1541,9 @@ $('btn-cl-refresh').onclick    = function(){ clLoadList(); };
 $('btn-cl-pass-save').onclick  = clPassSave;
 $('btn-cl-pass-clear').onclick = clPassClear;
 $('cl-enc-on').onchange        = clEncryptToggle;
-// 定时备份的保存按钮保持禁用（后端缺写入接口），这里不绑定任何动作。
+$('cl-sch-period').onchange    = function(){ clSchSyncWeekday(); };
+$('cl-sch-enabled').onchange   = function(){ CL.schNote = ''; clSchNote(); };
+$('btn-cl-sch-save').onclick   = clSchSave;
 
 // 初始渲染 + 只读查询（不会触发任何上传 / 下载）
 clRender();

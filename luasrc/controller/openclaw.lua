@@ -81,6 +81,9 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "cloud_encrypt_status"}, call("api_cloud_encrypt_status")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_encrypt_set"},    call("api_cloud_encrypt_set")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_schedule_status"}, call("api_cloud_schedule_status")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_schedule_set"},    call("api_cloud_schedule_set")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_cli_check"},      call("api_cloud_cli_check")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_cli_update"},     call("api_cloud_cli_update")).leaf = true
 	-- 诊断包下载（openclaw.sh export）：生成后立刻作为附件回传
 	entry({"admin", "services", "openclaw", "api", "export"}, call("api_export")).leaf = true
 end
@@ -1219,10 +1222,109 @@ function api_cloud_encrypt_set()
 	cloud_reply(cloud_exec_stdin("set-encrypt", v .. "\n"))
 end
 
--- 只读：给界面回填当前定时设置。cloud.sh 没有「保存定时参数」的动作
--- （schedule-apply 只重新读取 UCI），所以本批不提供写接口，界面置灰。
+-- 只读：给界面回填当前定时设置。写入口在下面的 api_cloud_schedule_set。
 function api_cloud_schedule_status()
 	cloud_reply(cloud_exec("schedule-status"))
+end
+
+-- ------------------------------------------------- 组件检查更新 / 更新组件
+-- cli-check 只探测官方 CDN 上的可用版本（不下载、不安装），因此允许 GET；
+-- cli-update 会下载并执行安装器，必须 POST。
+function api_cloud_cli_check()
+	cloud_reply(cloud_exec("cli-check"))
+end
+
+-- 版本号先按形状白名单校验，再经 q() 单引号转义交给 shell。
+-- Lua 模式里 % 是转义符：%% 表示字面量 %，%- 表示字面量 -。
+-- 与需求给定的 ^[0-9A-Za-z._%-]+$ 等价（字母、数字、. _ % -，长度 1-32）；
+-- cloud.sh 的 cloud_version_valid() 还会再收一次（它不接受 %），非法值
+-- 最终由后端拒绝，且始终经过 q() 转义，不会改变命令结构。
+local CLI_VER = "^[0-9A-Za-z._%%%-]+$"
+
+function api_cloud_cli_update()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	local ver = http.formvalue("version") or ""
+	local args = "cli-update"
+	if ver ~= "" then
+		if #ver > 32 or not ver:match(CLI_VER) then
+			out({ ok = false, error = "版本号不合法（只允许字母、数字与 . _ -，长度 1-32）" })
+			return
+		end
+		args = args .. " " .. q(ver)
+	end
+	-- 下载 + 安装约 14 MB，可能超过 uhttpd 的请求超时；前端按长任务处理。
+	cloud_reply(cloud_exec(args))
+end
+
+-- ---------------------------------------------------------------- 定时备份
+-- schedule-set 从 stdin 读 "key=value" 行。六个字段在控制器侧逐个校验，
+-- 与 cloud.sh 的 cloud_sched_check() 保持同一口径（严格十进制整数 + 区间），
+-- 任一不合法就直接返回，绝不把半套参数交给后端。
+--
+-- 数值字段先过 ^%d+$ 再做 tonumber()：Lua 5.1 的 tonumber 会接受 "0x1F"、
+-- " 5 "、"5.0" 这类写法，只靠区间判断会把它们放过去。
+local SCH_NUM = {
+	weekday = { 0, 6 },
+	hour    = { 0, 23 },
+	minute  = { 0, 59 },
+	keep    = { 1, 30 },
+}
+
+local function sch_int(key, v)
+	if type(v) ~= "string" or #v == 0 or #v > 3 or not v:match("^%d+$") then
+		return nil
+	end
+	local n = tonumber(v)
+	local lo, hi = SCH_NUM[key][1], SCH_NUM[key][2]
+	if not n or n < lo or n > hi then return nil end
+	return n
+end
+
+function api_cloud_schedule_set()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+
+	local enabled = http.formvalue("enabled") or ""
+	if enabled ~= "0" and enabled ~= "1" then
+		out({ ok = false, error = "参数不合法：enabled" })
+		return
+	end
+
+	local period = http.formvalue("period") or ""
+	if period ~= "daily" and period ~= "weekly" then
+		out({ ok = false, error = "参数不合法：period" })
+		return
+	end
+
+	local nums = {}
+	for _, key in ipairs({ "weekday", "hour", "minute", "keep" }) do
+		local n = sch_int(key, http.formvalue(key))
+		if n == nil then
+			out({ ok = false, error = "参数不合法：" .. key })
+			return
+		end
+		nums[key] = n
+	end
+
+	-- 逐行 key=value，与 cloud.sh 的解析格式一致；值全部来自上面的白名单，
+	-- 不含换行 / 控制字符，因此不可能注入额外的键。
+	local text = table.concat({
+		"enabled=" .. enabled,
+		"period=" .. period,
+		"weekday=" .. nums.weekday,
+		"hour=" .. nums.hour,
+		"minute=" .. nums.minute,
+		"keep=" .. nums.keep,
+	}, "\n") .. "\n"
+
+	-- 复用已有的 stdin 通道：私有 rundir 下 0600 临时文件 + shell 重定向，
+	-- 用完立刻删除（cloud_exec_stdin 内部负责）。
+	cloud_reply(cloud_exec_stdin("schedule-set", text))
 end
 
 -- ---------------------------------------------------------------- export
