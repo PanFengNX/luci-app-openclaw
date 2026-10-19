@@ -127,6 +127,22 @@ select,input[type=text],input[type=password]{min-height:30px}
   复制前若目标已有数据，会自动做一次安全快照。迁移完成后本插件只使用自己的目录，不再依赖源目录。
 </div>
 
+<div class="oc-card" id="oc-mig-card">
+  <div class="oc-head">
+    <h3>手动指定目录迁移</h3>
+  </div>
+  <div class="oc-hint">
+    如果自动检测没有列出你的旧安装（目录名或层级不同），可以直接填写它的绝对路径。
+    迁移会把其中的程序与数据<b>复制</b>到本插件目录，<b>源目录保持原样</b>，确认无误后可自行删除；
+    复制前若目标已有数据，会自动做一次安全快照。
+  </div>
+  <div class="oc-rowline" style="margin-top:10px">
+    <input type="text" id="mig-dir" class="oc-addr" aria-label="要迁移的源目录" placeholder="/mnt/data/OpenClawMgr" style="flex:1;min-width:0">
+    <button id="btn-mig-manual">迁移这个目录</button>
+  </div>
+  <div id="oc-mig-log" class="oc-log" style="display:none;height:auto;max-height:220px;margin-top:10px"></div>
+</div>
+
 <div class="oc-card" id="oc-disc-card" style="display:none">
   <div class="oc-head">
     <h3>检测到已有 OpenClaw 安装</h3>
@@ -157,6 +173,8 @@ var API = {
   discover: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","discover")%>',
   node_existing: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","node_existing")%>',
   migrate: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate")%>',
+  migrate_start: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate_start")%>',
+  migrate_poll: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate_poll")%>',
   doctor: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>',
   repair: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","repair")%>',
   diag_run: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_run")%>',
@@ -184,6 +202,8 @@ function post(url, data, cb){
   var x = new XMLHttpRequest();
   x.open('POST', url, true);
   x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+  // 有界等待：uhttpd 卡住时不能让回调永远不来
+  x.timeout = 20000;
   var fin = once(cb);
   x.onreadystatechange = function(){
     if (x.readyState == 4) { try { fin(JSON.parse(x.responseText)); } catch(e){ fin({ok:false}); } }
@@ -198,6 +218,8 @@ function post(url, data, cb){
 function get(url, cb){
   var x = new XMLHttpRequest();
   x.open('GET', url, true);
+  // 轮询同样需要超时，否则一次挂住的请求会让轮询静默停住
+  x.timeout = 20000;
   var fin = once(cb);
   x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
   x.onerror   = function(){ fin({ok:false, net:true}); };
@@ -266,7 +288,8 @@ function discRow(e){
 
   var bMig = document.createElement('button');
   bMig.textContent = '迁移';
-  bMig.onclick = function(){ doMigrate(e); };
+  if (migBusy) bMig.disabled = true;
+  bMig.onclick = function(){ doMigrate(e.path, discSay); };
   acts.appendChild(bMig);
 
   wrap.appendChild(acts);
@@ -298,44 +321,179 @@ function loadDiscover(){
   });
 }
 
-function doMigrate(e){
-  if (!confirm('将把\n\n  ' + e.path + '\n\n的内容复制到本插件的安装目录。\n'
+var MIG_POLL_MS = 1500;
+var MIG_MAX_FAILS = 8;             // 连续轮询失败上限（网络问题）
+var MIG_MAX_MS = 30 * 60 * 1000;   // 轮询硬上限：30 分钟
+var migBusy = false;
+
+function migSayManual(msg, bad){
+  var box = $('oc-mig-log');
+  if (!box) return;
+  box.style.display = '';
+  box.textContent = msg;                     // 服务端数据只进 textContent
+  box.style.color = bad ? '#ffb4b4' : '';
+}
+
+// 迁移期间禁用两个入口的所有按钮（后端也会 busy 拒绝，这里只是体验）
+function setMigBusy(b){
+  migBusy = b;
+  var bm = $('btn-mig-manual'), inp = $('mig-dir');
+  if (bm) bm.disabled = b;
+  if (inp) inp.disabled = b;
+  var host = $('oc-disc-list');
+  if (!host) return;
+  var btns = host.getElementsByTagName('button');
+  for (var i = 0; i < btns.length; i++) btns[i].disabled = b;
+}
+
+// 后台日志里进度行与最终结果混在一起，但最终结果一定是单独一行 JSON。
+// 从后往前找第一条能解析的对象，避免把进度行当成结果。
+function migResult(output){
+  var s = String(output == null ? '' : output).replace(/\r/g, '');
+  var lines = s.split('\n');
+  for (var i = lines.length - 1; i >= 0; i--) {
+    var t = lines[i].replace(/^\s+|\s+$/g, '');
+    if (!t || t.charAt(0) !== '{') continue;
+    var j = jp(t, null);
+    if (j && typeof j === 'object') return j;
+  }
+  return null;
+}
+
+function migDone(path, d, say){
+  var o = migResult(d && d.output);
+  if (!o) {
+    var tail = String((d && d.output) || '');
+    if (!tail) {
+      // 没有日志也没有结果：通常是 /tmp 被清理或设备重启过
+      say('未找到本次迁移的记录（可能已重启或临时目录被清理）。\n'
+        + '请重新发起迁移。源目录 ' + path + ' 未被改动。', true);
+      return;
+    }
+    say('迁移失败：服务端未返回结果（rc=' + ((d && d.rc) || '?') + '）\n'
+      + tail
+      + '\n源目录 ' + path + ' 未被改动，可稍后重试。', true);
+    return;
+  }
+  if (!o.ok) {
+    // 错误原文完整展示，不截断成一句"迁移失败"
+    var msg = '迁移失败：' + (o.error || '未知错误');
+    if (/不是有效的 OpenClaw 安装/.test(String(o.error || ''))) {
+      msg += '\n该目录下需要有 .openclaw/openclaw.json（或 home/.openclaw/openclaw.json、data/.openclaw/openclaw.json）。';
+    }
+    msg += '\n源目录 ' + path + ' 未被改动，可稍后重试。';
+    say(msg, true);
+    return;
+  }
+  // 后端在来源位于安装目录之外时会把数据/程序目录搬到默认位置并清掉
+  // 对应的 UCI 项；relocations 用来如实展示「已从 X 搬到 Y」。
+  var rel = o.relocations || [];
+  var extra = '';
+  for (var i = 0; i < rel.length; i++) {
+    var it = rel[i] || {};
+    if (it.key && it.from && it.to) {
+      extra += '\n已重定位 ' + it.key + '：' + it.from + ' → ' + it.to;
+    }
+  }
+  say('迁移完成：' + (o.from || path) + ' → ' + (o.to || '本插件目录')
+    + extra
+    + '\n源目录保持原样，确认无误后可自行删除。');
+}
+
+// 启动后每 1.5s 轮询一次；连续失败达到上限或超过硬上限就停止。
+function pollMigrate(path, say, started, fails){
+  if (Date.now() - started > MIG_MAX_MS) {
+    setMigBusy(false);
+    say('迁移已超过 ' + Math.round(MIG_MAX_MS / 60000) + ' 分钟，已停止查询。\n'
+      + '迁移可能仍在后台继续；请稍后刷新本页确认结果。源目录 ' + path + ' 未被改动。', true);
+    return;
+  }
+  setTimeout(function(){
+    var elapsed = Math.max(0, Math.round((Date.now() - started) / 1000));
+    get(API.migrate_poll, function(r){
+      var d = jp((r && r.data) || '{}', {});
+      if (!r || r.ok === false || r.net || !d || typeof d.done === 'undefined') {
+        fails = (fails || 0) + 1;
+        if (fails >= MIG_MAX_FAILS) {
+          setMigBusy(false);
+          say('迁移状态查询连续失败 ' + fails + ' 次，已停止。\n'
+            + '迁移可能仍在后台继续；请稍后刷新本页确认结果。源目录 ' + path + ' 未被改动。', true);
+          return;
+        }
+        say('迁移中…（已 ' + elapsed + ' 秒，状态查询失败，重试中）\n' + path + ' → 本插件目录');
+        pollMigrate(path, say, started, fails);
+        return;
+      }
+      if (!d.done) {
+        say('迁移中…（已 ' + elapsed + ' 秒）\n' + path + ' → 本插件目录\n（复制 + 原子换入，请勿关闭页面）');
+        pollMigrate(path, say, started, 0);
+        return;
+      }
+      setMigBusy(false);
+      migDone(path, d, say);
+      loadInfo();
+      setTimeout(loadDiscover, 1500);
+    });
+  }, MIG_POLL_MS);
+}
+
+function doMigrate(path, say){
+  if (!confirm('将把\n\n  ' + path + '\n\n的内容复制到本插件的安装目录。\n'
              + '· 源目录保持不动，确认无误后你可以自行删除；\n'
              + '· 迁移完成后本插件只使用自己的目录，不再依赖源目录；\n'
              + '· 若数据目录 / 程序目录当前指向安装目录之外，会一并搬到默认位置并清除对应的 UCI 设置；\n'
              + '· 目标已有的数据会先自动做一次安全快照；\n'
              + '· 大目录可能需要数分钟，期间请勿关闭页面。\n\n继续？')) return;
 
-  // 重操作：先禁用卡片上所有按钮，避免并发点击（后端也会取锁拒绝）
-  var btns = $('oc-disc-list').getElementsByTagName('button');
-  for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
-  discSay('正在迁移 ' + e.path + ' → 本插件目录 …\n（复制 + 原子换入，可能需要数分钟，请勿关闭页面）');
+  // 重操作：先禁用所有迁移按钮，避免并发点击（后端也会取锁拒绝）
+  setMigBusy(true);
+  say('迁移中…（已 0 秒）\n' + path + ' → 本插件目录\n（正在启动后台任务）');
 
-  post(API.migrate, { dir: e.path }, function(r){
+  post(API.migrate_start, { dir: path }, function(r){
     var d = jp((r && r.data) || '{}', {});
-    if (!r || r.ok === false || !d.ok){
-      discSay('迁移失败：' + (d.error || (r && r.error) || '服务无响应，请重试')
-        + '\n源目录 ' + e.path + ' 未被改动，可稍后重试。', true);
-    } else {
-      // 后端在来源位于安装目录之外时会把数据/程序目录搬到默认位置并清掉
-      // 对应的 UCI 项；relocations 用来如实展示「已从 X 搬到 Y」。
-      var rel = d.relocations || [];
-      var extra = '';
-      for (var i = 0; i < rel.length; i++) {
-        var it = rel[i] || {};
-        if (it.key && it.from && it.to) {
-          extra += '\n已重定位 ' + it.key + '：' + it.from + ' → ' + it.to;
-        }
-      }
-      discSay('迁移完成：' + (d.from || e.path) + ' → ' + (d.to || '本插件目录')
-        + extra
-        + '\n源目录保持原样，确认无误后可自行删除。');
+    if (!r || r.ok === false || r.net) {
+      setMigBusy(false);
+      say('迁移失败：' + ((r && r.error) || '服务无响应，请重试')
+        + '\n源目录 ' + path + ' 未被改动，可稍后重试。', true);
+      return;
     }
-    for (var j = 0; j < btns.length; j++) btns[j].disabled = false;
-    loadInfo();
-    setTimeout(loadDiscover, 1500);
+    if (d.busy) {
+      setMigBusy(false);
+      say('已有迁移任务正在运行，请等待它结束后再试。\n源目录 ' + path + ' 未被改动。', true);
+      return;
+    }
+    if (!d.started) {
+      setMigBusy(false);
+      say('迁移失败：' + (d.error || '无法启动后台迁移')
+        + '\n源目录 ' + path + ' 未被改动，可稍后重试。', true);
+      return;
+    }
+    pollMigrate(path, say, Date.now(), 0);
   });
 }
+
+// 手动输入：始终可用，不依赖 discover 是否有结果
+(function(){
+  var b = $('btn-mig-manual'), inp = $('mig-dir');
+  if (!b || !inp) return;
+  b.onclick = function(){
+    if (migBusy) return;
+    var v = String(inp.value || '').replace(/^\s+|\s+$/g, '');
+    if (!v) {
+      migSayManual('请先填写要迁移的目录（绝对路径，例如 /mnt/data/OpenClawMgr）。', true);
+      return;
+    }
+    if (v.charAt(0) !== '/') {
+      migSayManual('目录必须以 / 开头（绝对路径），例如 /mnt/data/OpenClawMgr。', true);
+      return;
+    }
+    doMigrate(v, migSayManual);
+  };
+  inp.onkeydown = function(ev){
+    var e = ev || window.event;
+    if (e && e.keyCode === 13) { b.click(); return false; }
+  };
+})();
 
 loadInfo();
 // discover 会扫描挂载点、可能很慢，而且 uhttpd 的 Lua 请求是串行的：

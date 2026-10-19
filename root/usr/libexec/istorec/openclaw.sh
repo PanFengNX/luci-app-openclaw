@@ -24,6 +24,9 @@ OC_CLOUD="/usr/libexec/openclaw/cloud.sh"
 INITD="/etc/init.d/openclaw"
 # inside the private 0700 rundir - see oc_rundir() in lib.sh
 DIAG_PREFIX="${OC_RUNDIR:-/tmp/.openclaw}/diag"
+# async migrate: same idea as diag, but a separate namespace. The four files
+# (log / exit / pid / lock) live next to each other so a single prefix is enough.
+MIGRATE_PREFIX="${OC_RUNDIR:-/tmp/.openclaw}/migrate"
 OC_INST_RC="${OC_RUNDIR:-/tmp/.openclaw}/install.rc"
 OC_INST_DONE="${OC_RUNDIR:-/tmp/.openclaw}/install.done"
 # pid of the running install.sh (written by install-bg) and the time install-bg
@@ -957,6 +960,124 @@ mig_reloc_add() {
 		MIG_RELOCATED="$MIG_RELOCATED,\"$k\""
 		MIG_RELOCATIONS="$MIG_RELOCATIONS,$obj"
 	fi
+}
+
+# ---------------------------------------------------------------- async migrate
+# migrate copies a whole install (cp -a of program + data dirs, Node runtime and
+# workspace included) and regularly takes minutes. Running it inline makes the
+# LuCI request time out, so it is started detached and polled exactly like
+# diag-run / diag-poll. The lock is a plain empty directory created with mkdir;
+# it is only ever removed with rmdir (never recursively) and it never holds
+# files - log / exit / pid all live outside it.
+migrate_paths() {
+	MIGRATE_LOG="${MIGRATE_PREFIX}.log"
+	MIGRATE_PID="${MIGRATE_PREFIX}.pid"
+	MIGRATE_EXIT="${MIGRATE_PREFIX}.exit"
+	MIGRATE_LOCK="${MIGRATE_PREFIX}.lock"
+}
+
+# returns 0 when the previous worker is provably gone, so its lock can be
+# reclaimed instead of the button spinning forever
+migrate_stale() {
+	[ -d "$MIGRATE_LOCK" ] || return 1
+	local pid
+	pid="$(cat "$MIGRATE_PID" 2>/dev/null || true)"
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		return 1
+	fi
+	oc_warn "迁移的进程已退出，回收残留锁：$MIGRATE_LOCK"
+	return 0
+}
+
+cmd_migrate_start() {
+	# migrate-start <dir> : validate, then run "migrate <dir>" detached.
+	# stdout is exactly one JSON line; progress goes to the log file.
+	local dir="${2:-}"
+	if [ -z "$dir" ]; then
+		printf '{"ok":false,"error":"缺少目录参数"}\n'
+		return 2
+	fi
+	# same checks as cmd_migrate, plus the absolute-path / control-char rules
+	# the LuCI controller already applies - reject before touching any file
+	case "$dir" in
+		/*) ;;
+		*)
+			printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "目录必须是绝对路径：$dir")"
+			return 2
+			;;
+	esac
+	case "$dir" in
+		*[[:cntrl:]]*)
+			printf '{"ok":false,"error":"目录不能包含控制字符"}\n'
+			return 2
+			;;
+	esac
+	# normalize trailing slashes the same way cmd_migrate does
+	dir="${dir%/}"
+	[ -n "$dir" ] || dir="/"
+	if [ ! -d "$dir" ]; then
+		printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "目录不存在：$dir")"
+		return 2
+	fi
+
+	migrate_paths
+	if ! mkdir "$MIGRATE_LOCK" 2>/dev/null; then
+		if ! migrate_stale; then
+			printf '{"busy":true}\n'
+			return 0
+		fi
+		# the lock directory is empty by design; if rmdir fails we do not force
+		# it - report the failure and let the next start retry.
+		rmdir "$MIGRATE_LOCK" 2>/dev/null || true
+		mkdir "$MIGRATE_LOCK" 2>/dev/null || {
+			printf '{"ok":false,"error":"无法启动迁移（锁清理失败，请稍后重试）"}\n'
+			return 1
+		}
+	fi
+	# placeholder so a concurrent start between mkdir and spawn does not see an
+	# empty pid file and mistake the fresh lock for a stale one
+	echo "$$" >"$MIGRATE_PID" 2>/dev/null || true
+	rm -f "$MIGRATE_EXIT" 2>/dev/null || true
+	: >"$MIGRATE_LOG"
+	(
+		sh "$0" migrate "$dir" >"$MIGRATE_LOG" 2>&1
+		echo "$?" >"$MIGRATE_EXIT"
+		rmdir "$MIGRATE_LOCK" 2>/dev/null || true
+	) &
+	# $$ inside a subshell is still the parent pid; record the real worker pid
+	echo "$!" >"$MIGRATE_PID"
+	printf '{"started":true,"dir":"%s"}\n' "$(oc_json_str "$dir")"
+}
+
+cmd_migrate_poll() {
+	local out rc
+	migrate_paths
+	[ -f "$MIGRATE_LOG" ] || { printf '{"done":true,"rc":"0","output":""}\n'; return 0; }
+	out="$(tail -n 200 "$MIGRATE_LOG" | json_escape)"
+	if [ -f "$MIGRATE_EXIT" ]; then
+		rc="$(cat "$MIGRATE_EXIT" 2>/dev/null)"
+		case "$rc" in ''|*[!0-9]*) rc=0 ;; esac
+		printf '{"done":true,"rc":"%s","output":"%s"}\n' "$rc" "$out"
+		return 0
+	fi
+	# no exit code yet: if the worker is gone (or the lock vanished without an
+	# exit file) the run was killed - report it instead of polling forever.
+	# Re-read the exit file first: the worker writes it *before* removing the
+	# lock, so between the two checks a successful run may have completed.
+	if migrate_stale || [ ! -d "$MIGRATE_LOCK" ]; then
+		if [ -f "$MIGRATE_EXIT" ]; then
+			rc="$(cat "$MIGRATE_EXIT" 2>/dev/null)"
+			case "$rc" in ''|*[!0-9]*) rc=0 ;; esac
+			out="$(tail -n 200 "$MIGRATE_LOG" | json_escape)"
+			printf '{"done":true,"rc":"%s","output":"%s"}\n' "$rc" "$out"
+			return 0
+		fi
+		rmdir "$MIGRATE_LOCK" 2>/dev/null || true
+		out="${out}\\n-----\\n迁移进程已中断（被终止或超时），以上为已产生的输出。"
+		printf '{"done":true,"rc":"124","output":"%s"}\n' "$out"
+		return 0
+	fi
+	printf '{"done":false,"output":"%s"}\n' "$out"
 }
 
 cmd_migrate() {
@@ -2038,6 +2159,8 @@ case "${1:-}" in
 	devices-pending) cmd_devices_pending ;;
 	devices-approve) cmd_devices_approve "$@" ;;
 	migrate)       cmd_migrate "$@" ;;
+	migrate-start) cmd_migrate_start "$@" ;;
+	migrate-poll)  cmd_migrate_poll "$@" ;;
 	save)          cmd_save "$@" ;;
 	port)          get_port; printf '\n' ;;
 	token)         get_token; printf '\n' ;;
@@ -2108,6 +2231,9 @@ Usage: openclaw.sh <command> [options]
                             If main.state_dir / main.openclaw_dir point outside
                             base_dir, they are relocated to <base>/home/.openclaw
                             / <base>/openclaw and the UCI keys are cleared
+  migrate-start <dir>       start the same migration in the background
+                            {"started":true,"dir":..} | {"busy":true}
+  migrate-poll              {"done":bool,"rc":..,"output":".."}  (for LuCI)
 
 Safety: install/start/restart/update/uninstall/repair refuse to run when the
 configured base_dir is a system path (/usr /etc /tmp /var /overlay /rom ...) or

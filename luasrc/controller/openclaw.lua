@@ -51,6 +51,8 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "devices_pending"}, call("api_devices_pending")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "devices_approve"}, call("api_devices_approve")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "migrate"},   call("api_migrate")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "migrate_start"}, call("api_migrate_start")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "migrate_poll"},  call("api_migrate_poll")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "doctor"},    call("api_doctor")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "providers"}, call("api_providers")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "repair"},    call("api_repair")).leaf = true
@@ -709,8 +711,28 @@ function api_migrate()
 	end
 	-- 同步执行：migrate 自己取锁、自己校验目标，失败时返回 {"ok":false,"error":..}。
 	-- 前端在请求期间显示"进行中"，完成后按 data 里的结果提示。
+	-- 注意：大目录会超过 uhttpd 的超时，LuCI 页面已改用 migrate_start /
+	-- migrate_poll；这里保留给 CLI 风格的同步调用与旧前端。
 	local r = sh(SH .. " migrate " .. q(dir))
 	out({ ok = r:find('"ok":true') ~= nil, data = r })
+end
+
+-- Background migration. Same pattern as diag_run / diag_poll: migrate can copy
+-- a whole Node runtime + workspace and takes minutes, so the HTTP request only
+-- starts the worker and polling reports progress.
+function api_migrate_start()
+	local dir = oc_dir_arg(http.formvalue("dir"))
+	if not dir then
+		out({ ok = false, error = "目录参数无效" })
+		return
+	end
+	local r = sh(SH .. " migrate-start " .. q(dir))
+	out({ ok = true, data = r })
+end
+
+function api_migrate_poll()
+	local r = sh(SH .. " migrate-poll")
+	out({ ok = true, data = r })
 end
 
 function api_doctor()
