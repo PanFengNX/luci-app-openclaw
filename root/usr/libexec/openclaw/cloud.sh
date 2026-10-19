@@ -895,7 +895,7 @@ cloud_install_version() {
 	# 安装器的 HOME 指向 $OC_RUNDIR 下的一次性目录，而不是 $OC_CLOUD_HOME：
 	# 这是「更新只允许动 $OC_CLOUD_DIR」的强制手段 —— 即使安装器忽略
 	# --install-dir，也只能写进临时目录，碰不到登录态与口令。
-	local ver="$1" arch url dest size magic mach sha out rc err bin vout
+	local ver="$1" arch url dest size magic head4 mach sha out rc err bin vout
 	local ver_raw ver_out ihome
 
 	OC_INSTALL_ERR=""
@@ -948,22 +948,36 @@ cloud_install_version() {
 		return 1
 	fi
 
-	magic="$(od -An -tx1 -N4 "$dest" 2>/dev/null | tr -d ' \n')"
-	if [ "$magic" != "7f454c46" ]; then
+	# ELF 魔数：前 4 字节是 0x7F 'E' 'L' 'F'，所以后 3 字节正好是 "ELF"。
+	# 这里不用 od：部分 OpenWrt / iStoreOS 的 busybox 没编进 od，命令缺失时
+	# 输出为空、报错又被 2>/dev/null 吞掉，会把正常下载一律判成「不是 ELF」。
+	# head / tail 是 busybox 必备的，不依赖可选 applet。
+	magic="$(head -c 4 "$dest" 2>/dev/null | tail -c 3)"
+	if [ "$magic" != "ELF" ]; then
+		# 不可打印字节换成 '?'，最多 4 个字符：下次出问题一眼能看出拿到的是
+		# HTML 错误页（"<!DO"）还是别的什么东西。
+		head4="$(head -c 4 "$dest" 2>/dev/null | tr -c ' -~' '?')"
 		rm -f "$dest" 2>/dev/null
-		OC_INSTALL_ERR="下载内容不是 ELF 可执行文件（magic=${magic:-未知}）"
+		OC_INSTALL_ERR="下载内容不是 ELF 可执行文件（大小 ${size} 字节，开头 \"${head4}\"）"
 		return 1
 	fi
 
-	# ELF e_machine（偏移 18，小端 2 字节）：arm64=0xb7，x86_64=0x3e
-	mach="$(od -An -tx1 -j18 -N2 "$dest" 2>/dev/null | tr -d ' \n')"
-	case "$arch:$mach" in
-		arm64:b700|amd64:3e00) ;;
-		*)
-			rm -f "$dest" 2>/dev/null
-			OC_INSTALL_ERR="安装器架构不匹配：期望 $arch，ELF machine=${mach:-未知}"
-			return 1 ;;
-	esac
+	# 架构检查是尽力而为的：od 不存在时跳过，绝不因此拒绝安装。
+	# 架构不对的二进制在执行时内核会直接拒绝（Exec format error），
+	# 后面本来就要跑它，不缺这一道前置检查 —— 它只是让错误更早、更清楚。
+	if command -v od >/dev/null 2>&1; then
+		# ELF e_machine（偏移 18，小端 2 字节）：arm64=0xb7，x86_64=0x3e
+		mach="$(od -An -tx1 -j18 -N2 "$dest" 2>/dev/null | tr -d ' \n')"
+		case "$arch:$mach" in
+			arm64:b700|amd64:3e00) ;;
+			*)
+				rm -f "$dest" 2>/dev/null
+				OC_INSTALL_ERR="安装器架构不匹配：期望 $arch，ELF machine=${mach:-未知}"
+				return 1 ;;
+		esac
+	else
+		oc_warn "缺少 od，跳过 ELF 架构校验（架构不符时执行阶段会报 Exec format error）"
+	fi
 
 	if command -v sha256sum >/dev/null 2>&1; then
 		sha="$(sha256sum "$dest" 2>/dev/null | awk '{print $1}')"

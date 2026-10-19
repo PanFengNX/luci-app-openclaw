@@ -9,12 +9,6 @@
   --oc-surface:rgba(127,127,127,.06);--oc-surface-2:rgba(127,127,127,.12);
   --oc-accent:#0b74d8;--oc-ok:#2f8f3f;--oc-warn:#c05621;--oc-err:#cc2222;}
 
-/* 横向 tab 菜单（药丸式，参考 iStoreOS openclawmgr） */
-.oc-tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px}
-.oc-tab{display:inline-block;padding:6px 14px;font-size:13px;color:var(--oc-fg-dim);text-decoration:none;border:1px solid var(--oc-line);border-radius:8px;background:transparent;white-space:nowrap}
-.oc-tab:hover{background:var(--oc-surface-2);color:inherit;text-decoration:none}
-.oc-tab.active{background:rgba(11,116,216,.12);border-color:rgba(11,116,216,.45);color:var(--oc-accent);font-weight:600}
-
 /* 卡片 */
 .oc-card{border:1px solid var(--oc-line);border-radius:12px;background:var(--oc-surface);padding:18px 20px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.05),0 2px 8px rgba(0,0,0,.04)}
 .oc-card h3{margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--oc-line-soft);font-size:15px;font-weight:600;letter-spacing:.01em}
@@ -175,7 +169,7 @@ select,input[type=text],input[type=password]{min-height:30px}
     · 服务商与模型清单直接来自已安装的 OpenClaw（<code>openclaw models list --all</code>），未安装时回退到内置精选预设。<br>
     · 点击绿色按钮会依次完成：<b>安装该服务商官方插件</b> → <b>写入 API Key</b>（<code>~/.openclaw/.env</code> 与配置）→ <b>设为默认模型</b> → 重启网关。<br>
     · <b>DeepSeek</b> 由官方插件 <code>@openclaw/deepseek-provider</code> 提供，默认模型 <code>deepseek/deepseek-v4-flash</code>。<br>
-    · <b>Z.AI（GLM / 智谱）</b> 为 OpenClaw 内置 provider（<code>zai</code>），默认模型 <code>zai/glm-5.1</code>，支持国际 / 国内 / Coding Plan 端点。<br>
+    · <b>Z.AI（GLM / 智谱）</b> 为 OpenClaw 内置 provider（<code>zai</code>），默认模型 <code>zai/glm-5.3</code>，支持国际 / 国内 / Coding Plan 端点。<br>
     · 标记说明：<span class="oc-tag ok">内置</span> 无需插件 · <span class="oc-tag">需插件</span> 会自动安装 · <span class="oc-tag ok">已配置</span> 已写入过配置。
   </div>
 </div>

@@ -805,8 +805,41 @@ oc_free_mb() {
 
 oc_mounts() {
 	# list candidate mount points with free MB and fs type
-	df -m 2>/dev/null | awk 'NR>1 && $4>0 {print $6"\t"$4"\t"$1}' | grep -E '^/(mnt|tmp|sda|sd|nvme|mmc|overlay|data)'
-	[ -s /proc/mounts ] || true
+	# 数据来源是 /proc/mounts（而不是 df 的整表）：只保留真实可写磁盘上的
+	# 挂载点，并逐个过 oc_validate_base_dir —— 下拉里出现的东西，安装时
+	# 必须是真的会被接受的（/tmp、/overlay、/var 等系统目录一律剔除）。
+	# 输出：挂载点<TAB>可用MB<TAB>文件系统，按可用空间从大到小。
+	# 约定：只往 stdout 写结果（cmd_mounts 会直接拼进 JSON），日志走 stderr。
+	local dev mnt fst opts rest free seen=""
+	[ -r /proc/mounts ] || return 0
+	while read -r dev mnt fst opts rest; do
+		[ -n "$mnt" ] || continue
+		# /proc/mounts 把空格 / 制表符转义成 \040 / \011；这类路径不能
+		# 原样交给 df，直接跳过。
+		case "$mnt" in *'\'*) continue ;; esac
+		# 只收真实可写磁盘；tmpfs / overlay / squashfs / nfs / cifs 等一律不收
+		case "$fst" in
+			ext2|ext3|ext4|f2fs|xfs|btrfs|exfat|vfat|ntfs|ntfs3|fuseblk|jfs|ufs) ;;
+			*) continue ;;
+		esac
+		# 只读挂载装不了东西
+		case ",$opts," in *,ro,*) continue ;; esac
+		# 排除系统前缀
+		case "$mnt" in
+			/|/rom|/rom/*|/overlay|/overlay/*|/tmp|/tmp/*|/var|/var/*) continue ;;
+			/usr|/usr/*|/etc|/etc/*|/dev|/dev/*|/proc|/proc/*|/sys|/sys/*) continue ;;
+			/run|/run/*) continue ;;
+		esac
+		# 同一挂载点可能被多个 bind mount 枚举到
+		case "$seen" in *"|$mnt|"*) continue ;; esac
+		seen="$seen|$mnt|"
+		# 与安装时同一套校验（stderr 丢弃）：不通过的直接剔除
+		oc_validate_base_dir "$mnt" 2>/dev/null || continue
+		free="$(df -m "$mnt" 2>/dev/null | awk 'NR==2{print $4}')"
+		case "$free" in ''|*[!0-9]*) continue ;; esac
+		[ "$free" -gt 0 ] 2>/dev/null || continue
+		printf '%s\t%s\t%s\n' "$mnt" "$free" "$fst"
+	done </proc/mounts | sort -rn -k2,2
 }
 
 # ---------------------------------------------------------------- discovery

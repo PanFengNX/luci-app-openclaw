@@ -182,8 +182,8 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 
 - `deepseek`：官方插件 `@openclaw/deepseek-provider`，默认 `deepseek/deepseek-v4-flash`，
   可选 `deepseek-v4-pro`、`deepseek-chat`、`deepseek-reasoner`。
-- `zai`：OpenClaw 内置 provider（Z.AI / 智谱 GLM），默认 `zai/glm-5.1`，
-  内置 13 个 GLM 模型，支持国际 / 国内 / Coding Plan 端点切换。
+- `zai`：OpenClaw 内置 provider（Z.AI / 智谱 GLM），默认 `zai/glm-5.3`，
+  内置 19 个 GLM 模型，支持国际 / 国内 / Coding Plan 端点切换。
 - 保留原有 openai、anthropic、google、moonshot、qwen、minimax、openrouter、ollama 与自定义。
 
 ### 2. 模型选择联动插件安装与 API Key（新增）
