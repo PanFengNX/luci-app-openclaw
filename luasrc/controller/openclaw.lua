@@ -22,6 +22,7 @@ function index()
 	entry({"admin", "services", "openclaw", "setup", "adopt"},   template("openclaw/adopt"), _("关联迁移"), 20)
 	entry({"admin", "services", "openclaw", "setup", "model"},    template("openclaw/model"),    _("模型"), 30)
 	entry({"admin", "services", "openclaw", "setup", "channels"}, template("openclaw/channels"), _("渠道"), 40)
+	entry({"admin", "services", "openclaw", "setup", "changelog"}, template("openclaw/changelog"), _("更新说明"), 50)
 	-- 「备份与恢复」独立成顶层页面（不放在「设置」子菜单里）。
 	entry({"admin", "services", "openclaw", "backup"},    template("openclaw/backup"),   _("备份与恢复"), 20)
 	entry({"admin", "services", "openclaw", "terminal"}, template("openclaw/terminal"), _("命令行"),    40)
@@ -34,6 +35,7 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "install"},   call("api_install")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "istatus"},   call("api_istatus")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "ilog"},      call("api_ilog")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "changelog"}, call("api_changelog")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "service"},   call("api_service")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "save"},      call("api_save")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "presets"},   call("api_presets")).leaf = true
@@ -195,6 +197,64 @@ function api_ilog()
 		f:close()
 	end
 	out({ ok = true, log = r })
+end
+
+-- ---------------------------------------------------------------- changelog
+-- 只读端点：把安装包内的 CHANGELOG.md 原样交给前端渲染。
+-- 版本号取自文件首行的构建期标记 `<!-- version: X.Y.Z -->`。LuCI 没有暴露
+-- 本包版本的纯 Lua 接口；opkg 的 /usr/lib/opkg/info/*.control 在 APK 系统上
+-- 不存在，APK 的 /lib/apk/db/installed 格式又随 apk-tools 版本变化，调用
+-- opkg / apk 则是外部命令。标记与正文在同一次读取里拿到，不会出现版本号与
+-- 说明内容不一致的情况；标记缺失时退回正文第一个 "## X.Y.Z" 标题。
+local CHANGELOG_PATH = "/usr/share/openclaw/CHANGELOG.md"
+local MAX_CHANGELOG  = 262144   -- 256 KiB
+
+-- 截断点落在 UTF-8 字符中间会让 jsonc.stringify() 返回 nil（非法 UTF-8），
+-- 整个响应随即退化成 serialize-failed。这里先跳过尾部续字节找到最后一个
+-- 字符的起始字节，再按它的长度判断该字符是否完整：不完整就整段丢弃。
+-- 只删续字节是不够的 —— 那会留下一个孤立的起始字节，仍然不是合法 UTF-8。
+local function utf8_safe_cut(s, n)
+	if #s <= n then return s end
+	local cut = s:sub(1, n)
+	local i = #cut
+	while i > 0 do
+		local b = cut:byte(i)
+		if b < 0x80 or b > 0xBF then break end
+		i = i - 1
+	end
+	if i == 0 then return "" end
+	local lead = cut:byte(i)
+	local need = 1
+	if lead >= 0xF0 and lead <= 0xF7 then need = 4
+	elseif lead >= 0xE0 and lead <= 0xEF then need = 3
+	elseif lead >= 0xC2 and lead <= 0xDF then need = 2
+	end
+	if #cut - i + 1 < need then
+		cut = cut:sub(1, i - 1)
+	end
+	return cut
+end
+
+function api_changelog()
+	local fh = io.open(CHANGELOG_PATH, "rb")
+	if not fh then
+		-- 文件不存在或打不开：前端显示一句提示，不当作错误弹窗。
+		out({ ok = false, data = "" })
+		return
+	end
+	-- 只读前 256KB：异常大的文件不能把响应体撑爆，也不能整份读进内存。
+	local data = fh:read(MAX_CHANGELOG) or ""
+	local more = fh:read(1)   -- 多探一个字节，区分"刚好 256KB"与"被截断"
+	fh:close()
+	if more then
+		data = utf8_safe_cut(data, MAX_CHANGELOG) ..
+			"\n\n…（更新说明过长，仅显示前 256KB）\n"
+	end
+	local version = data:match("<!%-%-%s*version:%s*([%w%.%-]+)%s*%-%->")
+	if not version then
+		version = data:match("\n##%s+([%w%.%-]+)")
+	end
+	out({ ok = true, data = data, version = version or "" })
 end
 
 function api_service()
