@@ -235,6 +235,26 @@ else
 	skip "缺少 tools/tests/cloud-cron.sh"
 fi
 
+head_ "7d. 控制器 Lua 语法（一个语法错误会让所有页面 500）"
+if [ -z "$PY" ]; then
+	skip "找不到 python"
+elif [ ! -f tools/tests/lua-syntax.py ]; then
+	skip "缺少 tools/tests/lua-syntax.py"
+else
+	lua_out="$("$PY" tools/tests/lua-syntax.py . 2>&1)"
+	lua_rc=$?
+	if [ "$lua_rc" -eq 0 ]; then
+		printf '%s\n' "$lua_out" | tail -1 | sed 's/^/    /'
+		ok "Lua 语法全部通过"
+	elif [ "$lua_rc" -eq 3 ]; then
+		printf '%s\n' "$lua_out" | tail -1 | sed 's/^ *跳过：//' | sed 's/^/    /'
+		skip "未安装 luaparser（pip install luaparser 后生效）"
+	else
+		bad "Lua 语法有错误"
+		printf '%s\n' "$lua_out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+fi
+
 # --------------------------------------------------------------------------
 head_ "8. 打包与三种包格式校验"
 if [ "$DO_BUILD" -eq 0 ]; then
