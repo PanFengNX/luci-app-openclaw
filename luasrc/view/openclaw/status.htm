@@ -16,9 +16,12 @@
 .oc-tab.active{background:rgba(11,116,216,.12);border-color:rgba(11,116,216,.45);color:var(--oc-accent);font-weight:600}
 
 /* 卡片 */
-.oc-card{border:1px solid var(--oc-line);border-radius:10px;background:var(--oc-surface);padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
-.oc-card h3{margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--oc-line-soft);font-size:15px;font-weight:600}
+.oc-card{border:1px solid var(--oc-line);border-radius:12px;background:var(--oc-surface);padding:18px 20px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.05),0 2px 8px rgba(0,0,0,.04)}
+.oc-card h3{margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--oc-line-soft);font-size:15px;font-weight:600;letter-spacing:.01em}
 .oc-card h3::before{content:"";display:inline-block;width:3px;height:14px;border-radius:2px;background:var(--oc-accent);margin-right:8px;vertical-align:middle}
+
+/* 多列容器：宽屏两列，窄屏自动单列；行间距交给 .oc-card 的 margin-bottom */
+.oc-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:0 16px;align-items:start}
 
 /* 渠道卡片头 */
 .oc-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
@@ -27,14 +30,18 @@
 
 /* 键值区 */
 .oc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
-.oc-sub{margin:16px 0 8px;font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--oc-fg-mute);text-transform:none}
+.oc-sub{margin:18px 0 6px;font-size:12px;font-weight:600;letter-spacing:.06em;color:var(--oc-fg-mute);text-transform:none}
 .oc-card>.oc-sub:first-of-type{margin-top:0}
-.oc-kv{font-size:13px;line-height:1.5;font-variant-numeric:tabular-nums}
-.oc-kv b{display:block;color:var(--oc-fg-mute);font-weight:normal;font-size:12px;margin-bottom:2px}
+.oc-kv{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px dashed var(--oc-line-soft);font-size:13px;line-height:1.5;font-variant-numeric:tabular-nums}
+.oc-kv:last-child{border-bottom:none}
+.oc-kv b{font-size:12.5px;font-weight:400;color:var(--oc-fg-mute);white-space:nowrap;margin:0}
+.oc-kv>span{text-align:right;word-break:break-all}
 
 /* 概览数字块 */
 .oc-kpi{display:flex;flex-direction:column;align-items:flex-start;gap:2px;font-size:20px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums}
 .oc-kpi .oc-kpi-label{font-size:12px;font-weight:400;color:var(--oc-fg-mute)}
+.oc-kpi-label{margin-top:2px;letter-spacing:.02em}
+.oc-kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;padding:14px 0 4px;margin-bottom:6px;border-bottom:1px solid var(--oc-line-soft)}
 
 /* 状态徽章 */
 .oc-badge{display:inline-block;border-radius:999px;padding:3px 10px;font-size:12px;color:#fff;white-space:nowrap}
@@ -84,6 +91,7 @@ button:focus-visible,.oc-btn:focus-visible{outline:2px solid var(--oc-accent);ou
 button:disabled,.oc-btn:disabled{background:#9a9a9a;color:#fff;cursor:not-allowed;opacity:.85}
 button:disabled:hover,.oc-btn:disabled:hover{filter:none}
 #btn-open:disabled{background:#bdbdbd;color:#f7f7f7}
+button,.oc-btn{min-height:30px;line-height:1.35;transition:filter .12s,background .12s,color .12s}
 
 /* 操作条 */
 .oc-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
@@ -93,6 +101,28 @@ button:disabled:hover,.oc-btn:disabled:hover{filter:none}
 select,input[type=text],input[type=password]{border:1px solid var(--oc-line);border-radius:6px;background:var(--oc-surface);padding:5px 8px;font-size:13px;min-width:260px;color:inherit}
 select:focus,input[type=text]:focus,input[type=password]:focus{border-color:var(--oc-accent);outline:none}
 input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;background:var(--oc-surface-2);min-width:320px}
+select,input[type=text],input[type=password]{min-height:30px}
+
+/* 非卡片内的地址 / 路径行 */
+.oc-rowline{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 0}
+.oc-rowline>span{color:var(--oc-fg-mute);font-size:12.5px;white-space:nowrap}
+
+/* 版本号 / 数值药丸 */
+.oc-pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums;background:var(--oc-surface-2);color:var(--oc-fg-dim);border:1px solid var(--oc-line-soft)}
+.oc-pill.ok{background:rgba(47,143,63,.14);color:var(--oc-ok);border-color:rgba(47,143,63,.3)}
+.oc-pill.warn{background:rgba(192,86,33,.14);color:var(--oc-warn);border-color:rgba(192,86,33,.3)}
+.oc-pill.accent{background:rgba(11,116,216,.14);color:var(--oc-accent);border-color:rgba(11,116,216,.3)}
+
+/* 空状态 */
+.oc-empty{padding:22px 16px;text-align:center;border:1px dashed var(--oc-line);border-radius:10px;color:var(--oc-fg-mute);font-size:12.5px;background:transparent}
+
+/* 地址旁的复制按钮 */
+.oc-copy{padding:3px 10px;font-size:12px;border-radius:6px;background:transparent;color:var(--oc-accent);border:1px solid var(--oc-line);cursor:pointer;margin:0}
+.oc-copy:hover{background:var(--oc-surface-2)}
+
+/* 窄屏适配 */
+@media (max-width:600px){.oc-cols{grid-template-columns:1fr}
+  .oc-kv{flex-wrap:wrap}.oc-kv>span{text-align:left}}
 </style>
 
 <h2><a id="content" name="content">OpenClaw 助手 · 状态</a></h2>

@@ -559,6 +559,8 @@ cmd_restore() {
 	fi
 
 	blog "已从备份还原：$(basename "$p")"
+	bk_detail "$(basename "$p")"
+	bk_finish_ok
 	printf '{"ok":true,"file":"%s","safety_backup":"%s","restarted":%s}\n' \
 		"$(jstr "$(basename "$p")")" "$(jstr "$safety_file")" \
 		"$([ "$started" = "1" ] && echo true || echo false)"
@@ -569,12 +571,17 @@ cmd_delete() {
 	local in="$1" p
 	[ -n "$in" ] || die_json "未指定备份文件"
 	p="$(oc_backup_resolve "$in")" || die_json "非法的备份文件引用：$in"
+	# 审计：$p 已是解析后的绝对路径，日志里只记文件名（与 create/verify 口径一致）。
+	# 放在解析之后、真正删除之前：解析失败的非法调用不产生记录，失败分支统一由
+	# die_json 记 FAIL，这里不重复记。
+	bk_begin DELETE "$(basename "$p")"
 	# 只允许删备份目录里的文件（oc_backup_resolve 已保证），再确认一次
 	case "$p" in
 		"$(backup_dir)"/*) ;;
 		*) die_json "只允许删除备份目录内的文件" ;;
 	esac
 	rm -f "$p" || die_json "删除失败"
+	bk_finish_ok
 	printf '{"ok":true,"file":"%s"}\n' "$(jstr "$(basename "$p")")"
 }
 

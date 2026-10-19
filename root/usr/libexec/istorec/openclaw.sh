@@ -1548,6 +1548,62 @@ cmd_backup_delete() {
 	sh "$OC_BACKUP" delete "$@"
 }
 
+cmd_backup_log() {
+	# 备份审计日志（只读）：输出 JSON 数组，按时间正序（最早的在前）。
+	# 用法 backup-log [N]：N 默认 50、上限 500，0 与非数字一律按 50。
+	# 日志由 backup.sh 的 oc_bklog() 写入，每行格式：
+	#   YYYY-MM-DD HH:MM:SS <ACTION> <RESULT> <detail>
+	# 只读，不取锁；文件不存在或为空时输出 []。
+	local n="${2:-}" line t rest action result detail first=1
+
+	case "$n" in ''|*[!0-9]*) n=50 ;; esac
+	# busybox 的 test 对超长整数会溢出（参见 lib.sh 的 oc_safe_port），
+	# 先按长度截断再做数值比较。
+	[ ${#n} -le 5 ] || n=500
+	[ "$n" -gt 500 ] 2>/dev/null && n=500
+	[ "$n" -gt 0 ] 2>/dev/null || n=50
+
+	if [ ! -f "$OC_BKUPLOG" ] || [ ! -s "$OC_BKUPLOG" ]; then
+		printf '[]\n'
+		return 0
+	fi
+
+	printf '['
+	# 先 tail 取最后 N 条，再按原顺序解析 —— 输出即为时间正序，前端可直接顺序渲染。
+	tail -n "$n" "$OC_BKUPLOG" 2>/dev/null | while IFS= read -r line; do
+		# 时间戳必须符合固定宽度，否则视为格式不符，静默跳过
+		case "$line" in
+			[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\ [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\ *) ;;
+			*) continue ;;
+		esac
+		# time 固定 19 字符：用参数展开截取。不能用 cut -d' ' 拼 ——
+		# date 与 action 之间只有一个空格，按空格切会少一个字段。
+		t="${line%"${line#???????????????????}"}"
+		rest="${line#???????????????????}"	# 第 20 字符起，必须是空格
+		case "$rest" in
+			' '*) rest="${rest# }" ;;
+			*) continue ;;
+		esac
+		# 第一个词是 action
+		case "$rest" in
+			*' '*) action="${rest%% *}"; rest="${rest#* }" ;;
+			*) continue ;;
+		esac
+		# 第二个词是 result，其余全部是 detail（保留其内部空格）
+		case "$rest" in
+			*' '*) result="${rest%% *}"; detail="${rest#* }" ;;
+			*)     result="$rest"; detail="" ;;
+		esac
+		[ -n "$action" ] && [ -n "$result" ] || continue
+		[ "$first" = "1" ] || printf ','
+		first=0
+		printf '{"time":"%s","action":"%s","result":"%s","detail":"%s"}' \
+			"$(oc_json_str "$t")" "$(oc_json_str "$action")" \
+			"$(oc_json_str "$result")" "$(oc_json_str "$detail")"
+	done
+	printf ']\n'
+}
+
 cmd_restore() {
 	# 还原：会先做一次安全快照，再停网关、替换数据、重启
 	shift
@@ -2066,6 +2122,7 @@ case "${1:-}" in
 	backups)       cmd_backups ;;
 	backup-verify) cmd_backup_verify "$@" ;;
 	backup-delete) cmd_backup_delete "$@" ;;
+	backup-log)    cmd_backup_log "$@" ;;
 	backup-path)   sh "$OC_BACKUP" path ;;
 	restore)       cmd_restore "$@" ;;
 	export)        cmd_export "$@" ;;
@@ -2117,6 +2174,8 @@ Usage: openclaw.sh <command> [options]
   backups                   JSON array of existing backups
   backup-verify <file>      validate an archive WITHOUT restoring it
   backup-delete <file>      delete one backup
+  backup-log [n]            JSON array of backup audit records (oldest first,
+                            default 50, max 500)
   backup-path               print the backup directory
   restore <file> [--no-safety]   validate, snapshot, then restore
   log [n] | tasklog [n]

@@ -215,6 +215,188 @@ oc_node_bin() {
 }
 oc_oc_bin()    { printf '%s/bin/openclaw' "$(oc_oc_dir)"; }
 
+# ---------------------------------------------------------------- legacy config keys
+# 2026.10 起 OpenClaw 删除了 gateway.controlUi 下的三个认证相关键。配置里只要
+# 出现任意一个，整份 openclaw.json 就会被判为无效（Unrecognized key），网关直接
+# 拒绝启动。iStoreOS 的 luci-app-openclawmgr 每次被调用（启动/停止/安装/打开
+# 管理页）都会无条件写回这三个键，所以「用户手动删一次」没有用 —— 本插件复用
+# 同一份配置时，必须自己把它们清掉。
+#
+# 清理结果通过全局变量回传给调用方（busybox ash 没有 local -n，沿用
+# OC_PID_REASON 的既有风格）。调用方在调用前不要依赖旧值。
+OC_LEGACY_CONTROLUI_APPLICABLE=0	# 1 = 版本门禁通过，确实做了检测
+OC_LEGACY_CONTROLUI_FOUND=0		# 检测到的旧键数量
+OC_LEGACY_CONTROLUI_REMOVED=0		# 实际删掉的旧键数量
+
+oc_legacy_controlui_keys() {
+	# 逐行输出 2026.10 已删除的 controlUi 键名（不带 gateway.controlUi 前缀）。
+	# busybox 没有数组，调用方用 for + 命令替换遍历。
+	printf '%s\n' \
+		allowInsecureAuth \
+		dangerouslyDisableDeviceAuth \
+		dangerouslyAllowHostHeaderOriginFallback
+}
+
+oc_installed_version() {
+	# oc_installed_version [oc-dir] -> x.y.z；取不到时无输出并返回 1。
+	#
+	# 优先读 npm 包自带的 package.json：不启动 CLI，也就不受「配置文件非法」
+	# 影响 —— 而配置非法正是本函数要修的故障。若只靠 `openclaw --version`，
+	# 一旦 CLI 启动时校验配置，版本门禁就会把清理永久跳过。
+	#
+	# oc-dir 可显式指定：install.sh 可能用 --base-dir/--openclaw-dir 装到
+	# 与 UCI 不同的目录，此时不能依赖 oc_oc_dir()。
+	local ocdir pj v
+	ocdir="${1:-}"
+	[ -n "$ocdir" ] || ocdir="$(oc_oc_dir)"
+	pj="$ocdir/lib/node_modules/openclaw/package.json"
+	v=""
+	if [ -f "$pj" ]; then
+		if command -v jsonfilter >/dev/null 2>&1; then
+			v="$(jsonfilter -i "$pj" -e '@.version' 2>/dev/null | head -n1)"
+		fi
+		[ -n "$v" ] || v="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pj" 2>/dev/null | head -n1)"
+	fi
+	if [ -z "$v" ] && [ -x "$ocdir/bin/openclaw" ]; then
+		v="$(HOME="$(oc_home_dir)" oc_timeout 20 "$ocdir/bin/openclaw" --version 2>/dev/null | head -n1)"
+	fi
+	# 统一成纯数字版本：去掉 "v" 前缀和任何非数字尾巴
+	# （v2026.10.3 / 2026.10.3-beta.1 -> 2026.10.3）
+	v="$(printf '%s' "$v" | sed 's/^[^0-9]*//; s/[^0-9.].*$//')"
+	case "$v" in
+		''|*[!0-9.]*) return 1 ;;
+	esac
+	case "$v" in
+		*[0-9]*) ;;
+		*) return 1 ;;
+	esac
+	printf '%s' "$v"
+}
+
+oc_purge_legacy_controlui() {
+	# oc_purge_legacy_controlui [config-path] [oc-dir] [node-bin]
+	#
+	# 删除 2026.10 已不再支持的 gateway.controlUi.* 旧键（旧版 openclawmgr 留下）。
+	# 只在已安装版本 >= 2026.10.0 时动手：更早的版本里这些键仍然合法，删掉会
+	# 改变旧版行为。取不到版本时什么都不做。
+	#
+	# oc-dir / node-bin 可显式指定，供 install.sh 在 --base-dir / --openclaw-dir
+	# 与 UCI 不一致时使用；省略时走 oc_oc_dir() / oc_node_bin()。
+	#
+	# 幂等；任何失败都只 oc_warn 并返回 0，绝不中断调用方。
+	# **stdout 永远为空** —— 调用方（info / diag / repair --json）可能正在输出 JSON。
+	local conf="${1:-}" ocdir="${2:-}" node_bin="${3:-}"
+	local ver keys k present n tmp bak ts
+	local orig_mode orig_uid orig_gid
+
+	OC_LEGACY_CONTROLUI_APPLICABLE=0
+	OC_LEGACY_CONTROLUI_FOUND=0
+	OC_LEGACY_CONTROLUI_REMOVED=0
+
+	[ -n "$conf" ] || conf="$(oc_conf)"
+	[ -f "$conf" ] || return 0
+	command -v jsonfilter >/dev/null 2>&1 || return 0
+
+	ver="$(oc_installed_version "$ocdir")" || return 0
+	[ -n "$ver" ] || return 0
+	ver_ge "$ver" "2026.10.0" || return 0
+	OC_LEGACY_CONTROLUI_APPLICABLE=1
+
+	present=""
+	for k in $(oc_legacy_controlui_keys); do
+		# 值可能是 false：jsonfilter 输出 "false"（非空），同样算存在。
+		# 只有「无输出」才表示键不存在。
+		if [ -n "$(jsonfilter -i "$conf" -e "@.gateway.controlUi.$k" 2>/dev/null)" ]; then
+			present="$present $k"
+		fi
+	done
+	[ -n "$present" ] || return 0
+	n=0
+	for k in $present; do
+		n=$((n + 1))
+	done
+	OC_LEGACY_CONTROLUI_FOUND="$n"
+
+	[ -n "$node_bin" ] || node_bin="$(oc_node_bin)"
+	if [ ! -x "$node_bin" ]; then
+		oc_warn "无法清理 2026.10 废弃配置键：Node.js 不可执行（$node_bin）"
+		return 0
+	fi
+
+	ts="$(date +%s 2>/dev/null)"
+	case "$ts" in ''|*[!0-9]*) ts="$$" ;; esac
+	bak="$conf.legacy.bak.$ts"
+	if ! cp "$conf" "$bak" 2>/dev/null; then
+		oc_warn "无法备份配置文件，已跳过清理 2026.10 废弃配置键：$conf"
+		return 0
+	fi
+	chmod 600 "$bak" 2>/dev/null || true
+
+	# 重写会把文件变成 root:root；先记下原值，覆盖后恢复 —— 网关以 openclaw
+	# 用户运行，属主/权限不对就直接读不到配置。
+	orig_mode="$(stat -c %a "$conf" 2>/dev/null)"
+	orig_uid="$(stat -c %u "$conf" 2>/dev/null)"
+	orig_gid="$(stat -c %g "$conf" 2>/dev/null)"
+
+	# 临时文件必须和目标同目录：跨文件系统的 mv 不是原子替换，掉电可能留下
+	# 半个配置。jsonfilter 只能查询、不能改写，这里用 Node 做结构化删除；
+	# 版本门禁已保证 OpenClaw 装着，而它必须有 Node 才能运行。
+	# 参数全部经 argv 传递，不拼进脚本字符串，路径含空格也不会出错。
+	tmp="$conf.legacy.tmp.$$"
+	rm -f "$tmp" 2>/dev/null || true
+	if ! "$node_bin" -e '
+const fs = require("fs");
+const a = process.argv.slice(1);
+const src = a[0], dst = a[1], keys = a.slice(2);
+const doc = JSON.parse(fs.readFileSync(src, "utf8"));
+const ui = doc && doc.gateway && doc.gateway.controlUi;
+if (ui && typeof ui === "object" && !Array.isArray(ui)) {
+	for (const k of keys) delete ui[k];
+}
+fs.writeFileSync(dst, JSON.stringify(doc, null, 2) + "\n", { mode: 0o600 });
+' "$conf" "$tmp" $present 2>/dev/null; then
+		rm -f "$tmp" 2>/dev/null || true
+		oc_warn "清理 2026.10 废弃配置键失败（配置未改动）：$conf"
+		return 0
+	fi
+
+	# 校验：必须是合法 JSON、非空，且旧键确实消失。任何一项不满足都保留原文件。
+	if [ ! -s "$tmp" ] || ! jsonfilter -i "$tmp" -e '$' >/dev/null 2>&1; then
+		rm -f "$tmp" 2>/dev/null || true
+		oc_warn "清理 2026.10 废弃配置键失败：重写结果不是合法 JSON（配置未改动）：$conf"
+		return 0
+	fi
+	for k in $present; do
+		if [ -n "$(jsonfilter -i "$tmp" -e "@.gateway.controlUi.$k" 2>/dev/null)" ]; then
+			rm -f "$tmp" 2>/dev/null || true
+			oc_warn "清理 2026.10 废弃配置键失败：重写后仍存在 gateway.controlUi.$k（配置未改动）"
+			return 0
+		fi
+	done
+
+	if ! mv -f "$tmp" "$conf" 2>/dev/null; then
+		rm -f "$tmp" 2>/dev/null || true
+		oc_warn "清理 2026.10 废弃配置键失败：无法覆盖配置文件 $conf"
+		return 0
+	fi
+
+	case "$orig_mode" in ''|*[!0-7]*) orig_mode="" ;; esac
+	[ -n "$orig_mode" ] && chmod "$orig_mode" "$conf" 2>/dev/null
+	case "$orig_uid" in ''|*[!0-9]*) orig_uid="" ;; esac
+	case "$orig_gid" in ''|*[!0-9]*) orig_gid="" ;; esac
+	if [ -n "$orig_uid" ] && [ -n "$orig_gid" ]; then
+		chown "$orig_uid:$orig_gid" "$conf" 2>/dev/null \
+			|| oc_warn "无法恢复配置文件属主（$orig_uid:$orig_gid）：$conf"
+	fi
+
+	for k in $present; do
+		OC_LEGACY_CONTROLUI_REMOVED=$((OC_LEGACY_CONTROLUI_REMOVED + 1))
+		oc_warn "已移除 2026.10 不再支持的配置键 gateway.controlUi.$k（旧版 openclawmgr 写入，保留会导致网关拒绝启动）"
+	done
+	oc_warn "配置清理完成：共移除 $OC_LEGACY_CONTROLUI_REMOVED 个 2026.10 不再支持的配置键（备份：$bak）"
+	return 0
+}
+
 oc_npm_cli() {
 	# npm 的 CLI 入口（npm-cli.js）。覆盖 private / global 两种布局：
 	#   1. <运行时目录>/lib/node_modules/npm/bin/npm-cli.js   （官方 tar 包布局）

@@ -60,6 +60,7 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "backup_create"}, call("api_backup_create")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_verify"}, call("api_backup_verify")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_delete"}, call("api_backup_delete")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "backup_log"}, call("api_backup_log")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_upload"}, call("api_backup_upload")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_download"}, call("api_backup_download")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "restore"}, call("api_restore")).leaf = true
@@ -738,6 +739,14 @@ function api_backup_delete()
 	end
 	local r = sh(SH .. " backup-delete " .. q(f))
 	out({ ok = r:find('"ok":true') ~= nil, data = r })
+end
+
+-- 备份操作审计（只读）：backup-log [N] 返回按时间正序的 JSON 数组。
+-- N 的合法性由 openclaw.sh 统一兜底（非数字/0 -> 50，上限 500）。
+function api_backup_log()
+	local n = http.formvalue("n") or ""
+	local r = sh(SH .. " backup-log" .. (n ~= "" and (" " .. q(n)) or ""))
+	out({ ok = true, data = r })
 end
 
 -- 上传归档：只写进私有 rundir，返回一个受约束的文件名

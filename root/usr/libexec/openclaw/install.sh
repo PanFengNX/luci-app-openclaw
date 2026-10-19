@@ -606,6 +606,9 @@ bootstrap_config() {
 	fi
 	if [ ! -f "$conf" ]; then
 		token="$(oc_rand_hex)"
+		# 不要在这里添加 allowInsecureAuth / dangerouslyDisableDeviceAuth /
+		# dangerouslyAllowHostHeaderOriginFallback：2026.10 起这三个键已被删除，
+		# 写入任意一个都会让整份配置判为无效（Unrecognized key），网关拒绝启动。
 		cat >"$conf" <<EOF
 {
   "gateway": {
@@ -624,6 +627,15 @@ EOF
 		token="$(oc_rand_hex)"
 		"$OC" config set gateway.auth.mode token >/dev/null 2>&1
 		"$OC" config set gateway.auth.token "$token" >/dev/null 2>&1
+	fi
+
+	# 复用的本机配置可能带着旧版 openclawmgr 写入的、2026.10 已删除的
+	# gateway.controlUi.* 键；只要残留一个，整份配置就判为无效、网关拒绝启动。
+	# 显式传 $conf / $OC_DIR / $NODE_BIN：本次安装可能用 --base-dir 或
+	# --openclaw-dir 装到与 UCI 不同的目录，不能让函数去猜。
+	oc_purge_legacy_controlui "$conf" "$OC_DIR" "$NODE_BIN"
+	if [ "${OC_LEGACY_CONTROLUI_REMOVED:-0}" -gt 0 ] 2>/dev/null; then
+		ilog "已移除 ${OC_LEGACY_CONTROLUI_REMOVED} 个 2026.10 不再支持的配置键（gateway.controlUi.*，旧版 openclawmgr 写入）"
 	fi
 	oc_fix_perms
 	ilog "配置文件: $conf"

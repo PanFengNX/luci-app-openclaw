@@ -186,7 +186,29 @@ else
 	say WARN "配置文件不存在 $CONF（将在下次安装/启动时生成）"
 fi
 
-# 7 ------------------------------------------------------------- env file
+# 7 ------------------------------------------------------------- legacy config keys
+# 2026.10 删除了 gateway.controlUi 下的三个认证键，配置里残留任意一个都会让
+# 整份 openclaw.json 判为无效（Unrecognized key），网关直接拒绝启动。
+# 旧版 iStoreOS openclawmgr 每次启动/停止/打开管理页都会把它们写回来，
+# 所以这里每次修复都检查一遍。版本门禁在 oc_purge_legacy_controlui 内部：
+# 2026.10 之前的版本里这些键仍然合法，不删。
+# 配置文件不存在时第 6 步已经报过 WARN，这里无事可做。
+if [ -f "$CONF" ]; then
+	oc_purge_legacy_controlui "$CONF"
+	if [ "${OC_LEGACY_CONTROLUI_FOUND:-0}" -gt 0 ] 2>/dev/null; then
+		if [ "${OC_LEGACY_CONTROLUI_REMOVED:-0}" -gt 0 ] 2>/dev/null; then
+			say FIX "已移除 ${OC_LEGACY_CONTROLUI_REMOVED} 个 2026.10 不再支持的配置键"
+		else
+			say FAIL "检测到 ${OC_LEGACY_CONTROLUI_FOUND} 个 2026.10 不再支持的配置键，但移除失败（配置未改动，详见日志）"
+		fi
+	elif [ "${OC_LEGACY_CONTROLUI_APPLICABLE:-0}" = "1" ]; then
+		say OK "无 2026.10 已废弃的配置键"
+	else
+		say OK "无 2026.10 已废弃的配置键（版本低于 2026.10 或未安装，按旧版语义跳过清理）"
+	fi
+fi
+
+# 8 ------------------------------------------------------------- env file
 ENVF="$DATA/.env"
 if [ -f "$ENVF" ]; then
 	# only claim a fix when the mode actually changes, so the summary
@@ -201,7 +223,7 @@ else
 	say OK "无 .env 文件（可稍后在模型页填写 Key）"
 fi
 
-# 8 ------------------------------------------------------------- ownership
+# 9 ------------------------------------------------------------- ownership
 if [ -d "$BASE" ]; then
 	if grep -q "^${OC_USER}:" /etc/passwd 2>/dev/null; then
 		if [ "$(stat -c %U "$BASE" 2>/dev/null)" = "$OC_USER" ]; then
@@ -214,7 +236,7 @@ if [ -d "$BASE" ]; then
 	chmod -R u+rwX "$BASE" 2>/dev/null
 fi
 
-# 9 ------------------------------------------------------------- init script
+# 10 ------------------------------------------------------------ init script
 if [ -f "$INITD" ]; then
 	[ -x "$INITD" ] || { chmod +x "$INITD" 2>/dev/null && say FIX "已修复 init 脚本执行权限"; }
 	if "$INITD" enabled 2>/dev/null; then
@@ -226,7 +248,7 @@ else
 	say FAIL "缺少 init 脚本 $INITD（请重新安装软件包）"
 fi
 
-# 10 ------------------------------------------------------------ port / bind
+# 11 ------------------------------------------------------------ port / bind
 port="$(uci_get main.port 18789)"
 if ! oc_safe_port "$port"; then
 	uci_set main.port 18789
@@ -255,14 +277,14 @@ else
 	say OK "端口 $port 空闲"
 fi
 
-# 11 ------------------------------------------------------------ CA certs
+# 12 ------------------------------------------------------------ CA certs
 if oc_ca_ok; then
 	say OK "CA 证书已安装"
 else
 	say WARN "未找到 CA 证书，HTTPS 下载可能失败：$(oc_pkg_install_hint) ca-certificates"
 fi
 
-# 12 ------------------------------------------------------------ luci cache
+# 13 ------------------------------------------------------------ luci cache
 if [ -e /tmp/luci-indexcache ] || [ -e /tmp/luci-modulecache ]; then
 	rm -f /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null
 	say FIX "已清理 LuCI 缓存"
@@ -270,7 +292,7 @@ else
 	say OK "LuCI 缓存为空"
 fi
 
-# 13 ------------------------------------------------------------ openclaw self-check
+# 14 ------------------------------------------------------------ openclaw self-check
 # 先修环境，再让 OpenClaw 修它自己的配置，最后重启 —— 这样 doctor --fix 的
 # 修改能随最后一次重启生效。doctor --fix 可能因个别问题修不了而返回非零，
 # 因此只记 WARN，不让整次 repair 判失败。
@@ -292,7 +314,7 @@ else
 	say OK "未安装，跳过 doctor --fix"
 fi
 
-# 14 ------------------------------------------------------------ restart
+# 15 ------------------------------------------------------------ restart
 if [ "$RESTART" = "1" ] && [ -x "$OB" ] && [ -x "$NB" ]; then
 	"$INITD" restart >/dev/null 2>&1 && say FIX "已重启服务" || say WARN "服务重启失败（见日志）"
 	sleep 1
