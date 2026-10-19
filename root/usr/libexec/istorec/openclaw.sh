@@ -18,6 +18,7 @@ OC_MODELS="/usr/libexec/openclaw/models.sh"
 OC_CHANNELS="/usr/libexec/openclaw/channels.sh"
 OC_REPAIR="/usr/libexec/openclaw/repair.sh"
 OC_BACKUP="/usr/libexec/openclaw/backup.sh"
+OC_CLOUD="/usr/libexec/openclaw/cloud.sh"
 . "$OC_LIB"
 
 INITD="/etc/init.d/openclaw"
@@ -1498,6 +1499,22 @@ cmd_restore() {
 	sh "$OC_BACKUP" restore "$@"
 }
 
+# ---------------------------------------------------------------- cloud
+# 云备份的实现在 cloud.sh 里；这里只做透传，不复制任何业务逻辑。
+# cloud.sh 自己保证 stdout 只有一行 JSON、日志走 stderr / $OC_TASKLOG，
+# 所以这里不需要（也不能）再包一层 JSON。
+#   cloud <动作>       动作见 usage（status / upload / schedule-apply / backup-run ...）
+#   cloud-status       便捷入口：等价于 cloud status
+# backup-run 由 cron 调用，自己取锁；schedule-* 只改 crontab，不需要安装目录守卫。
+cmd_cloud() {
+	shift
+	sh "$OC_CLOUD" "$@"
+}
+
+cmd_cloud_status() {
+	sh "$OC_CLOUD" status
+}
+
 # ---------------------------------------------------------------- export
 # 诊断导出：把排查问题需要的日志 / 系统信息 / 配置打成一个 tar.gz。
 #
@@ -2011,6 +2028,8 @@ case "${1:-}" in
 	backup-log)    cmd_backup_log "$@" ;;
 	backup-path)   sh "$OC_BACKUP" path ;;
 	restore)       cmd_restore "$@" ;;
+	cloud)         cmd_cloud "$@" ;;
+	cloud-status)  cmd_cloud_status ;;
 	export)        cmd_export "$@" ;;
 	run)           cmd_run "$@" ;;
 	mounts)        cmd_mounts ;;
@@ -2063,6 +2082,13 @@ Usage: openclaw.sh <command> [options]
                             default 50, max 500)
   backup-path               print the backup directory
   restore <file> [--no-safety]   validate, snapshot, then restore
+  cloud <status|install-cli|login-url|login-code|logout|upload|ls|download|rm|
+         schedule-status|schedule-apply|schedule-clear|backup-run>
+                           百度网盘云备份（后端透传，stdout 为单行 JSON）。
+                           schedule-apply 按 UCI 的 cloud_* 写入 crontab 的
+                           openclaw-cloud 行；backup-run 是 cron 入口，自己取锁
+                           并写 $OC_TASKLOG，失败时同样 exit 0
+  cloud-status              等价于 cloud status
   log [n] | tasklog [n]
   unlock                    clear a stale operation lock (refuses while the
                             lock holder is still running; JSON on stdout)

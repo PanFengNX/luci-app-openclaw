@@ -21,4 +21,17 @@ config main 'main'
 	option preinstall_providers 'deepseek'
 	# 安装成功后自动启动服务（1=设置开机自启并启动，0=装完保持停止，稍后手动启动）
 	option auto_start '1'
+	# 云备份：定时备份（按周期自动打包上传，并保留最近 N 份）
+	#   cloud_enabled  1=启用（在 crontab 写入带 openclaw-cloud 标记的行），0=关闭
+	#   cloud_period   daily=每天 | weekly=每周（仅 weekly 使用 cloud_weekday）
+	#   cloud_weekday  0=周日 … 6=周六（cron 里 0 与 7 都表示周日，这里统一用 0）
+	#   cloud_hour     0-23
+	#   cloud_minute   0-59
+	#   cloud_keep     保留最近 N 份（1-30），只清理符合 openclaw-*.tar.gz[.enc] 的文件
+	option cloud_enabled '0'
+	option cloud_period 'daily'
+	option cloud_weekday '0'
+	option cloud_hour '4'
+	option cloud_minute '30'
+	option cloud_keep '7'
 	option installed '0'

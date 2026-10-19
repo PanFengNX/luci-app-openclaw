@@ -21,6 +21,16 @@ uci -q get openclaw.main >/dev/null 2>&1 || {
 # 安装成功后是否自动启动服务：1=自动（默认），0=装完保持停止
 [ -n "$(uci -q get openclaw.main.auto_start)" ] || uci -q set openclaw.main.auto_start=1
 
+# 云备份：定时备份（周期 / 星期 / 时分 / 保留份数）。
+# 与 state_dir 同样的判断方式：只有「键不存在」才写默认值 ——
+# 用户显式保存的 0 是合法值，不能用 [ -n ] 把它当成"未设置"。
+uci -q get openclaw.main.cloud_enabled >/dev/null 2>&1 || uci -q set openclaw.main.cloud_enabled=0
+uci -q get openclaw.main.cloud_period  >/dev/null 2>&1 || uci -q set openclaw.main.cloud_period=daily
+uci -q get openclaw.main.cloud_weekday >/dev/null 2>&1 || uci -q set openclaw.main.cloud_weekday=0
+uci -q get openclaw.main.cloud_hour    >/dev/null 2>&1 || uci -q set openclaw.main.cloud_hour=4
+uci -q get openclaw.main.cloud_minute  >/dev/null 2>&1 || uci -q set openclaw.main.cloud_minute=30
+uci -q get openclaw.main.cloud_keep    >/dev/null 2>&1 || uci -q set openclaw.main.cloud_keep=7
+
 # 数据根目录（openclaw.json / .env / 会话 / 工作区都在它下面）。
 # 空字符串是**合法默认值**：表示沿用 <安装目录>/home/.openclaw 的历史行为。
 # 所以这里不能用上面那些 [ -n ] 写法 —— 空值会让判断永远为假，把"显式留空"

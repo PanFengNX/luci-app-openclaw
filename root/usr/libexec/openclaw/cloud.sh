@@ -18,6 +18,16 @@
 #   cloud.sh pass-status
 #   cloud.sh set-pass          （口令从 stdin 读）
 #   cloud.sh clear-pass
+#   cloud.sh schedule-status   当前定时备份设置 + crontab 里的那一行
+#   cloud.sh schedule-apply    按 UCI 写入/更新 crontab（幂等）
+#   cloud.sh schedule-clear    从 crontab 删除本脚本的行
+#   cloud.sh backup-run        定时任务入口：create -> upload -> prune
+#
+# 定时备份的约定：
+#   * crontab 里只维护一行，行尾带 `# openclaw-cloud` 标记；其它行原样保留。
+#   * 改 crontab 一律「同目录临时文件 + 校验 + 备份 + chmod 600 + mv」。
+#   * backup-run 由 cron 调用：任何失败都只输出 JSON 并 exit 0，绝不返回非 0。
+#   * backup-run 自己取锁（与安装 / 修复 / 还原互斥）、自己写 $OC_TASKLOG。
 #
 # 约定：
 #   * stdout 只有一行 JSON；日志一律 oc_warn / oc_err（stderr）。
@@ -914,7 +924,12 @@ cloud_remote_size() {
 	printf '%s' "$sz"
 }
 
-cmd_upload() {
+cloud_upload_file() {
+	# cloud_upload_file <local-path> <remote-name>
+	#
+	# 上传主体：校验 -> （设置了口令时）加密 -> mkdir -> upload -> 回读远端大小。
+	# 手动上传（cmd_upload）与定时备份（backup-run）共用这一份实现。
+	# 失败走 cloud_fail（exit 1）；调用方若在子 shell 里调用，只会结束子 shell。
 	local local_path="${1:-}" name="${2:-}" bin tmp rc size lsize err
 	local encrypted=false remote_name upload_path encdir enc_out csize magic ver pass
 
@@ -1025,6 +1040,10 @@ EOF
 	cloud_tmp_cleanup
 	printf '{"ok":true,"remote":"%s","size":%s,"encrypted":%s}\n' \
 		"$(jstr "$OC_CLOUD_REMOTE/$remote_name")" "$size" "$encrypted"
+}
+
+cmd_upload() {
+	cloud_upload_file "${1:-}" "${2:-}"
 }
 
 # ---------------------------------------------------------------- ls
@@ -1241,13 +1260,21 @@ cmd_download_dec() {
 }
 
 # ---------------------------------------------------------------- rm
-cmd_rm() {
+# 删除失败原因（不含凭据）；由 cloud_rm_remote 写入，调用方拼进 JSON / 日志。
+OC_RM_ERR=""
+
+cloud_rm_remote() {
+	# cloud_rm_remote <remote-name> -> 0 成功 / 1 失败（原因在 $OC_RM_ERR）
+	# 不往 stdout 写任何东西：手动删除（cmd_rm）与远端轮转（backup-run）共用。
 	local name="${1:-}" bin help sub tmp rc out err
 
-	[ -n "$name" ] || cloud_fail "缺少远端文件名"
-	cloud_valid_remote_name "$name" || \
-		cloud_fail "远端文件名不合法（只允许字母数字与 . _ -，不能以 - 开头，长度 1-128）"
-	bin="$(cloud_bin_ready)" || cloud_fail "请先安装网盘组件"
+	OC_RM_ERR=""
+	[ -n "$name" ] || { OC_RM_ERR="缺少远端文件名"; return 1; }
+	cloud_valid_remote_name "$name" || {
+		OC_RM_ERR="远端文件名不合法（只允许字母数字与 . _ -，不能以 - 开头，长度 1-128）"
+		return 1
+	}
+	bin="$(cloud_bin_ready)" || { OC_RM_ERR="请先安装网盘组件"; return 1; }
 
 	# 只使用 CLI 自己声明的删除子命令；没有就明确拒绝，绝不自行拼 API。
 	help="$(cloud_run 30 "$bin" help 2>&1)"
@@ -1270,13 +1297,15 @@ cmd_rm() {
 		rc=$?
 		out="$(cat "$tmp" 2>/dev/null)"
 		rm -f "$tmp" 2>/dev/null
-		[ "$rc" -eq 0 ] && { printf '{"ok":true}\n'; return 0; }
+		[ "$rc" -eq 0 ] && return 0
 		case "$out" in
 			*unknown*|*Unknown*|*unrecognized*|*Unrecognized*|*"invalid command"*|*"no such command"*|*未知*|*不支持*)
-				cloud_fail "当前 CLI 不支持删除，请在网盘 App 里删除" ;;
+				OC_RM_ERR="当前 CLI 不支持删除，请在网盘 App 里删除"
+				return 1 ;;
 		esac
 		err="$(printf '%s' "$out" | cloud_redact | tail -n 5 | head -c 800)"
-		cloud_fail "删除失败（rc=$rc）：${err:-无输出}"
+		OC_RM_ERR="删除失败（rc=$rc）：${err:-无输出}"
+		return 1
 	fi
 
 	cloud_run 60 "$bin" "$sub" "$OC_CLOUD_REMOTE/$name" >"$tmp" 2>&1
@@ -1284,10 +1313,984 @@ cmd_rm() {
 	if [ "$rc" -ne 0 ]; then
 		err="$(cloud_tail_err "$tmp" 8)"
 		rm -f "$tmp" 2>/dev/null
-		cloud_fail "删除失败（rc=$rc）：${err:-无输出}"
+		OC_RM_ERR="删除失败（rc=$rc）：${err:-无输出}"
+		return 1
 	fi
 	rm -f "$tmp" 2>/dev/null
+	return 0
+}
+
+cmd_rm() {
+	local name="${1:-}"
+
+	[ -n "$name" ] || cloud_fail "缺少远端文件名"
+	cloud_valid_remote_name "$name" || \
+		cloud_fail "远端文件名不合法（只允许字母数字与 . _ -，不能以 - 开头，长度 1-128）"
+	cloud_rm_remote "$name" || cloud_fail "${OC_RM_ERR:-删除失败}"
 	printf '{"ok":true}\n'
+}
+
+# ---------------------------------------------------------------- schedule
+# 定时备份的 cron 行由本脚本自己维护，整行带 `# openclaw-cloud` 标记。
+# 规则：
+#   * 只增删带标记的行，其它行原样保留（顺序不变、注释不丢）。
+#   * 同目录临时文件 + 校验 + 备份 + chmod 600 + mv，保证原子替换。
+#   * 允许多次调用（幂等）：标记行最多一行。
+OC_CRONTAB="/etc/crontabs/root"
+OC_CRON_MARK="# openclaw-cloud"
+OC_CRON_CMD="/usr/libexec/openclaw/cloud.sh backup-run"
+
+# 本地归档由 backup.sh 负责：装到标准位置时用标准路径，否则退回脚本同目录。
+OC_CLOUD_BACKUP="/usr/libexec/openclaw/backup.sh"
+[ -f "$OC_CLOUD_BACKUP" ] || OC_CLOUD_BACKUP="$(dirname "$0")/backup.sh"
+
+cloud_sched_int() {
+	# cloud_sched_int <value> <default> <min> <max> <label> -> 合法整数
+	# 非法 / 越界值回落到默认值并 oc_warn；函数本身恒定成功。
+	local v="${1:-}" def="$2" lo="$3" hi="$4" label="$5" n
+
+	case "$v" in
+		'')
+			oc_warn "定时备份：$label 未设置，使用默认值 $def"
+			printf '%s' "$def"; return 0 ;;
+		*[!0-9]*)
+			oc_warn "定时备份：$label 不是整数（$v），使用默认值 $def"
+			printf '%s' "$def"; return 0 ;;
+	esac
+	# 去掉前导 0：避免 "08" 被当成八进制；同时挡住超长数字（busybox test 会溢出）
+	n="$(printf '%s' "$v" | sed 's/^0*//')"
+	[ -n "$n" ] || n=0
+	if [ ${#n} -gt 4 ]; then
+		oc_warn "定时备份：$label 超出范围（$v），使用默认值 $def"
+		printf '%s' "$def"; return 0
+	fi
+	if [ "$n" -lt "$lo" ] || [ "$n" -gt "$hi" ]; then
+		oc_warn "定时备份：$label 超出范围（$v，应为 $lo-$hi），使用默认值 $def"
+		printf '%s' "$def"; return 0
+	fi
+	printf '%s' "$n"
+}
+
+cloud_sched_enabled() {
+	# -> 1 / 0（兼容 true/yes/on 这类手写值）
+	local v
+	v="$(uci_get main.cloud_enabled '0')"
+	case "$v" in
+		1|true|TRUE|True|yes|on) printf '1' ;;
+		*)                        printf '0' ;;
+	esac
+}
+
+cloud_sched_period() {
+	local v
+	v="$(uci_get main.cloud_period 'daily')"
+	case "$v" in
+		daily|weekly) printf '%s' "$v" ;;
+		*) oc_warn "定时备份：周期取值非法（$v，应为 daily/weekly），使用 daily"
+		   printf 'daily' ;;
+	esac
+}
+
+cloud_sched_vals() {
+	# 读取并校验全部 6 个值；结果放在全局变量里（busybox ash 没有数组 / local -n）。
+	# uci 不存在或没有这个配置段时 uci_get 返回默认值，因此这里不会失败。
+	OC_SCH_ENABLED="$(cloud_sched_enabled)"
+	OC_SCH_PERIOD="$(cloud_sched_period)"
+	OC_SCH_WEEKDAY="$(cloud_sched_int "$(uci_get main.cloud_weekday '0')" 0 0 6 '星期（cloud_weekday）')"
+	OC_SCH_HOUR="$(cloud_sched_int "$(uci_get main.cloud_hour '4')" 4 0 23 '小时（cloud_hour）')"
+	OC_SCH_MINUTE="$(cloud_sched_int "$(uci_get main.cloud_minute '30')" 30 0 59 '分钟（cloud_minute）')"
+	OC_SCH_KEEP="$(cloud_sched_int "$(uci_get main.cloud_keep '7')" 7 1 30 '保留份数（cloud_keep）')"
+}
+
+cloud_cron_line() {
+	# 当前 crontab 里属于我们的那一行（没有则空串）。
+	# 用 index() 做字面匹配：标记里的 `#` 不是正则元字符，但路径里可能有别的。
+	[ -f "$OC_CRONTAB" ] || return 0
+	awk -v m="$OC_CRON_MARK" 'index($0, m) { sub(/\r$/, ""); print; exit }' "$OC_CRONTAB" 2>/dev/null
+}
+
+cloud_cron_count_mark() {
+	# cloud_cron_count_mark <file> -> 带标记的行数
+	awk -v m="$OC_CRON_MARK" 'index($0, m) { n++ } END { print n + 0 }' "$1" 2>/dev/null
+}
+
+cloud_cron_count_other() {
+	# cloud_cron_count_other <file> -> 不带标记的行数（用于确认别人的行一条都没丢）
+	awk -v m="$OC_CRON_MARK" 'index($0, m) == 0 { n++ } END { print n + 0 }' "$1" 2>/dev/null
+}
+
+cloud_cron_render() {
+	# 依赖 OC_SCH_*；cron 的星期字段 0 和 7 都是周日，这里统一写 0。
+	if [ "$OC_SCH_PERIOD" = "weekly" ]; then
+		printf '%s %s * * %s %s %s' \
+			"$OC_SCH_MINUTE" "$OC_SCH_HOUR" "$OC_SCH_WEEKDAY" "$OC_CRON_CMD" "$OC_CRON_MARK"
+	else
+		printf '%s %s * * * %s %s' \
+			"$OC_SCH_MINUTE" "$OC_SCH_HOUR" "$OC_CRON_CMD" "$OC_CRON_MARK"
+	fi
+}
+
+cloud_cron_write() {
+	# cloud_cron_write <line|""> -> 0 成功 / 1 失败（已 oc_warn）
+	#
+	# 步骤：快照 -> 过滤标记行（+ 追加新行）-> 校验 -> 备份 -> chmod 600 -> mv。
+	# 任何一步不满足都保持原文件不动。
+	local line="$1" dir tmp new bak n_other_old n_other_new
+
+	dir="$(dirname "$OC_CRONTAB")"
+	[ -d "$dir" ] || { oc_warn "crontab 目录不存在：$dir"; return 1; }
+
+	# 没有要写的行、也没有原文件：无事可做（不凭空创建空 crontab）
+	if [ -z "$line" ] && [ ! -f "$OC_CRONTAB" ]; then
+		return 0
+	fi
+
+	tmp="$dir/.openclaw-cron.$$"
+	new="$dir/.openclaw-cron.$$.new"
+	rm -f "$tmp" "$new" 2>/dev/null
+
+	if [ -f "$OC_CRONTAB" ]; then
+		if ! cat "$OC_CRONTAB" >"$tmp" 2>/dev/null; then
+			rm -f "$tmp" "$new" 2>/dev/null
+			oc_warn "无法读取 crontab：$OC_CRONTAB"
+			return 1
+		fi
+	else
+		: >"$tmp" 2>/dev/null || {
+			rm -f "$tmp" "$new" 2>/dev/null
+			oc_warn "无法创建临时文件：$tmp"
+			return 1
+		}
+	fi
+
+	# 只剩删除动作、而原文件里本来就没有我们的行：不必重写（保持 mtime 不变）
+	if [ -z "$line" ] && [ "$(cloud_cron_count_mark "$tmp")" -eq 0 ]; then
+		rm -f "$tmp" "$new" 2>/dev/null
+		return 0
+	fi
+
+	n_other_old="$(cloud_cron_count_other "$tmp")"
+
+	# 过滤：去掉所有带标记的行（无论几条），末尾按需追加新的一行。
+	if ! awk -v m="$OC_CRON_MARK" -v add="$line" '
+		index($0, m) == 0 { print }
+		END { if (add != "") print add }
+	' "$tmp" >"$new" 2>/dev/null; then
+		rm -f "$tmp" "$new" 2>/dev/null
+		oc_warn "生成新 crontab 失败"
+		return 1
+	fi
+
+	# 校验 1：我们的行最多一条
+	if [ "$(cloud_cron_count_mark "$new")" -gt 1 ]; then
+		rm -f "$tmp" "$new" 2>/dev/null
+		oc_warn "校验失败：新 crontab 里有多条 openclaw-cloud 行，已放弃写入"
+		return 1
+	fi
+	# 校验 2：别人的行一条都不能少
+	n_other_new="$(cloud_cron_count_other "$new")"
+	if [ "$n_other_new" -ne "$n_other_old" ]; then
+		rm -f "$tmp" "$new" 2>/dev/null
+		oc_warn "校验失败：其它行数量发生变化（$n_other_old -> $n_other_new），已放弃写入"
+		return 1
+	fi
+
+	# 备份原文件（存在才备份；备份失败就不动原文件）
+	if [ -f "$OC_CRONTAB" ]; then
+		bak="$OC_CRONTAB.openclaw.bak"
+		if ! cp -p "$OC_CRONTAB" "$bak" 2>/dev/null; then
+			rm -f "$tmp" "$new" 2>/dev/null
+			oc_warn "无法备份 crontab 到 $bak，已放弃写入"
+			return 1
+		fi
+		chmod 600 "$bak" 2>/dev/null || true
+	fi
+
+	chmod 600 "$new" 2>/dev/null || true
+	chown 0:0 "$new" 2>/dev/null || true
+	if ! mv -f "$new" "$OC_CRONTAB" 2>/dev/null; then
+		rm -f "$tmp" "$new" 2>/dev/null
+		oc_warn "无法替换 crontab：$OC_CRONTAB"
+		return 1
+	fi
+	chmod 600 "$OC_CRONTAB" 2>/dev/null || true
+	rm -f "$tmp" 2>/dev/null
+	return 0
+}
+
+cloud_cron_reload() {
+	# 重载 cron。全部失败只告警，不影响调用方的成功判定。
+	local p
+	if [ -x /etc/init.d/cron ]; then
+		/etc/init.d/cron reload >/dev/null 2>&1 && return 0
+		/etc/init.d/cron restart >/dev/null 2>&1 && return 0
+	fi
+	if command -v pidof >/dev/null 2>&1; then
+		p="$(pidof crond 2>/dev/null)"
+		if [ -n "$p" ]; then
+			# shellcheck disable=SC2086  # pidof 可能返回多个 pid
+			kill -HUP $p 2>/dev/null && return 0
+		fi
+	fi
+	oc_warn "crontab 已更新，但未能通知 cron 重载；请手动重启 cron 使计划生效"
+	return 1
+}
+
+cmd_schedule_status() {
+	local enabled=false installed=false line
+
+	cloud_sched_vals
+	line="$(cloud_cron_line)"
+	[ -n "$line" ] && installed=true
+	[ "$OC_SCH_ENABLED" = "1" ] && enabled=true
+
+	printf '{"ok":true,"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"installed":%s,"line":"%s"}\n' \
+		"$enabled" "$OC_SCH_PERIOD" "$OC_SCH_WEEKDAY" "$OC_SCH_HOUR" \
+		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$installed" "$(jstr "$line")"
+}
+
+cmd_schedule_apply() {
+	local enabled=false line=""
+
+	cloud_sched_vals
+	if [ "$OC_SCH_ENABLED" = "1" ]; then
+		enabled=true
+		line="$(cloud_cron_render)"
+	fi
+
+	cloud_cron_write "$line" || cloud_fail "写入 crontab 失败：$OC_CRONTAB"
+	cloud_cron_reload || true
+
+	printf '{"ok":true,"enabled":%s,"line":"%s"}\n' "$enabled" "$(jstr "$line")"
+}
+
+cmd_schedule_clear() {
+	cloud_cron_write "" || cloud_fail "清理 crontab 失败：$OC_CRONTAB"
+	cloud_cron_reload || true
+	printf '{"ok":true,"cleared":true}\n'
+}
+
+# ---------------------------------------------------------------- backup-run
+# cron 调用的入口。约束：
+#   * 任何失败都输出 JSON 并 exit 0 —— cron 会把非 0 退出码当失败并可能发邮件。
+#   * 自己取锁（与安装 / 修复 / 还原同一把锁），拿不到就记日志后退出。
+#   * 每一步都写 $OC_TASKLOG；日志里绝不出现口令 / token。
+br_log() {
+	# 只写 $OC_TASKLOG（不写 stderr）：cron 会把 stderr 当邮件内容。
+	# /var/log 在只读根文件系统上可能不可写，写失败绝不能影响主流程。
+	[ -n "${OC_TASKLOG:-}" ] || return 0
+	printf '%s [cloud-backup] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" \
+		>>"$OC_TASKLOG" 2>/dev/null || true
+	return 0
+}
+
+br_finish_fail() {
+	# br_finish_fail <message>：记一行汇总日志，输出 JSON，退出 0。
+	br_log "失败：$1"
+	printf '{"ok":false,"error":"%s"}\n' "$(jstr "$1")"
+	exit 0
+}
+
+br_cleanup() {
+	# 锁必须先释放：上传在子 shell 里跑，EXIT trap 可能已被 cloud_tmp_trap 顶掉，
+	# 这里显式清一次（幂等）。
+	cloud_tmp_cleanup
+	oc_lock_release
+	return 0
+}
+
+cloud_is_logged_in() {
+	# 0 = 已登录 / 1 = 未登录或无法确认。与 cmd_status 的判定口径一致。
+	local bin tmp rc out jlog logged
+
+	bin="$(cloud_bin_ready)" || return 1
+	tmp="$OC_RUNDIR/cloud-auth.$$"
+	rm -f "$tmp" 2>/dev/null
+	cloud_run 25 "$bin" whoami --json >"$tmp" 2>&1
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		# 老版本 CLI 可能没有 --json
+		cloud_run 25 "$bin" whoami >"$tmp" 2>&1
+		rc=$?
+	fi
+	out="$(cat "$tmp" 2>/dev/null)"
+	jlog="$(cloud_json_scalar "$tmp" logged_in)"
+	[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" loggedIn)"
+	[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" is_login)"
+	[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" isLogin)"
+	rm -f "$tmp" 2>/dev/null
+
+	case "$jlog" in
+		true|TRUE|True|1|yes|Yes)  logged=true ;;
+		false|FALSE|False|0|no|No) logged=false ;;
+		*)
+			case "$out" in
+				*未登录*|*"not logged in"*|*"Not logged in"*|*"not login"*|*"no login"*|*"login required"*|*"please login"*|*请先登录*|*未授权*)
+					logged=false ;;
+				*已登录*|*"logged in"*|*"Logged in"*|*"login as"*|*用户名*|*[Uu]sername*)
+					logged=true ;;
+				*)
+					[ "$rc" -eq 0 ] && logged=true || logged=false ;;
+			esac ;;
+	esac
+	[ "$logged" = "true" ]
+}
+
+cloud_remote_list_tsv() {
+	# 远端目录的 "isdir<TAB>mtime<TAB>name<TAB>size" 列表（读不到时返回 1）
+	local bin tmp out rc
+
+	bin="$(cloud_bin_ready)" || return 1
+	tmp="$OC_RUNDIR/cloud-ls.$$"
+	rm -f "$tmp" 2>/dev/null
+	cloud_run 60 "$bin" ls "$OC_CLOUD_REMOTE" --json >"$tmp" 2>&1 || {
+		rm -f "$tmp" 2>/dev/null
+		return 1
+	}
+	out="$(cloud_ls_tsv "$tmp")"
+	rc=$?
+	rm -f "$tmp" 2>/dev/null
+	[ "$rc" -eq 0 ] || return 1
+	[ -n "$out" ] || return 0
+	printf '%s\n' "$out"
+}
+
+br_prune() {
+	# br_prune <keep> -> stdout: 实际删除的数量；列不出远端时返回 1。
+	#
+	# 只处理符合 openclaw-*.tar.gz / openclaw-*.tar.gz.enc 的普通文件，
+	# 其余远端文件（别人的、目录、别的命名）一律不碰。
+	local keep="$1" listing tab cand total excess n name
+
+	listing="$(cloud_remote_list_tsv)" || return 1
+	tab="$(printf '\t')"
+	# 排序键：mtime 里的数字（epoch 与 ISO 时间串都能归一），左补零后按数值排；
+	# 同值时按文件名（名字自带时间戳）。输出的第一列是删除顺序。
+	cand="$(printf '%s\n' "$listing" | awk -F "$tab" '
+		$1 == "false" && ($3 ~ /^openclaw-.+\.tar\.gz$/ || $3 ~ /^openclaw-.+\.tar\.gz\.enc$/) {
+			mt = $2
+			gsub(/[^0-9]/, "", mt)
+			if (mt == "") mt = "0"
+			while (length(mt) < 12) mt = "0" mt
+			printf "%s\t%s\n", mt, $3
+		}' | sort -t "$tab" -k1,1 -k2,2)"
+
+	total=0
+	[ -n "$cand" ] && total="$(printf '%s\n' "$cand" | awk 'NF { n++ } END { print n + 0 }')"
+	excess=$((total - keep))
+	if [ "$excess" -le 0 ]; then
+		printf '0'
+		return 0
+	fi
+
+	n=0
+	while IFS="$tab" read -r _ name; do
+		[ -n "$name" ] || continue
+		[ "$n" -lt "$excess" ] || break
+		if cloud_rm_remote "$name"; then
+			n=$((n + 1))
+		else
+			oc_warn "清理旧备份失败（$name）：${OC_RM_ERR:-未知错误}"
+		fi
+	done <<EOF
+$(printf '%s\n' "$cand" | awk -v n="$excess" 'NF && c < n { print; c++ }')
+EOF
+	printf '%s' "$n"
+}
+
+cmd_backup_run() {
+	local enabled bin keep dir file local_path remote up outf errf rc pruned
+
+	# ---- 前置：启用 / 组件 / 登录 ----
+	enabled="$(cloud_sched_enabled)"
+	if [ "$enabled" != "1" ]; then
+		br_log "跳过：定时备份未启用（main.cloud_enabled）"
+		printf '{"ok":false,"error":"定时备份未启用"}\n'
+		exit 0
+	fi
+	bin="$(cloud_bin_ready)" || {
+		br_log "跳过：网盘组件未安装"
+		printf '{"ok":false,"error":"网盘组件未安装"}\n'
+		exit 0
+	}
+	if ! cloud_is_logged_in; then
+		br_log "跳过：尚未登录百度网盘"
+		printf '{"ok":false,"error":"尚未登录百度网盘"}\n'
+		exit 0
+	fi
+	[ -f "$OC_CLOUD_BACKUP" ] || {
+		br_log "跳过：找不到 backup.sh（$OC_CLOUD_BACKUP）"
+		printf '{"ok":false,"error":"找不到本地备份脚本"}\n'
+		exit 0
+	}
+
+	# ---- 互斥锁：与安装 / 修复 / 还原共用 ----
+	if ! oc_lock_acquire; then
+		br_log "跳过：另一个操作正在运行（$OC_LOCK_DIR）"
+		printf '{"ok":false,"error":"另一个操作正在运行，请稍后再试"}\n'
+		exit 0
+	fi
+	trap 'br_cleanup' EXIT
+	trap 'br_cleanup; exit 0' INT TERM HUP
+
+	keep="$(cloud_sched_int "$(uci_get main.cloud_keep '7')" 7 1 30 '保留份数（cloud_keep）')"
+	outf="$OC_RUNDIR/cloud-br-out.$$"
+	errf="$OC_RUNDIR/cloud-br-err.$$"
+	rm -f "$outf" "$errf" 2>/dev/null
+
+	# ---- a) 本地备份（复用 backup.sh create，范围：配置 + 会话 + 工作区）----
+	br_log "开始：创建本地备份（/etc/config/openclaw + 数据目录；不含程序与 Node）"
+	sh "$OC_CLOUD_BACKUP" create >"$outf" 2>"$errf"
+	rc=$?
+	if [ "$rc" -ne 0 ] || ! grep -q '"ok":true' "$outf" 2>/dev/null; then
+		# 只取最后几行错误，脱敏后写日志；绝不把整段输出塞进日志
+		br_log "本地备份失败（rc=$rc）：$(cloud_tail_err "$errf" 3 | tr '\n' ' ')"
+		rm -f "$outf" "$errf" 2>/dev/null
+		br_finish_fail "本地备份失败"
+	fi
+	[ -s "$errf" ] && br_log "backup.sh 提示：$(cloud_tail_err "$errf" 2 | tr '\n' ' ')"
+	file="$(sed -n 's/.*"file":"\([^"]*\)".*/\1/p' "$outf" 2>/dev/null | head -n1)"
+	rm -f "$outf" "$errf" 2>/dev/null
+
+	case "$file" in
+		'') br_finish_fail "本地备份未返回文件名" ;;
+		*/*|*..*) br_finish_fail "本地备份返回的文件名不合法：$file" ;;
+	esac
+	case "$file" in
+		openclaw-*.tar.gz) ;;
+		*) br_finish_fail "本地备份文件名不符合 openclaw-*.tar.gz：$file" ;;
+	esac
+
+	dir="$(sh "$OC_CLOUD_BACKUP" path 2>/dev/null)"
+	[ -n "$dir" ] || dir="$(oc_base_dir)/backups"
+	local_path="$dir/$file"
+	[ -f "$local_path" ] || br_finish_fail "本地备份文件不存在：$local_path"
+	br_log "本地备份完成：$file"
+
+	# ---- b) 上传（直接调用函数；放子 shell 里，失败只结束子 shell）----
+	br_log "开始上传：$file"
+	outf="$OC_RUNDIR/cloud-br-up.$$"
+	errf="$OC_RUNDIR/cloud-br-uperr.$$"
+	rm -f "$outf" "$errf" 2>/dev/null
+	( cloud_upload_file "$local_path" "$file" ) >"$outf" 2>"$errf"
+	rc=$?
+	if [ "$rc" -ne 0 ] || ! grep -q '"ok":true' "$outf" 2>/dev/null; then
+		up="$(sed -n 's/.*"error":"\([^"]*\)".*/\1/p' "$outf" 2>/dev/null | head -n1)"
+		[ -n "$up" ] || up="上传失败（rc=$rc）"
+		br_log "上传失败：$up"
+		rm -f "$outf" "$errf" 2>/dev/null
+		br_finish_fail "$up"
+	fi
+	remote="$(sed -n 's/.*"remote":"\([^"]*\)".*/\1/p' "$outf" 2>/dev/null | head -n1)"
+	rm -f "$outf" "$errf" 2>/dev/null
+	case "$remote" in
+		"$OC_CLOUD_REMOTE"/*) ;;
+		'') br_finish_fail "上传成功但未返回远端文件名" ;;
+		*)  br_finish_fail "上传返回的远端路径异常：$remote" ;;
+	esac
+	br_log "上传完成：$remote"
+
+	# ---- c) 轮转：只删符合命名规则的，删到只剩 keep 份 ----
+	pruned="$(br_prune "$keep")" || pruned=""
+	case "$pruned" in ''|*[!0-9]*)
+		br_log "警告：无法列出远端目录，本次跳过清理"
+		pruned=0 ;;
+	esac
+
+	br_log "完成：已上传 $remote；清理 $pruned 份旧备份（保留 $keep 份）"
+	printf '{"ok":true,"uploaded":"%s","pruned":%s}\n' "$(jstr "$remote")" "$pruned"
+	exit 0
+}
+
+# ---------------------------------------------------------------- schedule
+# 定时备份：由本脚本自己维护 /etc/crontabs/root 里的一行。
+#
+# 规则（这一节最容易写错，改动前先读完）：
+#   * 我们的行整行带 `# openclaw-cloud` 标记；cron 把 `#` 之后当 shell 注释，
+#     所以标记既能被我们识别，也不影响命令本身。
+#   * 只删除带标记的行，其它行（别人的任务、注释、空行）原样保留、顺序不变。
+#   * 改 crontab 必须：同目录临时文件 -> 校验 -> 备份 root.openclaw.bak ->
+#     chmod 600 -> mv（同目录 rename 才是原子替换）。
+#   * 校验两条：新文件里标记行 <= 1；非标记行数量与原文完全一致。
+#   * 幂等：重复调用不会堆出多行。
+OC_CRONTAB="/etc/crontabs/root"
+OC_CRON_MARK="# openclaw-cloud"
+OC_CRON_CMD="/usr/libexec/openclaw/cloud.sh backup-run"
+
+# 本地归档由 backup.sh 负责。标准安装位置优先；脚本与 backup.sh 同目录
+# （测试 / 非标准布局）时退回同目录，避免把路径写死后无法复用。
+OC_CLOUD_BACKUP="/usr/libexec/openclaw/backup.sh"
+[ -f "$OC_CLOUD_BACKUP" ] || OC_CLOUD_BACKUP="$(dirname "$0")/backup.sh"
+
+cloud_sched_int() {
+	# cloud_sched_int <value> <default> <min> <max> <label> -> 合法整数
+	# 非法 / 越界值回落到默认并 oc_warn（只写 stderr），函数本身恒定成功。
+	local v="${1:-}" def="$2" lo="$3" hi="$4" label="$5" n
+
+	case "$v" in
+		'')
+			oc_warn "定时备份：$label 未设置，使用默认值 $def"
+			printf '%s' "$def"; return 0 ;;
+		*[!0-9]*)
+			oc_warn "定时备份：$label 不是整数（$v），使用默认值 $def"
+			printf '%s' "$def"; return 0 ;;
+	esac
+	# 去掉前导 0：既避免 "08" 被当成八进制，也顺手压缩超长数字
+	n="$(printf '%s' "$v" | sed 's/^0*//')"
+	[ -n "$n" ] || n=0
+	# busybox 的 test 对超长整数会溢出，先按长度截断（与 oc_safe_port 同口径）
+	if [ ${#n} -gt 4 ]; then
+		oc_warn "定时备份：$label 超出范围（$v），使用默认值 $def"
+		printf '%s' "$def"; return 0
+	fi
+	if [ "$n" -lt "$lo" ] || [ "$n" -gt "$hi" ]; then
+		oc_warn "定时备份：$label 超出范围（$v，应为 $lo-$hi），使用默认值 $def"
+		printf '%s' "$def"; return 0
+	fi
+	printf '%s' "$n"
+}
+
+cloud_sched_enabled() {
+	# -> 1 / 0（兼容手写的 true/yes/on）
+	local v
+	v="$(uci_get main.cloud_enabled '0')"
+	case "$v" in
+		1|true|TRUE|True|yes|on) printf '1' ;;
+		*)                        printf '0' ;;
+	esac
+}
+
+cloud_sched_period() {
+	local v
+	v="$(uci_get main.cloud_period 'daily')"
+	case "$v" in
+		daily|weekly) printf '%s' "$v" ;;
+		*)
+			oc_warn "定时备份：周期取值非法（$v，应为 daily/weekly），使用 daily"
+			printf 'daily' ;;
+	esac
+}
+
+cloud_sched_vals() {
+	# 读取并校验全部 6 个值，结果写进全局变量（busybox ash 没有数组 / local -n）。
+	# uci 不存在、或配置段/键不存在时 uci_get 返回默认值，所以这里不会失败。
+	OC_SCH_ENABLED="$(cloud_sched_enabled)"
+	OC_SCH_PERIOD="$(cloud_sched_period)"
+	OC_SCH_WEEKDAY="$(cloud_sched_int "$(uci_get main.cloud_weekday '0')" 0 0 6 '星期（cloud_weekday）')"
+	OC_SCH_HOUR="$(cloud_sched_int "$(uci_get main.cloud_hour '4')" 4 0 23 '小时（cloud_hour）')"
+	OC_SCH_MINUTE="$(cloud_sched_int "$(uci_get main.cloud_minute '30')" 30 0 59 '分钟（cloud_minute）')"
+	OC_SCH_KEEP="$(cloud_sched_int "$(uci_get main.cloud_keep '7')" 7 1 30 '保留份数（cloud_keep）')"
+}
+
+cloud_cron_count() {
+	# cloud_cron_count <file> <marker|other>
+	# 用 index() 做字面匹配：标记里有 `#`，正则里不会出错，也不受 locale 影响。
+	[ -f "$1" ] || { printf '0'; return 0; }
+	awk -v m="$OC_CRON_MARK" -v want="$2" '
+		{
+			hit = (index($0, m) > 0)
+			if ((want == "marker" && hit) || (want == "other" && !hit)) n++
+		}
+		END { printf "%d", n + 0 }
+	' "$1" 2>/dev/null
+}
+
+cloud_cron_line() {
+	# 当前 crontab 里属于我们的那一行（没有则空串）
+	[ -f "$OC_CRONTAB" ] || return 0
+	awk -v m="$OC_CRON_MARK" '
+		index($0, m) { sub(/\r$/, ""); print; exit }
+	' "$OC_CRONTAB" 2>/dev/null
+}
+
+cloud_cron_render() {
+	# 依赖 OC_SCH_*。cron 的星期字段 0 和 7 都表示周日，这里统一写 0。
+	if [ "$OC_SCH_PERIOD" = "weekly" ]; then
+		printf '%s %s * * %s %s %s' \
+			"$OC_SCH_MINUTE" "$OC_SCH_HOUR" "$OC_SCH_WEEKDAY" \
+			"$OC_CRON_CMD" "$OC_CRON_MARK"
+	else
+		printf '%s %s * * * %s %s' \
+			"$OC_SCH_MINUTE" "$OC_SCH_HOUR" "$OC_CRON_CMD" "$OC_CRON_MARK"
+	fi
+}
+
+cloud_cron_write() {
+	# cloud_cron_write <line|""> -> 0 成功 / 1 失败（已 oc_warn）
+	#
+	# <line> 为空表示「只删除我们的行」。任何一步失败都不动原文件。
+	local line="$1" dir tmp new bak n_old n_new
+
+	dir="$(dirname "$OC_CRONTAB")"
+	[ -d "$dir" ] || { oc_warn "crontab 目录不存在：$dir"; return 1; }
+	# 没有原文件、也没有要写的行：什么都不做（不凭空创建空 crontab）
+	if [ ! -f "$OC_CRONTAB" ] && [ -z "$line" ]; then
+		return 0
+	fi
+
+	tmp="$dir/.openclaw-cron.$$"
+	new="$dir/.openclaw-cron.$$.new"
+	rm -f "$tmp" "$new" 2>/dev/null
+
+	# 1) 先把现有内容读进同目录临时文件（后续所有判断都基于这份快照）
+	if [ -f "$OC_CRONTAB" ]; then
+		if ! cat "$OC_CRONTAB" >"$tmp" 2>/dev/null; then
+			rm -f "$tmp" 2>/dev/null
+			oc_warn "无法读取 crontab：$OC_CRONTAB"
+			return 1
+		fi
+	else
+		: >"$tmp" 2>/dev/null || {
+			rm -f "$tmp" 2>/dev/null
+			oc_warn "无法创建临时文件：$tmp"
+			return 1
+		}
+	fi
+
+	# 没有任何标记行、也没有新行要写：不必重写（保持 mtime 与内容不变）
+	if [ -z "$line" ] && [ "$(cloud_cron_count "$tmp" marker)" -eq 0 ]; then
+		rm -f "$tmp" 2>/dev/null
+		return 0
+	fi
+
+	n_old="$(cloud_cron_count "$tmp" other)"
+
+	# 2) 删掉所有标记行，末尾按需追加一行新的
+	if ! awk -v m="$OC_CRON_MARK" -v add="$line" '
+		index($0, m) == 0 { print }
+		END { if (add != "") print add }
+	' "$tmp" >"$new" 2>/dev/null; then
+		rm -f "$tmp" "$new" 2>/dev/null
+		oc_warn "生成新 crontab 失败"
+		return 1
+	fi
+
+	# 3) 校验：标记行 <= 1，且别人的行一条都不能少
+	if [ "$(cloud_cron_count "$new" marker)" -gt 1 ]; then
+		rm -f "$tmp" "$new" 2>/dev/null
+		oc_warn "校验失败：新 crontab 里有多条 openclaw-cloud 行，已放弃写入"
+		return 1
+	fi
+	n_new="$(cloud_cron_count "$new" other)"
+	if [ "$n_new" -ne "$n_old" ]; then
+		rm -f "$tmp" "$new" 2>/dev/null
+		oc_warn "校验失败：其它行数量发生变化（$n_old -> $n_new），已放弃写入"
+		return 1
+	fi
+
+	# 4) 备份原文件（存在才备份；备份失败就不动原文件）
+	if [ -f "$OC_CRONTAB" ]; then
+		bak="$OC_CRONTAB.openclaw.bak"
+		if ! cp -p "$OC_CRONTAB" "$bak" 2>/dev/null; then
+			rm -f "$tmp" "$new" 2>/dev/null
+			oc_warn "无法备份 crontab 到 $bak，已放弃写入"
+			return 1
+		fi
+		chmod 600 "$bak" 2>/dev/null || true
+	fi
+
+	# 5) 原子替换：chmod 600 + mv（同目录 rename）
+	chmod 600 "$new" 2>/dev/null || true
+	chown 0:0 "$new" 2>/dev/null || true
+	if ! mv -f "$new" "$OC_CRONTAB" 2>/dev/null; then
+		rm -f "$tmp" "$new" 2>/dev/null
+		oc_warn "无法替换 crontab：$OC_CRONTAB"
+		return 1
+	fi
+	chmod 600 "$OC_CRONTAB" 2>/dev/null || true
+	rm -f "$tmp" 2>/dev/null
+	return 0
+}
+
+cloud_cron_reload() {
+	# 重载 cron：reload -> restart -> kill -HUP $(pidof crond)。
+	# 全部失败只告警，绝不让调用方判定为失败。
+	local p
+	if [ -x /etc/init.d/cron ]; then
+		/etc/init.d/cron reload >/dev/null 2>&1 && return 0
+		/etc/init.d/cron restart >/dev/null 2>&1 && return 0
+	fi
+	if command -v pidof >/dev/null 2>&1; then
+		p="$(pidof crond 2>/dev/null)"
+		if [ -n "$p" ]; then
+			# shellcheck disable=SC2086  # pidof 可能返回多个 pid
+			kill -HUP $p 2>/dev/null && return 0
+		fi
+	fi
+	oc_warn "crontab 已更新，但未能通知 cron 重载；请手动重启 cron 使计划生效"
+	return 1
+}
+
+cmd_schedule_status() {
+	local enabled=false installed=false line
+
+	cloud_sched_vals
+	line="$(cloud_cron_line)"
+	[ -n "$line" ] && installed=true
+	[ "$OC_SCH_ENABLED" = "1" ] && enabled=true
+
+	printf '{"ok":true,"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"installed":%s,"line":"%s"}\n' \
+		"$enabled" "$OC_SCH_PERIOD" "$OC_SCH_WEEKDAY" "$OC_SCH_HOUR" \
+		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$installed" "$(jstr "$line")"
+}
+
+cmd_schedule_apply() {
+	local enabled=false line=""
+
+	cloud_sched_vals
+	if [ "$OC_SCH_ENABLED" = "1" ]; then
+		enabled=true
+		line="$(cloud_cron_render)"
+	fi
+
+	cloud_cron_write "$line" || cloud_fail "写入 crontab 失败：$OC_CRONTAB"
+	cloud_cron_reload || true
+
+	printf '{"ok":true,"enabled":%s,"line":"%s"}\n' "$enabled" "$(jstr "$line")"
+}
+
+cmd_schedule_clear() {
+	cloud_cron_write "" || cloud_fail "清理 crontab 失败：$OC_CRONTAB"
+	cloud_cron_reload || true
+	printf '{"ok":true,"cleared":true}\n'
+}
+
+# ---------------------------------------------------------------- backup-run
+# cron 调用的入口。约束：
+#   * 任何失败都只输出一行 JSON 并 exit 0 —— cron 会把非 0 退出码当任务失败。
+#   * 自己取锁（与安装 / 修复 / 还原同一把），拿不到就记日志后退出 0。
+#   * 每一步都写 $OC_TASKLOG（带时间戳）；日志里绝不出现口令 / token。
+#   * 上传直接调用 cloud_upload_file，不 exec 自己。
+br_log() {
+	# 只写 $OC_TASKLOG，不写 stderr：cron 可能把 stderr 当邮件内容。
+	# /var/log 在只读根文件系统上可能不可写，写失败绝不能影响主流程。
+	[ -n "${OC_TASKLOG:-}" ] || return 0
+	printf '%s [cloud-backup] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" \
+		>>"$OC_TASKLOG" 2>/dev/null || true
+	return 0
+}
+
+br_fail() {
+	# br_fail <message>：记一行汇总日志 + 输出 JSON + 退出 0（cron 入口专用）
+	br_log "失败：$1"
+	printf '{"ok":false,"error":"%s"}\n' "$(jstr "$1")"
+	exit 0
+}
+
+br_cleanup() {
+	# 锁与临时文件都显式收尾。上传在子 shell 里跑，它可能覆盖过 EXIT trap，
+	# 这里不依赖任何继承下来的 trap 状态（两个动作都是幂等的）。
+	cloud_tmp_cleanup
+	oc_lock_release
+	return 0
+}
+
+cloud_is_logged_in() {
+	# 0 = 已登录；1 = 未登录 / 无法确认。判定口径与 cmd_status 保持一致。
+	local bin tmp rc out jlog logged
+
+	bin="$(cloud_bin_ready)" || return 1
+	tmp="$OC_RUNDIR/cloud-auth.$$"
+	rm -f "$tmp" 2>/dev/null
+	cloud_run 25 "$bin" whoami --json >"$tmp" 2>&1
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		# 老版本 CLI 可能没有 --json
+		cloud_run 25 "$bin" whoami >"$tmp" 2>&1
+		rc=$?
+	fi
+	out="$(cat "$tmp" 2>/dev/null)"
+	jlog="$(cloud_json_scalar "$tmp" logged_in)"
+	[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" loggedIn)"
+	[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" is_login)"
+	[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" isLogin)"
+	rm -f "$tmp" 2>/dev/null
+
+	case "$jlog" in
+		true|TRUE|True|1|yes|Yes)  logged=true ;;
+		false|FALSE|False|0|no|No) logged=false ;;
+		*)
+			case "$out" in
+				*未登录*|*"not logged in"*|*"Not logged in"*|*"not login"*|*"no login"*|*"login required"*|*"please login"*|*请先登录*|*未授权*)
+					logged=false ;;
+				*已登录*|*"logged in"*|*"Logged in"*|*"login as"*|*用户名*|*[Uu]sername*)
+					logged=true ;;
+				*)
+					[ "$rc" -eq 0 ] && logged=true || logged=false ;;
+			esac ;;
+	esac
+	[ "$logged" = "true" ]
+}
+
+cloud_remote_list_tsv() {
+	# 远端目录列表："isdir<TAB>mtime<TAB>name<TAB>size"；读不到时返回 1。
+	local bin tmp out rc
+
+	bin="$(cloud_bin_ready)" || return 1
+	tmp="$OC_RUNDIR/cloud-ls.$$"
+	rm -f "$tmp" 2>/dev/null
+	cloud_run 60 "$bin" ls "$OC_CLOUD_REMOTE" --json >"$tmp" 2>&1 || {
+		rm -f "$tmp" 2>/dev/null
+		return 1
+	}
+	out="$(cloud_ls_tsv "$tmp")"
+	rc=$?
+	rm -f "$tmp" 2>/dev/null
+	[ "$rc" -eq 0 ] || return 1
+	[ -n "$out" ] || return 0
+	printf '%s\n' "$out"
+}
+
+br_prune() {
+	# br_prune <keep> -> stdout: 实际删除的份数；列不出远端时返回 1。
+	#
+	# 只处理符合 openclaw-*.tar.gz / openclaw-*.tar.gz.enc 的普通文件；
+	# 目录、别人的文件、其它命名一律不碰。删除失败只告警、继续下一份。
+	local keep="$1" listing cand tab total excess n name
+
+	listing="$(cloud_remote_list_tsv)" || return 1
+	tab="$(printf '\t')"
+	# 排序键：mtime 里的数字（epoch 与 ISO 时间串都能归一），左补零后按字符串
+	# 比较即可；同值时按文件名（我们的名字自带时间戳）。输出为「最旧在前」。
+	cand="$(printf '%s\n' "$listing" | awk -F "$tab" '
+		$1 == "false" && ($3 ~ /^openclaw-.+\.tar\.gz$/ || $3 ~ /^openclaw-.+\.tar\.gz\.enc$/) {
+			mt = $2
+			gsub(/[^0-9]/, "", mt)
+			if (mt == "") mt = "0"
+			while (length(mt) < 12) mt = "0" mt
+			printf "%s\t%s\n", mt, $3
+		}' | sort -t "$tab" -k1,1 -k2,2)"
+
+	total="$(printf '%s\n' "$cand" | awk 'NF { n++ } END { printf "%d", n + 0 }')"
+	case "$total" in ''|*[!0-9]*) total=0 ;; esac
+	excess=$((total - keep))
+	if [ "$excess" -le 0 ]; then
+		printf '0'
+		return 0
+	fi
+
+	n=0
+	# 用 here-doc 而不是管道：管道里的 while 在子 shell 里跑，n 回传不出来。
+	while IFS="$tab" read -r _ name; do
+		[ -n "$name" ] || continue
+		[ "$n" -lt "$excess" ] || break
+		if cloud_rm_remote "$name"; then
+			n=$((n + 1))
+		else
+			oc_warn "清理旧备份失败（$name）：${OC_RM_ERR:-未知错误}"
+		fi
+	done <<EOF
+$(printf '%s\n' "$cand" | awk -v n="$excess" 'NF && c < n { print; c++ }')
+EOF
+	printf '%s' "$n"
+}
+
+cmd_backup_run() {
+	local enabled bin out errf file dir local_path remote pruned rc
+
+	# ---- 前置：启用 / 组件 / 登录；任一不满足都只记日志 + JSON + exit 0 ----
+	cloud_sched_vals
+	enabled="$OC_SCH_ENABLED"
+	if [ "$enabled" != "1" ]; then
+		br_log "跳过：定时备份未启用（main.cloud_enabled）"
+		printf '{"ok":false,"error":"定时备份未启用"}\n'
+		exit 0
+	fi
+	bin="$(cloud_bin_ready)" || {
+		br_log "跳过：网盘组件未安装"
+		printf '{"ok":false,"error":"网盘组件未安装"}\n'
+		exit 0
+	}
+	if ! cloud_is_logged_in; then
+		br_log "跳过：尚未登录百度网盘"
+		printf '{"ok":false,"error":"尚未登录百度网盘"}\n'
+		exit 0
+	fi
+	[ -f "$OC_CLOUD_BACKUP" ] || {
+		br_log "跳过：找不到本地备份脚本（$OC_CLOUD_BACKUP）"
+		printf '{"ok":false,"error":"找不到本地备份脚本"}\n'
+		exit 0
+	}
+
+	# ---- 互斥锁：与安装 / 修复 / 还原共用同一把 ----
+	if ! oc_lock_acquire; then
+		br_log "跳过：另一个操作正在运行（$OC_LOCK_DIR）"
+		printf '{"ok":false,"error":"另一个操作正在运行，请稍后再试"}\n'
+		exit 0
+	fi
+	trap 'br_cleanup' EXIT
+	trap 'br_cleanup; exit 0' INT TERM HUP
+
+	out="$OC_RUNDIR/cloud-br-out.$$"
+	errf="$OC_RUNDIR/cloud-br-err.$$"
+	rm -f "$out" "$errf" 2>/dev/null
+
+	# ---- a) 本地备份：复用 backup.sh create ----
+	# 范围就是 backup.sh 的默认范围：/etc/config/openclaw + 数据目录
+	# （配置、会话、工作区）；程序目录与 Node 运行时本来就不在备份里。
+	br_log "开始：创建本地备份（配置 + 会话 + 工作区；不含程序与 Node）"
+	sh "$OC_CLOUD_BACKUP" create >"$out" 2>"$errf"
+	rc=$?
+	if [ "$rc" -ne 0 ] || ! grep -q '"ok":true' "$out" 2>/dev/null; then
+		# 只取最后几行、脱敏后进日志；绝不把整段输出塞进去
+		br_log "本地备份失败（rc=$rc）：$(cloud_tail_err "$errf" 3 | tr '\n' ' ')"
+		rm -f "$out" "$errf" 2>/dev/null
+		br_fail "本地备份失败"
+	fi
+	[ -s "$errf" ] && br_log "backup.sh：$(cloud_tail_err "$errf" 3 | tr '\n' ' ')"
+	file="$(sed -n 's/.*"file":"\([^"]*\)".*/\1/p' "$out" 2>/dev/null | head -n1)"
+	rm -f "$out" "$errf" 2>/dev/null
+
+	case "$file" in
+		'') br_fail "本地备份未返回文件名" ;;
+		*/*|*..*) br_fail "本地备份返回的文件名不合法：$file" ;;
+	esac
+	case "$file" in
+		openclaw-*.tar.gz) ;;
+		*) br_fail "本地备份文件名不符合 openclaw-*.tar.gz：$file" ;;
+	esac
+
+	dir="$(sh "$OC_CLOUD_BACKUP" path 2>/dev/null)"
+	[ -n "$dir" ] || dir="$(oc_base_dir)/backups"
+	local_path="$dir/$file"
+	[ -f "$local_path" ] || br_fail "本地备份文件不存在：$local_path"
+	br_log "本地备份完成：$file"
+
+	# ---- b) 上传：直接调用函数（放子 shell，失败只结束子 shell，不带走锁）----
+	br_log "开始上传：$file"
+	out="$OC_RUNDIR/cloud-br-up.$$"
+	errf="$OC_RUNDIR/cloud-br-uperr.$$"
+	rm -f "$out" "$errf" 2>/dev/null
+	( cloud_upload_file "$local_path" "$file" ) >"$out" 2>"$errf"
+	rc=$?
+	if [ "$rc" -ne 0 ] || ! grep -q '"ok":true' "$out" 2>/dev/null; then
+		remote="$(sed -n 's/.*"error":"\([^"]*\)".*/\1/p' "$out" 2>/dev/null | head -n1)"
+		[ -n "$remote" ] || remote="上传失败（rc=$rc）"
+		br_log "上传失败：$remote"
+		rm -f "$out" "$errf" 2>/dev/null
+		br_fail "$remote"
+	fi
+	remote="$(sed -n 's/.*"remote":"\([^"]*\)".*/\1/p' "$out" 2>/dev/null | head -n1)"
+	rm -f "$out" "$errf" 2>/dev/null
+
+	case "$remote" in
+		"$OC_CLOUD_REMOTE"/*) ;;
+		'') br_fail "上传成功但未返回远端文件名" ;;
+		*)  br_fail "上传返回的远端路径异常：$remote" ;;
+	esac
+	br_log "上传完成：$remote"
+
+	# ---- c) 轮转：只删符合命名规则的，删到只剩 keep 份 ----
+	pruned="$(br_prune "$OC_SCH_KEEP")" || pruned=""
+	case "$pruned" in
+		''|*[!0-9]*)
+			br_log "警告：无法列出远端目录，本次跳过清理"
+			pruned=0 ;;
+	esac
+
+	br_log "完成：已上传 $remote；清理 $pruned 份旧备份（保留 $OC_SCH_KEEP 份）"
+	printf '{"ok":true,"uploaded":"%s","pruned":%s}\n' "$(jstr "$remote")" "$pruned"
+	exit 0
 }
 
 # ---------------------------------------------------------------- dispatch
@@ -1305,10 +2308,14 @@ case "${1:-}" in
 	pass-status) cmd_pass_status ;;
 	set-pass)    cmd_set_pass ;;
 	clear-pass)  cmd_clear_pass ;;
+	schedule-status) cmd_schedule_status ;;
+	schedule-apply)  cmd_schedule_apply ;;
+	schedule-clear)  cmd_schedule_clear ;;
+	backup-run)      cmd_backup_run ;;
 	*)
 		printf '{"ok":false,"error":"%s"}\n' "$(jstr "未知动作：${1:-}")"
 		cat >&2 <<EOF
-Usage: cloud.sh {status|install-cli|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|download-dec <name> <local>|rm <name>|pass-status|set-pass|clear-pass}
+Usage: cloud.sh {status|install-cli|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|download-dec <name> <local>|rm <name>|pass-status|set-pass|clear-pass|schedule-status|schedule-apply|schedule-clear|backup-run}
 EOF
 		exit 2 ;;
 esac

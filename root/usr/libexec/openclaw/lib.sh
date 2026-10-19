@@ -1370,7 +1370,8 @@ oc_pid_alive() {
 	[ -n "$cmd" ] || { OC_PID_REASON="reused"; return 1; }
 	case "$cmd" in
 		*istorec/openclaw.sh*|*openclaw/install.sh*|*openclaw/backup.sh*|\
-		*openclaw/models.sh*|*openclaw/channels.sh*|*openclaw/versions.sh*)
+		*openclaw/cloud.sh*|*openclaw/models.sh*|*openclaw/channels.sh*|\
+		*openclaw/versions.sh*)
 			return 0 ;;
 	esac
 	OC_PID_REASON="reused"
