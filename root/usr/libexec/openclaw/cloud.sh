@@ -18,6 +18,8 @@
 #   cloud.sh pass-status
 #   cloud.sh set-pass          （口令从 stdin 读）
 #   cloud.sh clear-pass
+#   cloud.sh encrypt-status    上传前加密开关 + 是否已设口令（不返回口令）
+#   cloud.sh set-encrypt       stdin 读一行 0/1，写入 main.cloud_encrypt
 #   cloud.sh schedule-status   当前定时备份设置 + crontab 里的那一行
 #   cloud.sh schedule-apply    按 UCI 写入/更新 crontab（幂等）
 #   cloud.sh schedule-set      stdin 读 key=value，校验后写 UCI 并同步 crontab
@@ -36,6 +38,10 @@
 #   * 绝不读取 / 打印 $HOME/.config/bdpan/config.json（内含 access_token）。
 #   * 口令绝不进 argv / env / URL / 日志：set-pass 与 download-dec 从 stdin 读，
 #     加密上传时从 $OC_CLOUD_DIR/pass（0600）读，经 heredoc 交给 node 的 stdin。
+#
+# 加密是否启用由 UCI 的 main.cloud_encrypt 决定（0=明文，1=加密，默认 0）；
+# 口令只是加密的**必要条件**：cloud_encrypt=1 但没有口令时上传直接报错，
+# 绝不静默降级为明文上传。cloud_encrypt=0 时即使本机还留着口令也明文上传。
 #
 # 加密文件格式（AES-256-GCM，scrypt N=16384 r=8 p=1，salt 16 字节）：
 #   偏移 0..5   魔数 "OCBK1\n"（6 字节）
@@ -627,6 +633,52 @@ cmd_clear_pass() {
 	printf '{"ok":true}\n'
 }
 
+# ---------------------------------------------------------------- encrypt switch
+cloud_encrypt_enabled() {
+	# -> 1 / 0（兼容手写的 true/yes/on；缺省 0 = 明文上传）
+	local v
+	v="$(uci_get main.cloud_encrypt '0')"
+	case "$v" in
+		1|true|TRUE|True|yes|on) printf '1' ;;
+		*)                       printf '0' ;;
+	esac
+}
+
+cmd_encrypt_status() {
+	# 只回 enabled / pass_set：绝不返回口令本身，也不返回任何可用来猜解的摘要。
+	local enabled=false pass_set=false
+	[ "$(cloud_encrypt_enabled)" = "1" ] && enabled=true
+	cloud_pass_present && pass_set=true
+	printf '{"ok":true,"enabled":%s,"pass_set":%s}\n' "$enabled" "$pass_set"
+}
+
+cmd_set_encrypt() {
+	# 只读 stdin 第一行（0/1）：不进 argv，ps 看不到。
+	# 与 schedule-set 一样「先校验、再写入」，非法输入一个字节都不落盘。
+	local v old rc
+
+	v="$(sed -n '1p' | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+	case "$v" in
+		0|1) ;;
+		*) cloud_fail "参数不合法：enabled 只能是 0 或 1" ;;
+	esac
+
+	old="$(uci_get main.cloud_encrypt '')"
+	if ! uci -q set "${OC_UCI}.main.cloud_encrypt=${v}" 2>/dev/null; then
+		cloud_fail "写入配置失败：cloud_encrypt=${v}"
+	fi
+	if ! uci -q commit "$OC_UCI" 2>/dev/null; then
+		# 旧值为空时 `uci set k=` 等价于删除该选项，正是还原语义。
+		uci -q set "${OC_UCI}.main.cloud_encrypt=${old}" 2>/dev/null || true
+		uci -q commit "$OC_UCI" 2>/dev/null || true
+		cloud_fail "写入配置失败：uci commit 失败（已回滚）"
+	fi
+
+	# 回读落盘后的真实值，而不是直接回显输入
+	if [ "$(cloud_encrypt_enabled)" = "1" ]; then rc=true; else rc=false; fi
+	printf '{"ok":true,"enabled":%s}\n' "$rc"
+}
+
 # ---------------------------------------------------------------- status
 cmd_status() {
 	local arch bin installed=false path="" ver="" logged=false user="" expires="" raw=""
@@ -928,8 +980,15 @@ cloud_remote_size() {
 cloud_upload_file() {
 	# cloud_upload_file <local-path> <remote-name>
 	#
-	# 上传主体：校验 -> （设置了口令时）加密 -> mkdir -> upload -> 回读远端大小。
-	# 手动上传（cmd_upload）与定时备份（backup-run）共用这一份实现。
+	# 上传主体：校验 -> （cloud_encrypt=1 且已设口令时）加密 -> mkdir -> upload
+	# -> 回读远端大小。手动上传（cmd_upload）与定时备份（backup-run）共用这一份
+	# 实现，判定只有这一处。
+	#
+	# 加密判定（唯一口径）：
+	#   main.cloud_encrypt=1 且口令已设置 -> 加密成 <name>.enc
+	#   main.cloud_encrypt=1 但口令未设置 -> 报错退出（绝不降级为明文上传）
+	#   main.cloud_encrypt=0 -> 明文上传（本机残留的口令不参与）
+	#
 	# 失败走 cloud_fail（exit 1）；调用方若在子 shell 里调用，只会结束子 shell。
 	local local_path="${1:-}" name="${2:-}" bin tmp rc size lsize err
 	local encrypted=false remote_name upload_path encdir enc_out csize magic ver pass
@@ -958,7 +1017,12 @@ cloud_upload_file() {
 	remote_name="$name"
 	upload_path="$local_path"
 
-	if cloud_pass_present; then
+	if [ "$(cloud_encrypt_enabled)" = "1" ]; then
+		# 开关打开：必须已有口令，否则明确报错。绝不能在这里悄悄走明文分支——
+		# 用户以为数据已加密，实际却把明文传了上去。
+		if ! cloud_pass_present; then
+			cloud_fail "已启用加密但未设置口令，请先设置口令或关闭加密"
+		fi
 		# 有口令 -> 先加密到私有 rundir，校验通过后才上传。
 		remote_name="$name.enc"
 		cloud_valid_remote_name "$remote_name" || \
@@ -2448,6 +2512,8 @@ case "${1:-}" in
 	pass-status) cmd_pass_status ;;
 	set-pass)    cmd_set_pass ;;
 	clear-pass)  cmd_clear_pass ;;
+	encrypt-status) cmd_encrypt_status ;;
+	set-encrypt)    cmd_set_encrypt ;;
 	schedule-status) cmd_schedule_status ;;
 	schedule-apply)  cmd_schedule_apply ;;
 	schedule-set)    cmd_schedule_set ;;
@@ -2456,7 +2522,7 @@ case "${1:-}" in
 	*)
 		printf '{"ok":false,"error":"%s"}\n' "$(jstr "未知动作：${1:-}")"
 		cat >&2 <<EOF
-Usage: cloud.sh {status|install-cli|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|download-dec <name> <local>|rm <name>|pass-status|set-pass|clear-pass|schedule-status|schedule-apply|schedule-set|schedule-clear|backup-run}
+Usage: cloud.sh {status|install-cli|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|download-dec <name> <local>|rm <name>|pass-status|set-pass|clear-pass|encrypt-status|set-encrypt|schedule-status|schedule-apply|schedule-set|schedule-clear|backup-run}
 EOF
 		exit 2 ;;
 esac

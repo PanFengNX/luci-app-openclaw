@@ -78,6 +78,8 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "cloud_pass_status"}, call("api_cloud_pass_status")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_pass_set"},    call("api_cloud_pass_set")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_pass_clear"},  call("api_cloud_pass_clear")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_encrypt_status"}, call("api_cloud_encrypt_status")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_encrypt_set"},    call("api_cloud_encrypt_set")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_schedule_status"}, call("api_cloud_schedule_status")).leaf = true
 	-- 诊断包下载（openclaw.sh export）：生成后立刻作为附件回传
 	entry({"admin", "services", "openclaw", "api", "export"}, call("api_export")).leaf = true
@@ -1193,6 +1195,28 @@ function api_cloud_pass_clear()
 		return
 	end
 	cloud_reply(cloud_exec("clear-pass"))
+end
+
+-- 上传前加密开关：是否加密由 UCI 的 main.cloud_encrypt 决定，口令只是必要条件。
+-- 这里只读/写开关本身，绝不读取或回传口令。
+function api_cloud_encrypt_status()
+	cloud_reply(cloud_exec("encrypt-status"))
+end
+
+function api_cloud_encrypt_set()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	local v = http.formvalue("enabled") or ""
+	-- 只接受 "0"/"1"：其它值一律拒绝，不做"看起来像真值"的宽松解释。
+	if v ~= "0" and v ~= "1" then
+		out({ ok = false, error = "enabled 只能是 0 或 1" })
+		return
+	end
+	-- 与 schedule-set 同一套 stdin 写法：0600 私有临时文件 + shell 重定向，
+	-- 值不进 argv / URL。
+	cloud_reply(cloud_exec_stdin("set-encrypt", v .. "\n"))
 end
 
 -- 只读：给界面回填当前定时设置。cloud.sh 没有「保存定时参数」的动作

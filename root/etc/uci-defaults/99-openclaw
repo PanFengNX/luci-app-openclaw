@@ -30,6 +30,9 @@ uci -q get openclaw.main.cloud_weekday >/dev/null 2>&1 || uci -q set openclaw.ma
 uci -q get openclaw.main.cloud_hour    >/dev/null 2>&1 || uci -q set openclaw.main.cloud_hour=4
 uci -q get openclaw.main.cloud_minute  >/dev/null 2>&1 || uci -q set openclaw.main.cloud_minute=30
 uci -q get openclaw.main.cloud_keep    >/dev/null 2>&1 || uci -q set openclaw.main.cloud_keep=7
+# 上传前加密：0=明文上传（默认），1=加密。只有「键不存在」才写默认值，
+# 用户显式保存的 0 不能被当成"未设置"。
+uci -q get openclaw.main.cloud_encrypt >/dev/null 2>&1 || uci -q set openclaw.main.cloud_encrypt=0
 
 # 数据根目录（openclaw.json / .env / 会话 / 工作区都在它下面）。
 # 空字符串是**合法默认值**：表示沿用 <安装目录>/home/.openclaw 的历史行为。

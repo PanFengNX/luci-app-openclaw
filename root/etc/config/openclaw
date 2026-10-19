@@ -28,7 +28,10 @@ config main 'main'
 	#   cloud_hour     0-23
 	#   cloud_minute   0-59
 	#   cloud_keep     保留最近 N 份（1-30），只清理符合 openclaw-*.tar.gz[.enc] 的文件
+	#   cloud_encrypt  上传前是否加密（0=明文上传，1=AES-256-GCM 加密；默认 0）
+	#                  加密是否启用只看本开关；口令只是加密的必要条件（1 且未设口令时上传报错）
 	option cloud_enabled '0'
+	option cloud_encrypt '0'
 	option cloud_period 'daily'
 	option cloud_weekday '0'
 	option cloud_hour '4'

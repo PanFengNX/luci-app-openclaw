@@ -155,7 +155,7 @@ select,input[type=text],input[type=password]{min-height:30px}
   <h3>百度网盘云备份</h3>
   <div class="oc-hint">
     把本机备份同步到百度网盘。备份文件内含 API Key，<b>请勿分享网盘目录</b>；
-    可先设置加密口令，上传前会用 AES-256-GCM 加密。
+    上传前加密是可选开关（默认关闭），开启后才会用 AES-256-GCM 加密。
   </div>
 
   <!-- ── 第一步：组件 ───────────────────────────────────────────── -->
@@ -214,6 +214,7 @@ select,input[type=text],input[type=password]{min-height:30px}
   <div class="oc-actions">
     <button id="btn-cl-backup" disabled>立即备份到云端</button>
     <button id="btn-cl-refresh" class="oc-btn ghost" disabled>刷新云端列表</button>
+    <span id="cl-enc-note" class="oc-hint" style="margin-top:0">本次上传：不加密</span>
   </div>
   <div id="cl-out" class="oc-out" style="margin-top:8px;display:none"></div>
   <div id="cl-err3" class="oc-err" style="font-size:12px;margin-top:6px"></div>
@@ -221,22 +222,33 @@ select,input[type=text],input[type=password]{min-height:30px}
 
   <!-- 加密 -->
   <div class="oc-sub">加密</div>
-  <div class="oc-hint">
-    设置口令后，上传前会用 AES-256-GCM 加密。<b>口令不会上传，插件保存在本机；口令丢失后备份无法恢复。</b>
+  <div class="oc-row">
+    <label for="cl-enc-on">上传前加密</label>
+    <input type="checkbox" id="cl-enc-on">
+    <span class="oc-hint">关闭时备份以原始 tar.gz 上传；开启后需设置口令，上传前用 AES-256-GCM 加密。</span>
   </div>
   <div class="oc-rowline">
-    <span>口令状态</span>
+    <span>加密状态</span>
     <span><span id="cl-pass-pill" class="oc-pill">读取中…</span></span>
   </div>
-  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
-    <input type="password" id="cl-pass1" autocomplete="new-password" maxlength="128"
-           placeholder="口令（8-128 个字符）" style="min-width:200px">
-    <input type="password" id="cl-pass2" autocomplete="new-password" maxlength="128"
-           placeholder="确认口令" style="min-width:200px">
+  <div id="cl-enc-off-hint" class="oc-hint" style="display:none">
+    当前不加密：备份将以原始 tar.gz 上传到网盘。
   </div>
-  <div class="oc-actions">
-    <button id="btn-cl-pass-save" disabled>保存口令</button>
-    <button id="btn-cl-pass-clear" class="oc-btn ghost" disabled>清除口令</button>
+  <div id="cl-pass-box" style="display:none">
+    <div class="oc-hint">
+      口令<b>不会上传</b>，只保存在本机；<b>口令丢失后已加密的备份无法恢复。</b>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+      <input type="password" id="cl-pass-new" autocomplete="new-password" maxlength="128"
+             placeholder="口令（8-128 个字符）" style="min-width:200px">
+      <input type="password" id="cl-pass-new2" autocomplete="new-password" maxlength="128"
+             placeholder="确认口令" style="min-width:200px">
+    </div>
+    <div class="oc-actions">
+      <button id="btn-cl-pass-save" disabled>保存口令</button>
+      <button id="btn-cl-pass-clear" class="oc-btn ghost" disabled>清除口令</button>
+    </div>
+    <div id="cl-enc-pass-hint" class="oc-hint"></div>
   </div>
   <div id="cl-err-pass" class="oc-err" style="font-size:12px;margin-top:6px"></div>
 
@@ -311,6 +323,8 @@ var API = {
   cloud_pass_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_pass_status")%>',
   cloud_pass_set: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_pass_set")%>',
   cloud_pass_clear: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_pass_clear")%>',
+  cloud_encrypt_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_encrypt_status")%>',
+  cloud_encrypt_set: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_encrypt_set")%>',
   cloud_schedule_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_schedule_status")%>'
 };
 
@@ -516,7 +530,7 @@ loadBackups();
 //   * 服务端返回的任何字符串只进 textContent / input.value，绝不拼 innerHTML。
 //   * 所有动作执行期间统一把按钮置灰（CL.busy），避免重复提交。
 //   * 失败一律显示在 .oc-err 区域；只有破坏性操作使用 confirm。
-//   * 页面加载只做只读查询（status / ls / pass-status / schedule-status），
+//   * 页面加载只做只读查询（status / ls / encrypt-status / schedule-status），
 //     不会自动下载或上传任何东西。
 var CL = {
   statusKnown: false,
@@ -524,6 +538,8 @@ var CL = {
   installed: false,
   logged: false,
   passSet: false,
+  encOn: false,        // main.cloud_encrypt：上传前加密开关（默认关闭）
+  encKnown: false,     // encrypt-status 是否已成功读取
   busy: false,
   arch: '',
   verText: ''
@@ -616,6 +632,8 @@ function clRender(){
   $('btn-cl-refresh').disabled    = !ready || CL.busy;
   $('btn-cl-pass-save').disabled  = !inst || CL.busy;
   $('btn-cl-pass-clear').disabled = !inst || CL.busy || !CL.passSet;
+  // 加密开关只写 UCI，不依赖网盘组件；执行期间统一置灰。
+  clRenderEncrypt();
   // 定时备份：后端没有写入定时参数的接口，保存按钮始终保持禁用。
   $('btn-cl-sch-save').disabled = true;
 
@@ -664,19 +682,100 @@ function clStatus(){
   });
 }
 
-function clPassStatus(){
-  get(API.cloud_pass_status, function(r){
-    var pill = $('cl-pass-pill');
-    if (r && r.ok && r.data && r.data.set === true){
-      CL.passSet = true;
-      pill.className = 'oc-pill ok';
-      pill.textContent = '已设置口令';
+// 加密区渲染：开关 / 三态药丸 / 口令区显隐 / 第三步的「本次上传」提示。
+// 状态组合：
+//   enabled=true  + passSet=true  -> ok   「已启用」
+//   enabled=true  + passSet=false -> warn 「已启用，未设口令」
+//   enabled=false                 -> 灰   「未启用」
+function clRenderEncrypt(){
+  var on = CL.encOn === true;
+  var pill = $('cl-pass-pill');
+  var note = $('cl-enc-note');
+
+  $('cl-enc-on').checked = on;
+  $('cl-enc-on').disabled = CL.busy || !CL.encKnown;
+
+  if (!CL.encKnown){
+    pill.className = 'oc-pill';
+    pill.textContent = '读取中…';
+  } else if (on && CL.passSet){
+    pill.className = 'oc-pill ok';
+    pill.textContent = '已启用';
+  } else if (on){
+    pill.className = 'oc-pill warn';
+    pill.textContent = '已启用，未设口令';
+  } else {
+    pill.className = 'oc-pill';
+    pill.textContent = '未启用';
+  }
+
+  // 口令区只在开关打开时出现；关闭时隐藏，但不清除已保存的口令。
+  $('cl-pass-box').style.display = on ? '' : 'none';
+  var offHint = $('cl-enc-off-hint');
+  offHint.style.display = (CL.encKnown && !on) ? '' : 'none';
+  offHint.textContent = CL.passSet
+    ? '当前不加密：备份将以原始 tar.gz 上传到网盘。口令仍保存在本机，重新开启后可直接使用。'
+    : '当前不加密：备份将以原始 tar.gz 上传到网盘。';
+  $('cl-enc-pass-hint').textContent = (on && !CL.passSet)
+    ? '请设置口令后才会生效；未设置口令时上传会直接报错。'
+    : (on && CL.passSet ? '口令已保存在本机，可直接使用。' : '');
+
+  if (note){
+    if (!CL.encKnown) note.textContent = '本次上传：状态未知';
+    else if (on && CL.passSet) note.textContent = '本次上传：加密（AES-256-GCM）';
+    else if (on) note.textContent = '本次上传：将失败（未设口令）';
+    else note.textContent = '本次上传：不加密';
+  }
+}
+
+function clEncryptStatus(){
+  get(API.cloud_encrypt_status, function(r){
+    if (r && r.ok && r.data){
+      CL.encKnown = true;
+      CL.encOn    = (r.data.enabled === true);
+      CL.passSet  = (r.data.pass_set === true);
     } else {
-      CL.passSet = false;
-      pill.className = 'oc-pill';
-      pill.textContent = '未设置口令';
+      CL.encKnown = false;
+      clErr('cl-err-pass', '读取加密设置失败' + clNet(r));
     }
+    clRenderEncrypt();
     clRender();
+  });
+}
+
+// 勾选 / 取消开关：立刻写 UCI。取消时只隐藏口令区，绝不自动清除已保存的口令。
+function clEncryptToggle(){
+  var want = $('cl-enc-on').checked ? '1' : '0';
+  var prev = CL.encOn;
+  // 先乐观更新本地状态再重绘：否则 clRenderEncrypt 会用旧值把复选框拨回去，
+  // 用户会看到一次「弹回」。写失败时再恢复 prev。
+  CL.encOn = (want === '1');
+  CL.busy = true;
+  clErr('cl-err-pass', '');
+  clRenderEncrypt();
+  clRender();
+
+  post(API.cloud_encrypt_set, { enabled: want }, function(r){
+    CL.busy = false;
+    if (!r || !r.ok){
+      // 写入失败：把状态恢复到服务端已知的值，避免界面与配置不一致。
+      CL.encOn = prev;
+      clErr('cl-err-pass', '保存加密开关失败：' + ((r && r.error) || '未知错误') + clNet(r));
+      clRenderEncrypt();
+      clRender();
+      return;
+    }
+    CL.encKnown = true;
+    // 以服务端回读值为准（enabled 是布尔）；缺字段时退回本次请求的意图。
+    CL.encOn = (r.data && typeof r.data.enabled === 'boolean')
+      ? r.data.enabled
+      : (want === '1');
+    clRenderEncrypt();
+    clRender();
+    if (CL.encOn && !CL.passSet){
+      // 切到开启且没有口令：口令区已经展开，把焦点送进去，减少一次点击。
+      try { $('cl-pass-new').focus(); } catch (e) {}
+    }
   });
 }
 
@@ -1096,8 +1195,8 @@ function clBackup(){
 
 // ---------------------------------------------------------------- 加密口令
 function clPassSave(){
-  var p1 = $('cl-pass1').value;
-  var p2 = $('cl-pass2').value;
+  var p1 = $('cl-pass-new').value;
+  var p2 = $('cl-pass-new2').value;
   if (p1.length < 8 || p1.length > 128){
     clErr('cl-err-pass', '口令长度必须为 8-128 个字符');
     return;
@@ -1112,10 +1211,12 @@ function clPassSave(){
   post(API.cloud_pass_set, { pass: p1 }, function(r){
     CL.busy = false;
     if (r && r.ok){
-      $('cl-pass1').value = '';
-      $('cl-pass2').value = '';
+      $('cl-pass-new').value = '';
+      $('cl-pass-new2').value = '';
       clErr('cl-err-pass', '');
-      clPassStatus();
+      // 口令保存后加密状态会从「已启用，未设口令」变成「已启用」，
+      // 统一走 encrypt-status 回填，避免前端自己推断。
+      clEncryptStatus();
     } else {
       clErr('cl-err-pass', '保存口令失败：' + ((r && r.error) || '未知错误') + clNet(r));
       clRender();
@@ -1131,7 +1232,7 @@ function clPassClear(){
     CL.busy = false;
     if (r && r.ok){
       clErr('cl-err-pass', '');
-      clPassStatus();
+      clEncryptStatus();
     } else {
       clErr('cl-err-pass', '清除口令失败：' + ((r && r.error) || '未知错误') + clNet(r));
       clRender();
@@ -1189,12 +1290,13 @@ $('btn-cl-backup').onclick     = clBackup;
 $('btn-cl-refresh').onclick    = function(){ clLoadList(); };
 $('btn-cl-pass-save').onclick  = clPassSave;
 $('btn-cl-pass-clear').onclick = clPassClear;
+$('cl-enc-on').onchange        = clEncryptToggle;
 // 定时备份的保存按钮保持禁用（后端缺写入接口），这里不绑定任何动作。
 
 // 初始渲染 + 只读查询（不会触发任何上传 / 下载）
 clRender();
 clStatus();
-clPassStatus();
+clEncryptStatus();
 clSchStatus();
 </script>
 <%+footer%>
