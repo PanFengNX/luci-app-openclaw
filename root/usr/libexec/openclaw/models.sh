@@ -539,12 +539,115 @@ catalog() {
 # 「刷新上游模型」：按 provider 的 Base URL 直接问上游要一份模型清单。
 # 只读、无副作用；stdout 只允许出现一行 JSON，诊断信息一律走 stderr。
 #
+# 清单分三级，优先级从高到低：
+#   1. 有 API Key  -> 问 provider 自己的 Base URL（权威、实时）
+#   2. 没有 Key    -> 问公开模型目录（无需鉴权，实时；绝不携带凭据）
+#   3. 都失败      -> 由前端回退到随包发布的内置清单
+# 返回的 JSON 里带 "source"（upstream / public），前端据此告诉用户清单来源。
+#
 # 密钥绝不能进 argv（/proc/<pid>/cmdline 全局可读）：Key 从 .env 读出后通过
 # curl 的 --config - 从 stdin 交给 curl，命令行里只有 URL 和固定参数。
 # 不传 -k：证书校验失败就应当失败，而不是静默降级。
 
 models_url_fail() {
 	printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "$1")"
+}
+
+# 公开模型目录：GET，无需鉴权。返回 {"data":[{"id":"z-ai/glm-5.3",...}]}。
+PUBLIC_MODELS_URL="https://openrouter.ai/api/v1/models"
+
+public_prefix() {
+	# public_prefix <provider> -> 公开目录里的厂商前缀；无映射时返回 1。
+	# 没在表里的 provider 不做公开目录查询，直接按原来的方式报错。
+	case "$1" in
+		zai)       printf '%s' 'z-ai' ;;
+		openai)    printf '%s' 'openai' ;;
+		deepseek)  printf '%s' 'deepseek' ;;
+		anthropic) printf '%s' 'anthropic' ;;
+		google)    printf '%s' 'google' ;;
+		moonshot)  printf '%s' 'moonshotai' ;;
+		minimax)   printf '%s' 'minimax' ;;
+		*)         return 1 ;;
+	esac
+}
+
+models_public() {
+	# models_public <provider> <base-url> <env-name> -> JSON (source=public) / 1
+	# 只在「没有 API Key」时调用：请求公开目录，请求里不含任何凭据。
+	# 成功时 baseUrl 仍是该 provider 自己的地址（后续 apply 会用到），
+	# 不是公开目录的地址。
+	local p="$1" base="$2" envname="$3" prefix body errf code rc msg ids first m
+	prefix="$(public_prefix "$p")" || return 1
+
+	if ! command -v curl >/dev/null 2>&1; then
+		oc_warn "系统缺少 curl，无法访问公开模型目录"
+		return 1
+	fi
+	if [ ! -d "$OC_RUNDIR" ] || [ ! -w "$OC_RUNDIR" ]; then
+		oc_warn "临时目录不可用"
+		return 1
+	fi
+
+	body="$OC_RUNDIR/models-public.$$.json"
+	errf="$OC_RUNDIR/models-public.$$.err"
+	# 公开目录不需要 Authorization：这里刻意不写任何 header 文件。
+	code="$(oc_timeout 20 curl -sS --max-time 20 --connect-timeout 10 \
+		-H 'Accept: application/json' -o "$body" -w '%{http_code}' \
+		"$PUBLIC_MODELS_URL" 2>"$errf")"
+	rc=$?
+
+	if [ "$rc" -ne 0 ]; then
+		msg="$(head -n1 "$errf" 2>/dev/null)"
+		rm -f "$body" "$errf"
+		[ -n "$msg" ] || msg="curl 退出码 $rc"
+		oc_warn "公开模型目录不可用：$msg"
+		return 1
+	fi
+	if [ "$code" != "200" ]; then
+		rm -f "$body" "$errf"
+		oc_warn "公开模型目录返回 HTTP ${code:-未知}"
+		return 1
+	fi
+
+	# jsonfilter 是 OpenWrt 基础包且比逐字符 awk 快得多；缺失时回退到
+	# json_slice + json_model_ids（与上游解析共用同一套解析器）。
+	ids=""
+	if command -v jsonfilter >/dev/null 2>&1; then
+		ids="$(jsonfilter -i "$body" -e '$["data"][*]["id"]' 2>/dev/null)"
+	fi
+	[ -n "$ids" ] || ids="$(json_slice data <"$body" 2>/dev/null | json_model_ids)"
+	rm -f "$body" "$errf"
+
+	# 只留 "<prefix>/" 开头的条目，去掉前缀；丢弃 ~ 别名与 :batch 变体。
+	ids="$(printf '%s\n' "$ids" | while IFS= read -r m; do
+		case "$m" in
+			"$prefix"/*) ;;
+			*) continue ;;
+		esac
+		m="${m#*/}"
+		case "$m" in
+			''|'~'*|*:batch) continue ;;
+		esac
+		printf '%s\n' "$m"
+	done | sort -u)"
+	if [ -z "$ids" ]; then
+		oc_warn "公开模型目录中没有 ${prefix}/* 的可用条目（${envname} 未配置）"
+		return 1
+	fi
+
+	printf '{"ok":true,"source":"public","baseUrl":"%s","models":[' "$(oc_json_str "$base")"
+	first=1
+	printf '%s\n' "$ids" | while IFS= read -r m; do
+		[ -n "$m" ] || continue
+		if [ "$first" = "1" ]; then
+			printf '"%s"' "$(oc_json_str "$m")"
+			first=0
+		else
+			printf ',"%s"' "$(oc_json_str "$m")"
+		fi
+	done
+	printf ']}\n'
+	return 0
 }
 
 env_key() {
@@ -570,7 +673,7 @@ env_key() {
 }
 
 models_url() {
-	# models_url <provider-id> -> {"ok":true,"baseUrl":"...","models":[...]}
+	# models_url <provider-id> -> {"ok":true,"source":"...","baseUrl":"...","models":[...]}
 	local p="${1:-}" base url envname key esc code rc body errf ids first m msg
 	case "$p" in
 		''|*[!A-Za-z0-9_.-]*|-*) models_url_fail "Provider 名称无效"; return 1 ;;
@@ -597,6 +700,9 @@ models_url() {
 	esac
 	key="$(env_key "$envname" | head -n1)"
 	if [ -z "$key" ]; then
+		# 没有 Key 不等于没有实时清单：先问公开目录（无需鉴权、不带凭据）。
+		# 取不到（无映射 / 网络失败 / 一条都没有）才走原来的报错路径。
+		models_public "$p" "$base" "$envname" && return 0
 		models_url_fail "未找到 ${envname}，请先在模型页填写并保存 API Key"
 		return 1
 	fi
@@ -662,7 +768,7 @@ models_url() {
 		return 1
 	fi
 
-	printf '{"ok":true,"baseUrl":"%s","models":[' "$(oc_json_str "$base")"
+	printf '{"ok":true,"source":"upstream","baseUrl":"%s","models":[' "$(oc_json_str "$base")"
 	first=1
 	printf '%s\n' "$ids" | while IFS= read -r m; do
 		[ -n "$m" ] || continue
