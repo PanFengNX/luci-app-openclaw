@@ -13,12 +13,27 @@
 #   cloud.sh upload <local-path> <remote-name>
 #   cloud.sh ls
 #   cloud.sh download <remote-name> <local-path>
+#   cloud.sh download-dec <remote-name> <local-path>   （口令从 stdin 第一行读）
 #   cloud.sh rm <remote-name>
+#   cloud.sh pass-status
+#   cloud.sh set-pass          （口令从 stdin 读）
+#   cloud.sh clear-pass
 #
 # 约定：
 #   * stdout 只有一行 JSON；日志一律 oc_warn / oc_err（stderr）。
 #   * 所有 bdpan 调用都带私有 HOME（登录态落点）并用 oc_timeout 包住。
 #   * 绝不读取 / 打印 $HOME/.config/bdpan/config.json（内含 access_token）。
+#   * 口令绝不进 argv / env / URL / 日志：set-pass 与 download-dec 从 stdin 读，
+#     加密上传时从 $OC_CLOUD_DIR/pass（0600）读，经 heredoc 交给 node 的 stdin。
+#
+# 加密文件格式（AES-256-GCM，scrypt N=16384 r=8 p=1，salt 16 字节）：
+#   偏移 0..5   魔数 "OCBK1\n"（6 字节）
+#   偏移 6      版本号 1（1 字节）
+#   偏移 7..22  salt（16 字节）
+#   偏移 23..34 iv（12 字节）
+#   偏移 35..50 GCM tag（16 字节）
+#   偏移 51..   密文
+# 加密后的远端文件名为 <原文件名>.enc。
 #
 # 目录（都在数据盘，重启不丢）：
 #   $OC_CLOUD_DIR    组件目录
@@ -40,6 +55,7 @@ OC_CLOUD_DIR="$(oc_base_dir)/cloud"
 OC_CLOUD_HOME="$OC_CLOUD_DIR/home"
 OC_CLOUD_BIN="$OC_CLOUD_DIR/bdpan"
 OC_CLOUD_REMOTE="openclaw-backups"
+OC_CLOUD_PASS="$OC_CLOUD_DIR/pass"
 OC_CLOUD_DEFAULT_VERSION="3.7.3"
 OC_CLOUD_CDN="https://issuecdn.baidupcs.com/issue/netdisk/ai-bdpan/installer"
 
@@ -352,6 +368,254 @@ cloud_valid_remote_name() {
 	return 0
 }
 
+# ---------------------------------------------------------------- crypto / pass
+# 加解密全部交给 Node（OpenWrt 上不保证有 openssl）。脚本经 -e 传入，本身不是
+# 秘密；口令只走 stdin（调用方用 heredoc 喂入），因此不会出现在
+# /proc/<pid>/cmdline 里。文件一律流式处理，几百 MB 的备份也不会整读进内存。
+#
+# 注意：下面这段 JS 里不要出现单引号 / 反引号 / $，否则会破坏 shell 的
+# 单引号字符串（busybox ash 没有更省事的转义办法）。
+OC_CRYPTO_JS='
+const fs = require("fs");
+const crypto = require("crypto");
+const { pipeline } = require("stream");
+
+const MAGIC = Buffer.from("OCBK1\n", "latin1");
+const HDR = 51;
+const VERSION = 1;
+const mode = process.argv[1];
+const src = process.argv[2];
+const dst = process.argv[3];
+
+function die(msg, code) {
+	process.stderr.write(String(msg) + "\n");
+	process.exit(code || 1);
+}
+
+function kdf(pass, salt) {
+	return crypto.scryptSync(pass, salt, 32, { N: 16384, r: 8, p: 1, maxmem: 67108864 });
+}
+
+function enc(pass) {
+	const salt = crypto.randomBytes(16);
+	const iv = crypto.randomBytes(12);
+	let key;
+	try { key = kdf(pass, salt); } catch (e) { die("scrypt failed: " + e.message); }
+	const hdr = Buffer.alloc(HDR);
+	MAGIC.copy(hdr, 0);
+	hdr[6] = VERSION;
+	salt.copy(hdr, 7);
+	iv.copy(hdr, 23);
+	try {
+		fs.writeFileSync(dst, hdr, { mode: 0o600, flag: "wx" });
+	} catch (e) {
+		die("cannot create output: " + e.message, e.code === "EEXIST" ? 3 : 1);
+	}
+	const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+	const rs = fs.createReadStream(src);
+	const ws = fs.createWriteStream(dst, { flags: "r+", start: HDR });
+	pipeline(rs, cipher, ws, function (err) {
+		if (err) {
+			try { fs.unlinkSync(dst); } catch (e2) {}
+			die("encrypt failed: " + err.message);
+		}
+		let tag;
+		try { tag = cipher.getAuthTag(); } catch (e) { die("no auth tag: " + e.message); }
+		try {
+			const fd = fs.openSync(dst, "r+");
+			try {
+				fs.writeSync(fd, tag, 0, tag.length, 35);
+				fs.fsyncSync(fd);
+			} finally {
+				fs.closeSync(fd);
+			}
+		} catch (e) {
+			try { fs.unlinkSync(dst); } catch (e2) {}
+			die("cannot write tag: " + e.message);
+		}
+	});
+}
+
+function dec(pass) {
+	let hdr;
+	try {
+		const fd = fs.openSync(src, "r");
+		try {
+			hdr = Buffer.alloc(HDR);
+			const n = fs.readSync(fd, hdr, 0, HDR, 0);
+			if (n !== HDR) die("header truncated");
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch (e) {
+		die("cannot read header: " + e.message);
+	}
+	if (!hdr.subarray(0, 6).equals(MAGIC)) die("bad magic");
+	if (hdr[6] !== VERSION) die("unsupported version: " + hdr[6]);
+	const salt = hdr.subarray(7, 23);
+	const iv = hdr.subarray(23, 35);
+	const tag = hdr.subarray(35, 51);
+	let key;
+	try { key = kdf(pass, salt); } catch (e) { die("scrypt failed: " + e.message); }
+	const ds = crypto.createDecipheriv("aes-256-gcm", key, iv);
+	ds.setAuthTag(tag);
+	const rs = fs.createReadStream(src, { start: HDR });
+	const ws = fs.createWriteStream(dst, { flags: "wx", mode: 0o600 });
+	pipeline(rs, ds, ws, function (err) {
+		if (err) {
+			// EEXIST 说明目标不是本次创建的，绝不能删掉它
+			if (err.code !== "EEXIST") {
+				try { fs.unlinkSync(dst); } catch (e2) {}
+			}
+			die("decrypt failed: " + err.message, err.code === "EEXIST" ? 3 : 1);
+		}
+	});
+}
+
+let pass = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", function (d) { pass += d; });
+process.stdin.on("end", function () {
+	pass = pass.replace(/\r?\n$/, "");
+	if (pass.length === 0) die("empty password");
+	if (mode === "enc") enc(pass);
+	else if (mode === "dec") dec(pass);
+	else die("unknown mode: " + mode);
+});
+'
+
+# 失败原因（不含口令）；由 cloud_crypto 写入，调用方拼进 JSON。
+OC_CRYPTO_ERR=""
+
+cloud_node_ready() {
+	local nb
+	nb="$(oc_node_bin)"
+	[ -n "$nb" ] && [ -x "$nb" ] || return 1
+	printf '%s' "$nb"
+}
+
+cloud_crypto() {
+	# cloud_crypto <enc|dec> <src> <dst>
+	# 口令从 stdin 读（调用方用 heredoc 喂入）。成功 0；失败返回 node 的退出码
+	# （3 = 目标已存在，调用方据此避免误删别人的文件），原因在 $OC_CRYPTO_ERR。
+	local mode="$1" src="$2" dst="$3" nb errf msg rc
+	nb="$(cloud_node_ready)" || {
+		OC_CRYPTO_ERR="Node.js 不可用（$(oc_node_bin)）"
+		return 1
+	}
+	errf="$OC_RUNDIR/cloud-crypto.$$.err"
+	rm -f "$errf" 2>/dev/null
+	"$nb" -e "$OC_CRYPTO_JS" "$mode" "$src" "$dst" 2>"$errf"
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		rm -f "$errf" 2>/dev/null
+		OC_CRYPTO_ERR=""
+		return 0
+	fi
+	msg="$(head -n 3 "$errf" 2>/dev/null | tr -d '\r' | tr '\n' ' ')"
+	rm -f "$errf" 2>/dev/null
+	OC_CRYPTO_ERR="${msg:-未知错误}"
+	return "$rc"
+}
+
+# 临时文件统一登记在这里，由 EXIT / INT / TERM trap 清理。
+# 只删具体文件 + rmdir，绝不递归删除。
+OC_TMPDIR=""
+OC_TMPFILE=""
+OC_TMPFILE2=""
+
+cloud_tmp_cleanup() {
+	if [ -n "$OC_TMPFILE" ]; then
+		rm -f "$OC_TMPFILE" 2>/dev/null
+	fi
+	if [ -n "$OC_TMPFILE2" ]; then
+		rm -f "$OC_TMPFILE2" 2>/dev/null
+	fi
+	if [ -n "$OC_TMPDIR" ]; then
+		rmdir "$OC_TMPDIR" 2>/dev/null
+	fi
+	OC_TMPFILE=""
+	OC_TMPFILE2=""
+	OC_TMPDIR=""
+	return 0
+}
+
+cloud_tmp_trap() {
+	trap 'cloud_tmp_cleanup' EXIT
+	trap 'cloud_tmp_cleanup; exit 1' INT TERM HUP
+}
+
+cloud_pass_present() {
+	# 存在且非空才算「已设置」：空的 pass 文件无法作为口令使用。
+	[ -f "$OC_CLOUD_PASS" ] && [ -s "$OC_CLOUD_PASS" ]
+}
+
+cloud_pass_read() {
+	# stdout: 口令原文；未设置 / 不可读时返回 1。
+	# 调用方只能用命令替换接收，绝不能把它拼进日志或 JSON。
+	cloud_pass_present || return 1
+	cat "$OC_CLOUD_PASS" 2>/dev/null
+}
+
+cmd_pass_status() {
+	local set=false hint
+	if cloud_pass_present; then
+		set=true
+		hint="已设置（保存在本机，不会上传）"
+	else
+		hint="未设置（上传的备份不会加密）"
+	fi
+	# 只回 set / hint：绝不返回口令本身，也不返回任何可用来猜解的摘要。
+	printf '{"ok":true,"set":%s,"hint":"%s"}\n' "$set" "$(jstr "$hint")"
+}
+
+cmd_set_pass() {
+	local pass tmp n
+	oc_validate_base_dir "$(oc_base_dir)" || cloud_fail "安装目录不可用：$(oc_base_dir)"
+	cloud_ensure_dirs || cloud_fail "无法创建云备份目录：$OC_CLOUD_DIR"
+
+	# 口令只从 stdin 读。tr -d '\r' 兼容 CRLF；命令替换会去掉行尾换行。
+	pass="$(tr -d '\r')"
+	n=${#pass}
+	if [ "$n" -lt 8 ] || [ "$n" -gt 128 ]; then
+		cloud_fail "口令长度必须为 8-128 个字符"
+	fi
+	case "$pass" in
+		*[[:cntrl:]]*) cloud_fail "口令不能包含控制字符" ;;
+	esac
+	case "$pass" in
+		*[![:space:]]*) ;;
+		*) cloud_fail "口令不能全是空格" ;;
+	esac
+
+	# 先写同目录临时文件（umask 077 + chmod 600），再 mv 原子替换。
+	# 下面这一处 printf 是口令唯一的落盘点：目标是 0600 私有文件，
+	# 绝不重定向到 stdout / stderr / 日志。
+	tmp="$OC_CLOUD_DIR/.pass.$$"
+	rm -f "$tmp" 2>/dev/null
+	if ! ( umask 077; printf '%s' "$pass" > "$tmp" ) 2>/dev/null; then
+		rm -f "$tmp" 2>/dev/null
+		cloud_fail "无法写入口令文件"
+	fi
+	chmod 600 "$tmp" 2>/dev/null
+	chown 0:0 "$tmp" 2>/dev/null || true
+	if ! mv -f "$tmp" "$OC_CLOUD_PASS" 2>/dev/null; then
+		rm -f "$tmp" 2>/dev/null
+		cloud_fail "无法保存口令文件"
+	fi
+	chmod 600 "$OC_CLOUD_PASS" 2>/dev/null
+	pass=""
+	printf '{"ok":true}\n'
+}
+
+cmd_clear_pass() {
+	# 只删这一个文件；不存在也算成功（幂等）。
+	if [ -f "$OC_CLOUD_PASS" ] || [ -L "$OC_CLOUD_PASS" ]; then
+		rm -f "$OC_CLOUD_PASS" 2>/dev/null || cloud_fail "无法删除口令文件"
+	fi
+	printf '{"ok":true}\n'
+}
+
 # ---------------------------------------------------------------- status
 cmd_status() {
 	local arch bin installed=false path="" ver="" logged=false user="" expires="" raw=""
@@ -652,11 +916,17 @@ cloud_remote_size() {
 
 cmd_upload() {
 	local local_path="${1:-}" name="${2:-}" bin tmp rc size lsize err
+	local encrypted=false remote_name upload_path encdir enc_out csize magic ver pass
 
 	[ -n "$local_path" ] || cloud_fail "缺少本地文件路径"
 	[ -n "$name" ] || cloud_fail "缺少远端文件名"
 	cloud_valid_remote_name "$name" || \
 		cloud_fail "远端文件名不合法（只允许字母数字与 . _ -，不能以 - 开头，长度 1-128）"
+	# .enc 是本批定义的加密标记：明文文件若以它结尾，下载时会被当成加密备份
+	# 而无法恢复，所以上传阶段直接拒绝（加密上传会自行追加 .enc）。
+	case "$name" in
+		*.enc) cloud_fail "远端文件名不能以 .enc 结尾（该后缀保留给加密备份）" ;;
+	esac
 	case "$local_path" in
 		/*) ;;
 		*) cloud_fail "本地路径必须是绝对路径：$local_path" ;;
@@ -666,36 +936,100 @@ cmd_upload() {
 
 	bin="$(cloud_bin_ready)" || cloud_fail "请先安装网盘组件"
 
+	lsize="$(wc -c <"$local_path" 2>/dev/null | tr -d ' ')"
+	case "$lsize" in ''|*[!0-9]*) lsize=0 ;; esac
+
+	remote_name="$name"
+	upload_path="$local_path"
+
+	if cloud_pass_present; then
+		# 有口令 -> 先加密到私有 rundir，校验通过后才上传。
+		remote_name="$name.enc"
+		cloud_valid_remote_name "$remote_name" || \
+			cloud_fail "远端文件名过长：加密后为 $remote_name（上限 128 字符）"
+		encdir="$OC_RUNDIR/cloud-enc.$$"
+		rmdir "$encdir" 2>/dev/null || true
+		# 与 oc_rundir 同样的处理：某些文件系统上 mkdir -m 会「建成了但改权限失败」，
+		# 不能因此放弃；随后再 chmod 一次。
+		mkdir -m 700 "$encdir" 2>/dev/null
+		if [ ! -d "$encdir" ]; then
+			cloud_fail "无法创建加密临时目录"
+		fi
+		chmod 700 "$encdir" 2>/dev/null || true
+		OC_TMPDIR="$encdir"
+		enc_out="$encdir/$remote_name"
+		OC_TMPFILE="$enc_out"
+		cloud_tmp_trap
+
+		pass="$(cloud_pass_read)" || pass=""
+		if [ -z "$pass" ]; then
+			cloud_tmp_cleanup
+			cloud_fail "未设置加密口令"
+		fi
+		cblog "加密 $(basename "$local_path") -> $remote_name"
+		cloud_crypto enc "$local_path" "$enc_out" <<EOF
+$pass
+EOF
+		rc=$?
+		pass=""
+		if [ "$rc" -ne 0 ]; then
+			cloud_tmp_cleanup
+			cloud_fail "加密失败：${OC_CRYPTO_ERR:-未知错误}"
+		fi
+
+		# 校验：GCM 是流式加密，密文长度必须正好是明文 + 51 字节头。
+		# 头部魔数 / 版本也读一遍，确认写出的确实是本格式而不是半成品。
+		csize="$(wc -c <"$enc_out" 2>/dev/null | tr -d ' ')"
+		case "$csize" in ''|*[!0-9]*) csize=0 ;; esac
+		if [ "$csize" -ne $((lsize + 51)) ]; then
+			cloud_tmp_cleanup
+			cloud_fail "加密校验失败：密文 ${csize} 字节，期望 $((lsize + 51)) 字节"
+		fi
+		magic="$(od -An -tx1 -N6 "$enc_out" 2>/dev/null | tr -d ' \n')"
+		ver="$(od -An -tu1 -j6 -N1 "$enc_out" 2>/dev/null | tr -d ' \n')"
+		if [ "$magic" != "4f43424b310a" ] || [ "$ver" != "1" ]; then
+			cloud_tmp_cleanup
+			cloud_fail "加密校验失败：文件头不是 OCBK1/v1"
+		fi
+		encrypted=true
+		upload_path="$enc_out"
+	fi
+
 	# 远端目录：已存在会失败，忽略即可
 	tmp="$OC_RUNDIR/cloud-upload.$$"
 	rm -f "$tmp" 2>/dev/null
 	cloud_run 60 "$bin" mkdir "$OC_CLOUD_REMOTE" >"$tmp" 2>&1 || true
 	rm -f "$tmp" 2>/dev/null
 
-	cblog "上传 $(basename "$local_path") -> $OC_CLOUD_REMOTE/$name"
-	cloud_run 600 "$bin" upload "$local_path" "$OC_CLOUD_REMOTE/$name" >"$tmp" 2>&1
+	cblog "上传 $(basename "$upload_path") -> $OC_CLOUD_REMOTE/$remote_name"
+	cloud_run 600 "$bin" upload "$upload_path" "$OC_CLOUD_REMOTE/$remote_name" >"$tmp" 2>&1
 	rc=$?
 	if [ "$rc" -ne 0 ]; then
 		err="$(cloud_tail_err "$tmp" 8)"
 		rm -f "$tmp" 2>/dev/null
+		cloud_tmp_cleanup
 		cloud_fail "上传失败（rc=$rc）：${err:-无输出}"
 	fi
 	rm -f "$tmp" 2>/dev/null
 
-	lsize="$(wc -c <"$local_path" 2>/dev/null | tr -d ' ')"
-	case "$lsize" in ''|*[!0-9]*) lsize=0 ;; esac
-	size="$(cloud_remote_size "$bin" "$name")"
+	size="$(cloud_remote_size "$bin" "$remote_name")"
 	case "$size" in
 		''|*[!0-9]*)
-			size="$lsize"
-			oc_warn "上传成功但未能从远端列表确认大小，使用本地大小 $lsize" ;;
+			if [ "$encrypted" = "true" ]; then
+				size="$csize"
+			else
+				size="$lsize"
+			fi
+			oc_warn "上传成功但未能从远端列表确认大小，使用本地大小 $size" ;;
 	esac
-	printf '{"ok":true,"remote":"%s","size":%s}\n' "$(jstr "$OC_CLOUD_REMOTE/$name")" "$size"
+	cloud_tmp_cleanup
+	printf '{"ok":true,"remote":"%s","size":%s,"encrypted":%s}\n' \
+		"$(jstr "$OC_CLOUD_REMOTE/$remote_name")" "$size" "$encrypted"
 }
 
 # ---------------------------------------------------------------- ls
 cmd_ls() {
-	local bin tmp rc out tsv err d mt name size tab sorted
+	local bin tmp rc out tsv err d mt name size tab sorted display enc
 
 	bin="$(cloud_bin_ready)" || {
 		oc_warn "网盘组件未安装，返回空列表"
@@ -745,8 +1079,18 @@ cmd_ls() {
 		[ -n "$name" ] || continue
 		case "$size" in ''|*[!0-9]*) size=0 ;; esac
 		case "$d" in true) ;; *) d=false ;; esac
-		printf '{"name":"%s","size":%s,"mtime":"%s","isdir":%s}\n' \
-			"$(jstr "$name")" "$size" "$(jstr "$mt")" "$d"
+		# name 必须是真实远端名（下载要用它）；display 去掉 .enc 便于展示。
+		enc=false
+		display="$name"
+		case "$name" in
+			*.enc)
+				enc=true
+				display="${name%.enc}"
+				# 文件正好叫 ".enc" 时不要展示成空串
+				[ -n "$display" ] || display="$name" ;;
+		esac
+		printf '{"name":"%s","display":"%s","size":%s,"mtime":"%s","isdir":%s,"encrypted":%s}\n' \
+			"$(jstr "$name")" "$(jstr "$display")" "$size" "$(jstr "$mt")" "$d" "$enc"
 	done | awk 'BEGIN { first = 1 } NF {
 		if (first) { printf "%s", $0; first = 0 }
 		else { printf ",%s", $0 }
@@ -755,8 +1099,12 @@ cmd_ls() {
 }
 
 # ---------------------------------------------------------------- download
-cmd_download() {
-	local name="${1:-}" local_path="${2:-}" bin tmp rc size parent err
+cloud_download_run() {
+	# cloud_download_run <remote-name> <local-path> <pass>
+	# <pass> 为空时回退到本机保存的口令。口令只是 shell 变量，不进 argv。
+	# .enc 文件先下载到私有临时目录，再流式解密到 local-path。
+	local name="$1" local_path="$2" pass="$3"
+	local bin tmp rc size parent err encrypted=false workdir cin csize
 
 	[ -n "$name" ] || cloud_fail "缺少远端文件名"
 	[ -n "$local_path" ] || cloud_fail "缺少本地目标路径"
@@ -778,8 +1126,84 @@ cmd_download() {
 	[ -w "$parent" ] || cloud_fail "父目录不可写：$parent"
 
 	bin="$(cloud_bin_ready)" || cloud_fail "请先安装网盘组件"
+
+	case "$name" in
+		*.enc)
+			encrypted=true
+			if [ -z "$pass" ]; then
+				pass="$(cloud_pass_read)" || pass=""
+			fi
+			[ -n "$pass" ] || cloud_fail "这是加密备份，请提供解密口令"
+			workdir="$OC_RUNDIR/cloud-dec.$$"
+			rmdir "$workdir" 2>/dev/null || true
+			mkdir -m 700 "$workdir" 2>/dev/null
+			if [ ! -d "$workdir" ]; then
+				cloud_fail "无法创建解密临时目录"
+			fi
+			chmod 700 "$workdir" 2>/dev/null || true
+			OC_TMPDIR="$workdir"
+			cin="$workdir/$name"
+			OC_TMPFILE="$cin"
+			cloud_tmp_trap ;;
+	esac
+
 	tmp="$OC_RUNDIR/cloud-download.$$"
 	rm -f "$tmp" 2>/dev/null
+
+	if [ "$encrypted" = "true" ]; then
+		cblog "下载 $OC_CLOUD_REMOTE/$name -> 临时文件（加密备份）"
+		cloud_run 900 "$bin" download "$OC_CLOUD_REMOTE/$name" "$cin" >"$tmp" 2>&1
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			err="$(cloud_tail_err "$tmp" 8)"
+			rm -f "$tmp" 2>/dev/null
+			rm -f "$cin" 2>/dev/null
+			cloud_tmp_cleanup
+			cloud_fail "下载失败（rc=$rc）：${err:-无输出}"
+		fi
+		rm -f "$tmp" 2>/dev/null
+		if [ ! -f "$cin" ]; then
+			cloud_tmp_cleanup
+			cloud_fail "下载命令已返回，但临时文件不存在：$cin"
+		fi
+		csize="$(wc -c <"$cin" 2>/dev/null | tr -d ' ')"
+		case "$csize" in ''|*[!0-9]*) csize=0 ;; esac
+		if [ "$csize" -lt 51 ]; then
+			rm -f "$cin" 2>/dev/null
+			cloud_tmp_cleanup
+			cloud_fail "口令错误或文件已损坏"
+		fi
+
+		cloud_crypto dec "$cin" "$local_path" <<EOF
+$pass
+EOF
+		rc=$?
+		pass=""
+		if [ "$rc" -ne 0 ]; then
+			# 3 = 目标已存在：那是别人/前一次留下的文件，不能删。
+			if [ "$rc" -ne 3 ]; then
+				rm -f "$local_path" 2>/dev/null
+			fi
+			cblog "解密失败：${OC_CRYPTO_ERR:-未知错误}"
+			rm -f "$cin" 2>/dev/null
+			cloud_tmp_cleanup
+			if [ "$rc" -eq 3 ]; then
+				cloud_fail "目标文件已存在，拒绝覆盖：$local_path"
+			fi
+			cloud_fail "口令错误或文件已损坏"
+		fi
+		rm -f "$cin" 2>/dev/null
+		cloud_tmp_cleanup
+
+		[ -f "$local_path" ] || cloud_fail "解密命令已返回，但目标文件不存在：$local_path"
+		size="$(wc -c <"$local_path" 2>/dev/null | tr -d ' ')"
+		case "$size" in ''|*[!0-9]*) size=0 ;; esac
+		printf '{"ok":true,"path":"%s","size":%s,"decrypted":true}\n' \
+			"$(jstr "$local_path")" "$size"
+		return 0
+	fi
+
+	# 明文下载：保持上一批行为
 	cblog "下载 $OC_CLOUD_REMOTE/$name -> $local_path"
 	cloud_run 900 "$bin" download "$OC_CLOUD_REMOTE/$name" "$local_path" >"$tmp" 2>&1
 	rc=$?
@@ -799,7 +1223,21 @@ cmd_download() {
 		rm -f "$local_path" 2>/dev/null
 		cloud_fail "下载的文件为空：$local_path"
 	fi
-	printf '{"ok":true,"path":"%s","size":%s}\n' "$(jstr "$local_path")" "$size"
+	printf '{"ok":true,"path":"%s","size":%s,"decrypted":false}\n' \
+		"$(jstr "$local_path")" "$size"
+}
+
+cmd_download() {
+	# 明文文件与 .enc 都走同一条实现；.enc 只能用本机保存的口令。
+	cloud_download_run "${1:-}" "${2:-}" ""
+}
+
+cmd_download_dec() {
+	# 口令从 stdin 第一行读（界面放在 POST body 里）；不进 argv / URL。
+	# 空行 / 无输入时回退到本机保存的口令。
+	local pass
+	pass="$(tr -d '\r' | sed -n '1p')"
+	cloud_download_run "${1:-}" "${2:-}" "$pass"
 }
 
 # ---------------------------------------------------------------- rm
@@ -862,11 +1300,15 @@ case "${1:-}" in
 	upload)      shift; cmd_upload "$@" ;;
 	ls)          cmd_ls ;;
 	download)    shift; cmd_download "$@" ;;
+	download-dec) shift; cmd_download_dec "$@" ;;
 	rm)          shift; cmd_rm "$@" ;;
+	pass-status) cmd_pass_status ;;
+	set-pass)    cmd_set_pass ;;
+	clear-pass)  cmd_clear_pass ;;
 	*)
 		printf '{"ok":false,"error":"%s"}\n' "$(jstr "未知动作：${1:-}")"
 		cat >&2 <<EOF
-Usage: cloud.sh {status|install-cli|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|rm <name>}
+Usage: cloud.sh {status|install-cli|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|download-dec <name> <local>|rm <name>|pass-status|set-pass|clear-pass}
 EOF
 		exit 2 ;;
 esac
