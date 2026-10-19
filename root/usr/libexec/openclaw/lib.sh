@@ -200,6 +200,28 @@ oc_state_dir() {
 oc_home_dir()  { printf '%s/home' "$(oc_base_dir)"; }
 oc_data_dir()  { oc_state_dir; }
 oc_conf()      { printf '%s/openclaw.json' "$(oc_state_dir)"; }
+
+# ---------------------------------------------------------------- CLI state env
+# CLI 与网关必须指向同一份配置/环境文件。state_dir 可被 main.state_dir 覆盖，
+# 但 OpenClaw CLI 只认自己的默认（$HOME/.openclaw），不会去读 UCI ——
+# 所以在这里统一导出，所有 source lib.sh 的脚本（以及 /usr/bin/openclaw 包装器）
+# 调用 CLI 时都会自动带上，不用每个调用点各写一遍。
+#
+# 若 state_dir 被覆盖（关联/迁移已有安装、数据放大容量盘）而这里不导出，CLI 会
+# 继续读写 <安装目录>/home/.openclaw，与网关和 oc_conf() 用的 state_dir 分家：
+# 表现为模型页保存成功但网关不生效、改端口重启没变、API Key 写了仍报未配置。
+#
+# 默认布局下这两个值与改动前完全一致（<base_dir>/home/.openclaw[/openclaw.json]），
+# 因此默认行为不变。oc_home_dir() 仍表示进程 HOME，与 state 目录是两回事，不要混用。
+#
+# ⚠️ 新增调用 CLI 的地方不要再自己拼 HOME 去猜 state 路径，直接依赖这两个变量。
+# 注意这是载入时求值的快照：同一进程内修改 UCI 的 main.state_dir 后，已导出的值
+# 不会自动更新（迁移类脚本请用新进程或重新 source 本文件后再调 CLI）。
+OC_STATE_DIR="$(oc_state_dir)"
+OC_CONF_FILE="$(oc_conf)"
+export OPENCLAW_STATE_DIR="$OC_STATE_DIR"
+export OPENCLAW_CONFIG_PATH="$OC_CONF_FILE"
+
 oc_node_bin() {
 	# global 模式优先用 /usr/bin/node（存在且可执行时），
 	# 否则退回运行时目录里的真实二进制。private 模式行为不变。

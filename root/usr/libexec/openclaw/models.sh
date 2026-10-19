@@ -549,11 +549,12 @@ models_url_fail() {
 
 env_key() {
 	# env_key <VAR_NAME> -> value from the OpenClaw .env, empty when absent.
-	# apply() writes $HOME/.openclaw/.env, provider_has_key() reads
-	# $(oc_data_dir)/.env. Both are the same file in the default layout but can
-	# differ when main.state_dir is overridden, so look at both.
+	# 唯一权威位置是 oc_env_file()（= state_dir/.env）；apply() 也只写这里。
+	# 旧位置 $HOME/.openclaw/.env 只作向后兼容：升级前写下的 key 可能还留在
+	# 那里。state_dir 被覆盖后旧位置可能存在过期值，所以必须放在后面读，
+	# 不能让它盖过新值。
 	local name="$1" f v
-	for f in "$HOME/.openclaw/.env" "$(oc_data_dir)/.env"; do
+	for f in "$(oc_env_file)" "$HOME/.openclaw/.env"; do
 		[ -f "$f" ] || continue
 		v="$(grep "^${name}=" "$f" 2>/dev/null | tail -n1 | sed 's/^[^=]*=//')"
 		[ -n "$v" ] || continue
@@ -748,8 +749,12 @@ apply() {
 		key="$(printf '%s' "$key" | head -n1)"
 		[ -n "$key" ] || { oc_err "API Key 为空"; return 1; }
 
-		envfile="$HOME/.openclaw/.env"
-		mkdir -p "$HOME/.openclaw"
+		# 统一走 oc_env_file()（= state_dir/.env）：provider_has_key() 与
+		# env_key() 读的是同一份，CLI/网关（OPENCLAW_STATE_DIR 已由 lib.sh 导出）
+		# 也看这里。state_dir 被 main.state_dir 覆盖时不能再写 $HOME/.openclaw，
+		# 否则写进去的 key 页面看不见、网关也读不到。
+		envfile="$(oc_env_file)"
+		mkdir -p "$(dirname "$envfile")"
 		touch "$envfile"
 		chmod 600 "$envfile" 2>/dev/null
 		grep -v "^${envname}=" "$envfile" >"$envfile.tmp" 2>/dev/null
@@ -800,10 +805,13 @@ setkey() {
 
 current() {
 	oc_env
-	local v=""
-	if [ -f "$HOME/.openclaw/openclaw.json" ]; then
-		v="$(oc_json_get "$HOME/.openclaw/openclaw.json" '$.agents.defaults.model.primary' 2>/dev/null)"
-		[ -n "$v" ] || v="$(grep -o '"primary"[^,]*' "$HOME/.openclaw/openclaw.json" 2>/dev/null | head -n1 | sed 's/.*: *"//; s/"//')"
+	# 直接读 oc_conf()（= state_dir/openclaw.json）：state_dir 被 main.state_dir
+	# 覆盖时，$HOME/.openclaw/openclaw.json 可能根本不存在或已过期。
+	local v="" conf
+	conf="$(oc_conf)"
+	if [ -f "$conf" ]; then
+		v="$(oc_json_get "$conf" '$.agents.defaults.model.primary' 2>/dev/null)"
+		[ -n "$v" ] || v="$(grep -o '"primary"[^,]*' "$conf" 2>/dev/null | head -n1 | sed 's/.*: *"//; s/"//')"
 	fi
 	printf '%s' "$v"
 }

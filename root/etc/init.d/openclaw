@@ -95,6 +95,46 @@ oc_state_dir() {
 	printf '%s' "$d"
 }
 
+_state_dir_safe() {
+	# _state_dir_safe <dir> -> 0 safe / 1 unsafe
+	#
+	# main.state_dir 是用户可配置路径，下面会对它做 `chown -R` / `chmod -R`。
+	# 落到系统目录上是灾难，所以动手前必须校验。
+	#
+	# ⚠️ 前缀黑名单必须与 lib.sh 的 oc_validate_base_dir_shape() 保持一致
+	#    （本文件不 source lib.sh，只能各留一份，同 oc_state_dir() 的做法）。
+	#    这里在其基础上补了 /lib64 与 /boot；/run 也在 lib.sh 的列表里。
+	#
+	# 只接受：绝对路径、不是 "/"、无 "."/".." 段、不在系统前缀下、至少两级
+	# （/mnt/data 可以，/mnt 太顶层 —— 递归操作容易误伤整块盘）。
+	local d="$1"
+	[ -n "$d" ] || return 1
+	case "$d" in
+		/*) ;;
+		*) return 1 ;;
+	esac
+	[ "$d" != "/" ] || return 1
+	# 前导 "//" 会绕过下面的前缀匹配（"//etc" 等价于 "/etc"），直接拒绝
+	case "$d" in
+		//*) return 1 ;;
+	esac
+	case "$d" in
+		*"/../"*|*"/.."|*"/./"*|*"/.") return 1 ;;
+	esac
+	case "$d" in
+		/bin|/bin/*|/sbin|/sbin/*|/usr|/usr/*|/lib|/lib/*|/lib64|/lib64/*|/etc|/etc/*) return 1 ;;
+		/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*) return 1 ;;
+		/tmp|/tmp/*|/var|/var/*|/overlay|/overlay/*|/rom|/rom/*) return 1 ;;
+		/root|/root/*|/boot|/boot/*) return 1 ;;
+	esac
+	# 至少两级：去掉首个 "/" 后必须还剩一个 "/"
+	case "${d#/}" in
+		*/*) ;;
+		*) return 1 ;;
+	esac
+	return 0
+}
+
 oc_home()     { printf '%s/home' "$(oc_base_dir)"; }
 
 _find_entry() {
@@ -178,7 +218,7 @@ start_service() {
 	}
 	[ -n "$token" ] || { logger -t openclaw "未生成网关 token，拒绝启动"; return 1; }
 
-	mkdir -p "$home/.openclaw/workspace" "$base/logs" "$base/workspace" "$base/tmp" 2>/dev/null || true
+	mkdir -p "$state_dir/workspace" "$base/logs" "$base/workspace" "$base/tmp" 2>/dev/null || true
 	chmod 700 "$base/tmp" 2>/dev/null || true
 	if id "$OC_USER" >/dev/null 2>&1; then
 		chown "$OC_USER:$OC_USER" "$base/tmp" 2>/dev/null || true
@@ -195,9 +235,20 @@ start_service() {
 		user_opt="$OC_USER"
 		chown -R "$OC_USER:$OC_USER" "$home" 2>/dev/null || true
 		chmod -R u+rwX "$home" 2>/dev/null || true
+		# state_dir 在 $home 之外时（关联/迁移已有安装），上面的 chown 覆盖不到它，
+		# 服务用户对网关要写的 openclaw.json / 会话 / 工作区没有权限。
+		# 但这是用户可配置路径：先校验再递归操作，不安全的只告警、继续启动。
+		if [ "$state_dir" != "$home/.openclaw" ]; then
+			if _state_dir_safe "$state_dir"; then
+				chown -R "$OC_USER:$OC_USER" "$state_dir" 2>/dev/null || true
+				chmod -R u+rwX "$state_dir" 2>/dev/null || true
+			else
+				logger -t openclaw "state_dir 不在允许清理的范围内，跳过属主修正：$state_dir"
+			fi
+		fi
 	fi
 
-	env_args="$(_env_args "$home/.openclaw/.env")"
+	env_args="$(_env_args "$state_dir/.env")"
 
 	procd_open_instance "gateway"
 	# The token is NOT passed as --token any more: every local user can read
@@ -207,12 +258,17 @@ start_service() {
 	procd_set_param command "$node_bin" "$entry" gateway run \
 		--port "$port" --bind "$bind" --auth token \
 		--allow-unconfigured $force_opt
+	# HOME / OPENCLAW_HOME 表示进程 HOME，与 state 目录是两个概念，保持不变。
+	# 但 STATE_DIR / CONFIG_PATH 不能写死 "$home/.openclaw"：main.state_dir 可
+	# 覆盖 state_dir（关联/迁移已有安装到大容量盘），写死会让网关与 UI 操作
+	# 不同的目录 —— 网关按这里读 token、UI 按 state_dir 写配置，表现为
+	# 「改了模型/端口不生效」「API Key 写了仍报未配置」。
 	# shellcheck disable=SC2086
 	procd_set_param env \
 		HOME="$home" \
 		OPENCLAW_HOME="$home" \
-		OPENCLAW_STATE_DIR="$home/.openclaw" \
-		OPENCLAW_CONFIG_PATH="$home/.openclaw/openclaw.json" \
+		OPENCLAW_STATE_DIR="$state_dir" \
+		OPENCLAW_CONFIG_PATH="${state_dir}/openclaw.json" \
 		OPENCLAW_GATEWAY_PORT="$port" \
 		OPENCLAW_GATEWAY_BIND="$bind" \
 		OPENCLAW_GATEWAY_TOKEN="$token" \
