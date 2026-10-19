@@ -65,6 +65,20 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "backup_upload"}, call("api_backup_upload")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_download"}, call("api_backup_download")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "restore"}, call("api_restore")).leaf = true
+	-- 百度网盘云备份：业务全部在 cloud.sh 里，这里只做参数校验与透传
+	entry({"admin", "services", "openclaw", "api", "cloud_status"},  call("api_cloud_status")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_install"}, call("api_cloud_install")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_login_url"},  call("api_cloud_login_url")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_login_code"}, call("api_cloud_login_code")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_logout"}, call("api_cloud_logout")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_upload"}, call("api_cloud_upload")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_ls"},     call("api_cloud_ls")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_download"}, call("api_cloud_download")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_rm"},     call("api_cloud_rm")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_pass_status"}, call("api_cloud_pass_status")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_pass_set"},    call("api_cloud_pass_set")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_pass_clear"},  call("api_cloud_pass_clear")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_schedule_status"}, call("api_cloud_schedule_status")).leaf = true
 	-- 诊断包下载（openclaw.sh export）：生成后立刻作为附件回传
 	entry({"admin", "services", "openclaw", "api", "export"}, call("api_export")).leaf = true
 end
@@ -896,6 +910,295 @@ function api_backup_download()
 	http.header("X-Content-Type-Options", "nosniff")
 	http.prepare_content("application/octet-stream")
 	http.write(data)
+end
+
+-- ---------------------------------------------------------------- cloud
+-- 百度网盘云备份。业务逻辑全部在 cloud.sh 里，这里只做三件事：
+--   1) 参数白名单校验（远端名 / 本地备份名 / 授权码 / 口令）
+--   2) 把口令经私有临时文件喂给 cloud.sh 的 stdin（绝不进 argv，ps 看不到）
+--   3) 把 cloud.sh 的单行 JSON 原样透传给浏览器
+--
+-- 安全约定：
+--   * 授权码与口令只从 POST body 取（http.formvalue），绝不拼进 URL 查询串，
+--     否则会被 uhttpd 的访问日志完整记录。
+--   * 远端文件名只允许 [A-Za-z0-9._-]，首字符必须是字母数字（排除 . / .. /
+--     前导 -）；与 cloud.sh 的 cloud_valid_remote_name() 同口径。
+--   * 本地目标永远落在 backup.sh 报告的备份目录内，文件名再过一次 SAFE_NAME。
+local CLOUD      = "/usr/libexec/openclaw/cloud.sh"
+local SAFE_REMOTE = "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+
+local function is_post()
+	-- http.getenv 在 luci-compat 里一直存在，但取不到时按「不是 POST」处理，
+	-- 宁可拒绝也不要把敏感参数当成查询串接受。
+	local m = nil
+	if http.getenv then m = http.getenv("REQUEST_METHOD") end
+	return (m or ""):upper() == "POST"
+end
+
+-- cloud.sh 的 stdout 契约是「只有一行 JSON」；解析失败时把原始文本带回前端，
+-- 至少让用户看到真实的报错，而不是一句笼统的失败。
+local function cloud_json(raw)
+	local j = jsonc.parse(raw)
+	if type(j) ~= "table" then return nil end
+	return j
+end
+
+local function cloud_reply(raw, extra)
+	local j = cloud_json(raw)
+	if not j then
+		out({ ok = false, error = "后端返回无法解析", data = raw })
+		return
+	end
+	local r = { ok = j.ok == true, error = j.error, data = j }
+	if j.ok == true and extra then
+		for k, v in pairs(extra) do r[k] = v end
+	end
+	out(r)
+end
+
+local function cloud_exec(args)
+	return sh(CLOUD .. " " .. args)
+end
+
+-- 口令 / 授权码的 stdin 通道：0600 私有文件 + shell 重定向，调用方负责删除。
+-- 文件名带时间戳 + 进程内序号 + 随机数，避免并发请求互相覆盖。
+local stdin_seq = 0
+local function write_private(text)
+	if not need_dir() then return nil end
+	stdin_seq = stdin_seq + 1
+	local tmp = RUNDIR .. "/stdin-" .. os.date("%Y%m%d%H%M%S") .. "-"
+		.. tostring(stdin_seq) .. "-" .. tostring(math.random(100000, 999999))
+	-- 先用 umask 077 建空文件，再打开写入：避免出现「先 0644 后 chmod」的窗口。
+	-- io.open("wb") 只截断、不改权限，所以建好之后模式一直是 0600。
+	os.execute("( umask 077; : > " .. q(tmp) .. " ) 2>/dev/null")
+	local fh = io.open(tmp, "wb")
+	if not fh then return nil end
+	local ok = fh:write(text) and fh:close()
+	if not ok then
+		os.remove(tmp)
+		return nil
+	end
+	-- 兜底：建文件那一步失败时（目录不可写等）io.open 可能新建 0644 文件。
+	os.execute("chmod 600 " .. q(tmp) .. " 2>/dev/null")
+	return tmp
+end
+
+local function cloud_exec_stdin(args, text)
+	local tmp = write_private(text)
+	if not tmp then return '{"ok":false,"error":"临时目录不可用"}' end
+	local raw = sh(CLOUD .. " " .. args .. " < " .. q(tmp))
+	os.remove(tmp)
+	return raw
+end
+
+-- 备份目录：与 api_backup_download() 同样的校验口径（绝对路径、无空白、无 ..）。
+local function backup_dir()
+	local dir = sh(SH .. " backup-path")
+	if dir == "" or dir:find("%s") or dir:sub(1, 1) ~= "/" or dir:find("%.%.") then
+		return nil
+	end
+	return dir
+end
+
+local function file_exists(p)
+	return sh("if [ -e " .. q(p) .. " ] || [ -L " .. q(p) .. " ]; then echo 1; fi") == "1"
+end
+
+function api_cloud_status()
+	cloud_reply(cloud_exec("status"))
+end
+
+function api_cloud_install()
+	-- 会下载并执行安装器，只接受 POST（避免被 <img src> 之类的跨站 GET 触发）。
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	cloud_reply(cloud_exec("install-cli"))
+end
+
+function api_cloud_login_url()
+	cloud_reply(cloud_exec("login-url"))
+end
+
+function api_cloud_login_code()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交授权码" })
+		return
+	end
+	local code = http.formvalue("code") or ""
+	-- 前端已校验一次；这里是服务端防线（cloud.sh 里还有一次）。
+	if #code < 4 or #code > 64 or not code:match("^[A-Za-z0-9_-]+$") then
+		out({ ok = false, error = "授权码格式不正确（只允许字母、数字、_ 和 -，长度 4-64）" })
+		return
+	end
+	cloud_reply(cloud_exec("login-code " .. q(code)))
+end
+
+function api_cloud_logout()
+	cloud_reply(cloud_exec("logout"))
+end
+
+-- 上传：只接受「本机备份目录里的文件名」，不接受任意本地路径。
+-- 这样即使前端被篡改，也无法把 /etc/shadow 之类的东西传到网盘。
+function api_cloud_upload()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	local file = http.formvalue("file") or ""
+	if not file:match(SAFE_NAME) or not file:match("%.tar%.gz$") then
+		out({ ok = false, error = "非法的备份文件名" })
+		return
+	end
+	local dir = backup_dir()
+	if not dir then
+		out({ ok = false, error = "备份目录不可用" })
+		return
+	end
+	local path = dir .. "/" .. file
+	if not file_exists(path) then
+		out({ ok = false, error = "本地备份不存在：" .. file })
+		return
+	end
+	-- 远端名默认与本地同名；显式指定时同样走白名单。
+	local remote = http.formvalue("remote")
+	if remote == nil or remote == "" then remote = file end
+	if #remote > 128 or not remote:match(SAFE_REMOTE) then
+		out({ ok = false, error = "非法的云端文件名" })
+		return
+	end
+	if remote:sub(-4) == ".enc" then
+		-- 该后缀由 cloud.sh 在加密上传时自行追加，明文上传不能占用。
+		out({ ok = false, error = "云端文件名不能以 .enc 结尾（该后缀保留给加密备份）" })
+		return
+	end
+	cloud_reply(cloud_exec("upload " .. q(path) .. " " .. q(remote)))
+end
+
+function api_cloud_ls()
+	cloud_reply(cloud_exec("ls"))
+end
+
+function api_cloud_rm()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	local name = http.formvalue("name") or ""
+	if #name > 128 or not name:match(SAFE_REMOTE) then
+		out({ ok = false, error = "非法的云端文件名" })
+		return
+	end
+	cloud_reply(cloud_exec("rm " .. q(name)))
+end
+
+-- 下载：落到本机备份目录，成功后前端可以直接复用 api_restore。
+--   * 明文备份：cloud.sh download
+--   * .enc 备份：cloud.sh download-dec，口令只走 stdin
+-- cloud.sh 拒绝覆盖已存在的目标文件，这里先给出更明确的提示。
+function api_cloud_download()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	local name = http.formvalue("name") or ""
+	if #name > 128 or not name:match(SAFE_REMOTE) then
+		out({ ok = false, error = "非法的云端文件名" })
+		return
+	end
+	local encrypted = name:sub(-4) == ".enc"
+	local target = name
+	if encrypted then target = name:sub(1, -5) end
+	-- 下载后要交给 backup.sh restore，名字必须是它认得的 .tar.gz。
+	if not target:match(SAFE_NAME) or not target:match("%.tar%.gz$") then
+		out({ ok = false, error = "云端文件名不是 .tar.gz 备份" })
+		return
+	end
+	local dir = backup_dir()
+	if not dir then
+		out({ ok = false, error = "备份目录不可用" })
+		return
+	end
+
+	-- cloud.sh 拒绝覆盖已存在的目标文件。云端备份通常就是从本机传上去的，
+	-- 同名文件几乎一定还在本地，所以这里主动换一个不冲突的名字：
+	--   openclaw-x.tar.gz -> cloud-openclaw-x.tar.gz（仍以 .tar.gz 结尾，
+	--   backup.sh restore 认得）。仍然冲突时再追加序号。
+	local dest_name, dest
+	local stem = target:sub(1, -8)          -- 去掉 .tar.gz
+	for i = 0, 50 do
+		local cand = (i == 0) and ("cloud-" .. target)
+			or ("cloud-" .. stem .. "-" .. i .. ".tar.gz")
+		if #cand <= 128 and cand:match(SAFE_NAME) then
+			if not file_exists(dir .. "/" .. cand) then
+				dest_name, dest = cand, dir .. "/" .. cand
+				break
+			end
+		end
+	end
+	if not dest then
+		out({ ok = false, error = "备份目录里同名文件过多，请先清理本地备份" })
+		return
+	end
+
+	local pass = http.formvalue("pass") or ""
+	if pass:find("[%c]") then
+		out({ ok = false, error = "口令不能包含换行或控制字符" })
+		return
+	end
+	if #pass > 128 then
+		out({ ok = false, error = "口令过长" })
+		return
+	end
+
+	local raw
+	if encrypted then
+		-- 空口令表示「使用本机已保存的口令」，由 cloud.sh 回退。
+		raw = cloud_exec_stdin("download-dec " .. q(name) .. " " .. q(dest), pass .. "\n")
+	else
+		raw = cloud_exec("download " .. q(name) .. " " .. q(dest))
+	end
+	cloud_reply(raw, { file = dest_name })
+end
+
+function api_cloud_pass_status()
+	cloud_reply(cloud_exec("pass-status"))
+end
+
+function api_cloud_pass_set()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	local pass = http.formvalue("pass") or ""
+	if #pass < 8 or #pass > 128 then
+		out({ ok = false, error = "口令长度必须为 8-128 个字符" })
+		return
+	end
+	if pass:find("[%c]") then
+		out({ ok = false, error = "口令不能包含换行或控制字符" })
+		return
+	end
+	if pass:match("^%s*$") then
+		out({ ok = false, error = "口令不能全是空格" })
+		return
+	end
+	cloud_reply(cloud_exec_stdin("set-pass", pass .. "\n"))
+end
+
+function api_cloud_pass_clear()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	cloud_reply(cloud_exec("clear-pass"))
+end
+
+-- 只读：给界面回填当前定时设置。cloud.sh 没有「保存定时参数」的动作
+-- （schedule-apply 只重新读取 UCI），所以本批不提供写接口，界面置灰。
+function api_cloud_schedule_status()
+	cloud_reply(cloud_exec("schedule-status"))
 end
 
 -- ---------------------------------------------------------------- export

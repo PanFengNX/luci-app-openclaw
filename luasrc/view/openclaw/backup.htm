@@ -151,6 +151,129 @@ select,input[type=text],input[type=password]{min-height:30px}
   <div id="bk-list" style="margin-top:8px"></div>
 </div>
 
+<div class="oc-card" id="oc-cloud-card">
+  <h3>百度网盘云备份</h3>
+  <div class="oc-hint">
+    把本机备份同步到百度网盘。备份文件内含 API Key，<b>请勿分享网盘目录</b>；
+    可先设置加密口令，上传前会用 AES-256-GCM 加密。
+  </div>
+
+  <!-- ── 第一步：组件 ───────────────────────────────────────────── -->
+  <div class="oc-sub">第一步：网盘组件</div>
+  <div class="oc-rowline">
+    <span>组件</span>
+    <span><span id="cl-step1-state">读取中…</span> <span id="cl-step1-pill" class="oc-pill" style="display:none"></span></span>
+  </div>
+  <div class="oc-actions">
+    <button id="btn-cl-install" disabled>安装网盘组件（约 14 MB）</button>
+  </div>
+  <div id="cl-install-hint" class="oc-hint" style="display:none"></div>
+  <div id="cl-err1" class="oc-err" style="font-size:12px;margin-top:6px"></div>
+
+  <!-- ── 第二步：登录 ───────────────────────────────────────────── -->
+  <div class="oc-sub">第二步：登录百度网盘</div>
+  <div id="cl-login-box">
+    <div class="oc-hint">
+      点击下面的按钮获取授权链接，在浏览器里登录百度账号并授权，然后把页面上的授权码粘贴回这里。
+    </div>
+    <div class="oc-actions">
+      <button id="btn-cl-loginurl" disabled>① 获取授权链接</button>
+    </div>
+    <div id="cl-url-wrap" style="display:none;margin-top:8px">
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="cl-url" readonly class="oc-addr" style="flex:1;min-width:0">
+        <button class="oc-copy" data-copy="cl-url" type="button">复制</button>
+      </div>
+      <div class="oc-hint">链接 10 分钟内有效</div>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:10px">
+      <input type="text" id="cl-code" autocomplete="off" inputmode="latin"
+             spellcheck="false" placeholder="粘贴授权码" maxlength="64" style="min-width:200px">
+      <button id="btn-cl-logincode" disabled>② 提交授权码</button>
+    </div>
+    <div id="cl-err2" class="oc-err" style="font-size:12px;margin-top:6px"></div>
+  </div>
+  <div id="cl-logged" style="display:none">
+    <div class="oc-rowline">
+      <span>已登录</span>
+      <span><b id="cl-user" style="font-weight:600"></b></span>
+    </div>
+    <div class="oc-rowline">
+      <span>有效期至</span>
+      <span id="cl-exp">-</span>
+    </div>
+    <div class="oc-actions">
+      <button id="btn-cl-logout" class="oc-btn ghost">退出登录</button>
+    </div>
+    <div id="cl-err2b" class="oc-err" style="font-size:12px;margin-top:6px"></div>
+  </div>
+  <div id="cl-step2-lock" class="oc-hint" style="display:none">请先安装组件</div>
+
+  <!-- ── 第三步：备份与恢复 ─────────────────────────────────────── -->
+  <div class="oc-sub">第三步：备份与恢复</div>
+  <div class="oc-actions">
+    <button id="btn-cl-backup" disabled>立即备份到云端</button>
+    <button id="btn-cl-refresh" class="oc-btn ghost" disabled>刷新云端列表</button>
+  </div>
+  <div id="cl-out" class="oc-out" style="margin-top:8px;display:none"></div>
+  <div id="cl-err3" class="oc-err" style="font-size:12px;margin-top:6px"></div>
+  <div id="cl-list" style="margin-top:10px"></div>
+
+  <!-- 加密 -->
+  <div class="oc-sub">加密</div>
+  <div class="oc-hint">
+    设置口令后，上传前会用 AES-256-GCM 加密。<b>口令不会上传，插件保存在本机；口令丢失后备份无法恢复。</b>
+  </div>
+  <div class="oc-rowline">
+    <span>口令状态</span>
+    <span><span id="cl-pass-pill" class="oc-pill">读取中…</span></span>
+  </div>
+  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+    <input type="password" id="cl-pass1" autocomplete="new-password" maxlength="128"
+           placeholder="口令（8-128 个字符）" style="min-width:200px">
+    <input type="password" id="cl-pass2" autocomplete="new-password" maxlength="128"
+           placeholder="确认口令" style="min-width:200px">
+  </div>
+  <div class="oc-actions">
+    <button id="btn-cl-pass-save" disabled>保存口令</button>
+    <button id="btn-cl-pass-clear" class="oc-btn ghost" disabled>清除口令</button>
+  </div>
+  <div id="cl-err-pass" class="oc-err" style="font-size:12px;margin-top:6px"></div>
+
+  <!-- 定时备份 -->
+  <div class="oc-sub">定时备份</div>
+  <div class="oc-hint">该功能将在下一版本启用（当前后端只提供读取与 crontab 应用，尚无写入定时参数的接口）。</div>
+  <div class="oc-row">
+    <label>启用</label>
+    <input type="checkbox" id="cl-sch-enabled" disabled> <span class="oc-hint">勾选后按下面的周期自动备份</span>
+  </div>
+  <div class="oc-row">
+    <label>周期</label>
+    <select id="cl-sch-period" disabled>
+      <option value="daily">每天</option>
+      <option value="weekly">每周</option>
+    </select>
+    <select id="cl-sch-weekday" disabled style="min-width:110px;margin-left:6px">
+      <option value="0">周日</option><option value="1">周一</option><option value="2">周二</option>
+      <option value="3">周三</option><option value="4">周四</option><option value="5">周五</option>
+      <option value="6">周六</option>
+    </select>
+  </div>
+  <div class="oc-row">
+    <label>时间</label>
+    <input type="time" id="cl-sch-time" disabled>
+  </div>
+  <div class="oc-row">
+    <label>保留份数</label>
+    <input type="number" id="cl-sch-keep" min="1" max="30" value="7" disabled style="min-width:90px">
+  </div>
+  <div class="oc-actions">
+    <button id="btn-cl-sch-save" disabled>保存定时设置</button>
+  </div>
+  <div id="cl-sch-hint" class="oc-hint"></div>
+  <div id="cl-err-sch" class="oc-err" style="font-size:12px;margin-top:6px"></div>
+</div>
+
 <script>
 var API = {
   info: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","info")%>',
@@ -175,7 +298,20 @@ var API = {
   backup_delete: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_delete")%>',
   backup_upload: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_upload")%>',
   backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
-  restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>'
+  restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>',
+  cloud_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_status")%>',
+  cloud_install: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_install")%>',
+  cloud_login_url: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_login_url")%>',
+  cloud_login_code: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_login_code")%>',
+  cloud_logout: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_logout")%>',
+  cloud_upload: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_upload")%>',
+  cloud_ls: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_ls")%>',
+  cloud_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_download")%>',
+  cloud_rm: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_rm")%>',
+  cloud_pass_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_pass_status")%>',
+  cloud_pass_set: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_pass_set")%>',
+  cloud_pass_clear: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_pass_clear")%>',
+  cloud_schedule_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_schedule_status")%>'
 };
 
 function $(id){ return document.getElementById(id); }
@@ -374,5 +510,691 @@ $('btn-bk-upload').onclick = function(){
 };
 
 loadBackups();
+
+// ================================================================ 百度网盘云备份
+// 约定：
+//   * 服务端返回的任何字符串只进 textContent / input.value，绝不拼 innerHTML。
+//   * 所有动作执行期间统一把按钮置灰（CL.busy），避免重复提交。
+//   * 失败一律显示在 .oc-err 区域；只有破坏性操作使用 confirm。
+//   * 页面加载只做只读查询（status / ls / pass-status / schedule-status），
+//     不会自动下载或上传任何东西。
+var CL = {
+  statusKnown: false,
+  statusTried: false,
+  installed: false,
+  logged: false,
+  passSet: false,
+  busy: false,
+  arch: '',
+  verText: ''
+};
+
+function clErr(id, msg){
+  var el = $(id);
+  if (el) el.textContent = msg || '';
+}
+
+function clOut(line){
+  var el = $('cl-out');
+  if (!el) return;
+  el.style.display = '';
+  el.textContent = el.textContent ? (el.textContent + '\n' + line) : line;
+  el.scrollTop = el.scrollHeight;
+}
+
+function clOutReset(){
+  var el = $('cl-out');
+  if (el){ el.textContent = ''; el.style.display = 'none'; }
+}
+
+function clNet(r){
+  return (r && r.net) ? '（网络错误或连接中断，请重试）' : '';
+}
+
+// 时间：cloud.sh 的 ls 正常返回 epoch 秒；个别版本会给 ISO 串，这里都兜住。
+function clFmtTime(v){
+  if (v === undefined || v === null || v === '') return '-';
+  var s = String(v);
+  if (/^[0-9]+$/.test(s)){
+    var d = new Date(parseInt(s, 10) * 1000);
+    if (isNaN(d.getTime())) return s;
+    var p = function(x){ return (x < 10 ? '0' : '') + x; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+         + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  return s;
+}
+
+// 版本号只取 x.y.z；架构直接来自 cloud.sh status 的 arch 字段。
+function clVersion(v){
+  var out = '';
+  if (v){
+    var m = String(v).match(/[0-9]+(\.[0-9]+)+/);
+    out = m ? ('v' + m[0]) : String(v);
+  }
+  if (CL.arch) out = out ? (out + '，' + CL.arch) : CL.arch;
+  return out;
+}
+
+// ---------------------------------------------------------------- 状态渲染
+function clRender(){
+  var inst   = CL.installed;
+  var logged = CL.logged;
+
+  // 第一步
+  var st   = $('cl-step1-state');
+  var pill = $('cl-step1-pill');
+  if (!CL.statusKnown){
+    st.textContent = CL.statusTried ? '读取失败' : '读取中…';
+    pill.style.display = 'none';
+  } else if (inst){
+    var vt = CL.verText ? ('（' + CL.verText + '）') : '';
+    st.textContent = '已安装' + vt;
+    pill.style.display = '';
+    pill.className = 'oc-pill ok';
+    pill.textContent = '✓';
+  } else {
+    st.textContent = '未安装';
+    pill.style.display = 'none';
+  }
+  var btnInstall = $('btn-cl-install');
+  btnInstall.style.display = (CL.statusKnown && inst) ? 'none' : '';
+  btnInstall.disabled = !CL.statusKnown || inst || CL.busy;
+
+  // 第二步：未登录时始终显示登录区；第一步未完成时整体禁用并给出提示。
+  $('cl-login-box').style.display   = logged ? 'none' : '';
+  $('cl-logged').style.display      = (inst && logged) ? '' : 'none';
+  $('cl-step2-lock').style.display  = (CL.statusKnown && !inst) ? '' : 'none';
+  $('btn-cl-loginurl').disabled     = !inst || CL.busy;
+  $('btn-cl-logincode').disabled    = !inst || CL.busy;
+  $('cl-code').disabled             = !inst || CL.busy;
+  $('btn-cl-logout').disabled       = CL.busy;
+
+  // 第三步
+  var ready = inst && logged;
+  $('btn-cl-backup').disabled     = !ready || CL.busy;
+  $('btn-cl-refresh').disabled    = !ready || CL.busy;
+  $('btn-cl-pass-save').disabled  = !inst || CL.busy;
+  $('btn-cl-pass-clear').disabled = !inst || CL.busy || !CL.passSet;
+  // 定时备份：后端没有写入定时参数的接口，保存按钮始终保持禁用。
+  $('btn-cl-sch-save').disabled = true;
+
+  // 列表里的「恢复 / 删除」不在 clRender 的直接管辖内，这里统一跟着 busy 走，
+  // 避免执行期间重复点击。
+  var rowBtns = document.querySelectorAll('#cl-list button');
+  for (var i = 0; i < rowBtns.length; i++) rowBtns[i].disabled = CL.busy;
+}
+
+function clEmptyList(msg){
+  var host = $('cl-list');
+  host.textContent = '';
+  var d = document.createElement('div');
+  d.className = 'oc-empty';
+  d.textContent = msg;
+  host.appendChild(d);
+}
+
+// ---------------------------------------------------------------- 只读查询
+function clStatus(){
+  get(API.cloud_status, function(r){
+    CL.statusTried = true;
+    if (!r || !r.ok){
+      CL.statusKnown = false;
+      CL.installed = false;
+      CL.logged = false;
+      clErr('cl-err1', ((r && r.error) || '读取网盘组件状态失败') + clNet(r));
+      clRender();
+      clEmptyList('组件状态未知，请刷新页面重试');
+      return;
+    }
+    var d    = r.data || {};
+    var cli  = d.cli || {};
+    var auth = d.auth || {};
+    CL.statusKnown = true;
+    CL.installed   = (cli.installed === true);
+    CL.logged      = (auth.logged_in === true);
+    CL.arch        = d.arch || '';
+    CL.verText     = clVersion(cli.version);
+    $('cl-user').textContent = auth.user || '（后端未返回用户名）';
+    $('cl-exp').textContent  = auth.expires || '未知';
+    clErr('cl-err1', '');
+    clRender();
+    if (CL.installed && CL.logged) clLoadList();
+    else clEmptyList(CL.installed ? '请先登录百度网盘' : '请先安装组件');
+  });
+}
+
+function clPassStatus(){
+  get(API.cloud_pass_status, function(r){
+    var pill = $('cl-pass-pill');
+    if (r && r.ok && r.data && r.data.set === true){
+      CL.passSet = true;
+      pill.className = 'oc-pill ok';
+      pill.textContent = '已设置口令';
+    } else {
+      CL.passSet = false;
+      pill.className = 'oc-pill';
+      pill.textContent = '未设置口令';
+    }
+    clRender();
+  });
+}
+
+function clSchStatus(){
+  get(API.cloud_schedule_status, function(r){
+    if (!r || !r.ok){
+      $('cl-sch-hint').textContent = '读取定时设置失败' + clNet(r);
+      return;
+    }
+    var d = r.data || {};
+    $('cl-sch-enabled').checked = (d.enabled === true);
+    $('cl-sch-period').value = (d.period === 'weekly') ? 'weekly' : 'daily';
+    $('cl-sch-weekday').value = String(d.weekday === undefined || d.weekday === null ? 0 : d.weekday);
+    var hh = ('0' + (d.hour === undefined || d.hour === null ? 4 : d.hour)).slice(-2);
+    var mm = ('0' + (d.minute === undefined || d.minute === null ? 30 : d.minute)).slice(-2);
+    $('cl-sch-time').value = hh + ':' + mm;
+    $('cl-sch-keep').value = (d.keep === undefined || d.keep === null) ? 7 : d.keep;
+    // 「每周」才显示星期几（只读展示；控件本身是禁用的）。
+    $('cl-sch-weekday').style.display = ($('cl-sch-period').value === 'weekly') ? '' : 'none';
+    $('cl-sch-hint').textContent = d.installed
+      ? ('当前 crontab：' + (d.line || ''))
+      : '当前未安装定时任务。';
+  });
+}
+
+// ---------------------------------------------------------------- 云端列表
+function clLoadList(){
+  get(API.cloud_ls, function(r){
+    var host = $('cl-list');
+    host.textContent = '';
+    if (!r || !r.ok){
+      clEmptyList('读取云端列表失败' + clNet(r));
+      return;
+    }
+    var arr = (r.data && r.data.data) || [];
+    if (!arr.length){
+      clEmptyList('云端暂无备份');
+      return;
+    }
+    arr.forEach(function(it){
+      if (!it || !it.name) return;
+      host.appendChild(clRow(it));
+    });
+  });
+}
+
+function clRow(it){
+  var wrap = document.createElement('div');
+
+  var row = document.createElement('div');
+  row.className = 'oc-rowline';
+  row.style.flexWrap = 'wrap';
+
+  var left = document.createElement('div');
+  left.style.display = 'flex';
+  left.style.flexDirection = 'column';
+  left.style.minWidth = '0';
+
+  var nm = document.createElement('span');
+  nm.textContent = it.display || it.name;      // 服务端数据只进 textContent
+  nm.style.whiteSpace = 'normal';
+  nm.style.wordBreak = 'break-all';
+  nm.style.color = 'var(--oc-fg-dim)';
+  left.appendChild(nm);
+
+  var tm = document.createElement('span');
+  tm.className = 'oc-hint';
+  tm.style.marginTop = '0';
+  tm.textContent = clFmtTime(it.mtime) + (it.encrypted ? ' · 加密' : '');
+  left.appendChild(tm);
+
+  var act = document.createElement('div');
+  act.style.display = 'flex';
+  act.style.alignItems = 'center';
+  act.style.gap = '8px';
+  act.style.flexWrap = 'wrap';
+  act.style.justifyContent = 'flex-end';
+
+  var sz = document.createElement('span');
+  sz.className = 'oc-hint';
+  sz.style.marginTop = '0';
+  sz.style.whiteSpace = 'nowrap';
+  sz.textContent = fmtSize(it.size || 0);
+  act.appendChild(sz);
+
+  var btnR = document.createElement('button');
+  btnR.className = 'oc-btn';
+  btnR.style.fontSize = '12px';
+  btnR.style.padding = '3px 9px';
+  btnR.textContent = '恢复';
+  btnR.onclick = function(){ clRestore(it, wrap); };
+  act.appendChild(btnR);
+
+  var btnD = document.createElement('button');
+  btnD.className = 'oc-btn gray';
+  btnD.style.fontSize = '12px';
+  btnD.style.padding = '3px 9px';
+  btnD.textContent = '删除';
+  btnD.onclick = function(){ clDelete(it); };
+  act.appendChild(btnD);
+
+  row.appendChild(left);
+  row.appendChild(act);
+  wrap.appendChild(row);
+  return wrap;
+}
+
+function clDelete(it){
+  var label = it.display || it.name;
+  if (!confirm('确定删除云端备份 ' + label + ' ？\n删除后无法恢复。')) return;
+  CL.busy = true;
+  clRender();
+  post(API.cloud_rm, { name: it.name }, function(r){
+    CL.busy = false;
+    clRender();
+    if (r && r.ok){
+      clErr('cl-err3', '');
+      clOutReset();
+      clOut('已删除云端备份：' + label);
+      clLoadList();
+    } else {
+      clErr('cl-err3', '删除失败：' + ((r && r.error) || '未知错误') + clNet(r));
+    }
+  });
+}
+
+// ---------------------------------------------------------------- 恢复
+var CL_RESTORE_NOTE = '恢复会用云端备份覆盖当前数据，覆盖前会自动做一次本地快照。';
+
+function clRestore(it, wrap){
+  if (it.encrypted){
+    clShowDecrypt(it, wrap);
+    return;
+  }
+  clDoRestore(it, '', null);
+}
+
+function clShowDecrypt(it, wrap){
+  var old = wrap.querySelector('.oc-dec');
+  if (old){ old.style.display = ''; return; }
+
+  var box = document.createElement('div');
+  box.className = 'oc-dec';
+  box.style.margin = '4px 0 10px';
+  box.style.padding = '10px 12px';
+  box.style.border = '1px dashed var(--oc-line)';
+  box.style.borderRadius = '8px';
+
+  var hint = document.createElement('div');
+  hint.className = 'oc-hint';
+  hint.style.marginTop = '0';
+  hint.textContent = '这是一份加密备份，请输入当时的加密口令';
+  box.appendChild(hint);
+
+  var line = document.createElement('div');
+  line.style.display = 'flex';
+  line.style.gap = '6px';
+  line.style.flexWrap = 'wrap';
+  line.style.alignItems = 'center';
+  line.style.marginTop = '8px';
+
+  var pw = document.createElement('input');
+  pw.type = 'password';
+  pw.maxLength = 128;
+  pw.autocomplete = 'off';
+  pw.placeholder = '加密口令';
+  pw.style.minWidth = '200px';
+
+  var btn = document.createElement('button');
+  btn.textContent = '解密并恢复';
+
+  line.appendChild(pw);
+  line.appendChild(btn);
+  box.appendChild(line);
+
+  var useSaved = document.createElement('label');
+  useSaved.className = 'oc-hint';
+  useSaved.style.display = 'block';
+  useSaved.style.marginTop = '6px';
+  var cb = document.createElement('input');
+  cb.type = 'checkbox';
+  // 只有本机确实保存了口令时才默认勾选；没有保存时连这个选项都不显示，
+  // 避免用户以为可以「用已保存的口令」却始终失败。
+  cb.checked = CL.passSet;
+  useSaved.style.display = CL.passSet ? 'block' : 'none';
+  useSaved.appendChild(cb);
+  useSaved.appendChild(document.createTextNode(' 使用已保存的口令'));
+  box.appendChild(useSaved);
+
+  var err = document.createElement('div');
+  err.className = 'oc-err';
+  err.style.fontSize = '12px';
+  err.style.marginTop = '6px';
+  box.appendChild(err);
+
+  var panel = { btn: btn, pw: pw, cb: cb, err: err, fails: 0 };
+
+  btn.onclick = function(){
+    var pass = '';
+    if (!cb.checked){
+      pass = pw.value;
+      if (!pass){ err.textContent = '请输入口令'; return; }
+    } else if (!CL.passSet){
+      err.textContent = '本机没有保存口令，请取消勾选后手动输入';
+      return;
+    }
+    err.textContent = '';
+    btn.disabled = true;
+    pw.disabled = true;
+    cb.disabled = true;
+    clDoRestore(it, pass, panel);
+  };
+
+  wrap.appendChild(box);
+}
+
+function clPanelReset(panel){
+  if (!panel) return;
+  panel.btn.disabled = false;
+  panel.pw.disabled = false;
+  panel.cb.disabled = false;
+}
+
+function clDoRestore(it, pass, panel){
+  var label = it.display || it.name;
+  if (!confirm('将把云端备份 ' + label + ' 恢复到本机。\n' + CL_RESTORE_NOTE + '\n继续？')){
+    clPanelReset(panel);
+    return;
+  }
+  CL.busy = true;
+  clRender();
+  clErr('cl-err3', '');
+  clOutReset();
+  clOut('① 正在从云端下载 ' + label + ' …');
+
+  post(API.cloud_download, { name: it.name, pass: pass || '' }, function(r){
+    if (!r || !r.ok){
+      CL.busy = false;
+      clRender();
+      clPanelReset(panel);
+      var msg = (r && r.error) || '下载失败';
+      clErr('cl-err3', msg + clNet(r));
+      clOut('下载失败：' + msg);
+      // 口令错误：保留已输入内容，让用户改一个字符重试。
+      if (panel && /口令错误|已损坏/.test(msg)){
+        panel.fails = (panel.fails || 0) + 1;
+        if (panel.fails >= 3){
+          panel.err.textContent = '多次失败，请确认口令；口令丢失后该备份无法恢复';
+        } else {
+          panel.err.textContent = '口令错误或文件已损坏';
+        }
+      }
+      return;
+    }
+
+    var file = r.file || '';
+    clOut('已下载到本机备份目录：' + file);
+    clOut('② 正在恢复（会先自动做一次本地快照）…');
+    post(API.restore, { file: file }, function(rr){
+      CL.busy = false;
+      clRender();
+      if (rr && rr.ok){
+        clErr('cl-err3', '');
+        clOut('恢复完成，网关已重启。');
+        loadBackups();
+      } else {
+        var d = jp(rr && rr.data, {});
+        clErr('cl-err3', '恢复失败：' + ((d && d.error) || (rr && rr.error) || '未知错误'));
+        clOut('恢复失败。');
+      }
+      clLoadList();
+    });
+  });
+}
+
+// ---------------------------------------------------------------- 第一步：安装
+function clInstall(){
+  var btn  = $('btn-cl-install');
+  var hint = $('cl-install-hint');
+  CL.busy = true;
+  btn.disabled = true;
+  btn.textContent = '正在下载并安装…';
+  clErr('cl-err1', '');
+  hint.style.display = '';
+  hint.textContent = '已等待 0 秒…';
+
+  var t0 = Date.now();
+  var timer = setInterval(function(){
+    hint.textContent = '已等待 ' + Math.round((Date.now() - t0) / 1000) + ' 秒…';
+  }, 1000);
+
+  post(API.cloud_install, {}, function(r){
+    clearInterval(timer);
+    CL.busy = false;
+    btn.textContent = '安装网盘组件（约 14 MB）';
+    if (r && r.ok){
+      hint.textContent = '安装完成。';
+      clErr('cl-err1', '');
+      clStatus();
+    } else {
+      hint.style.display = 'none';
+      clErr('cl-err1', (r && r.error) || '安装失败' + clNet(r));
+      clRender();
+    }
+  });
+}
+
+// ---------------------------------------------------------------- 第二步：登录
+function clLoginUrl(){
+  var btn = $('btn-cl-loginurl');
+  CL.busy = true;
+  btn.disabled = true;
+  btn.textContent = '正在获取…';
+  clErr('cl-err2', '');
+
+  post(API.cloud_login_url, {}, function(r){
+    CL.busy = false;
+    btn.textContent = '① 获取授权链接';
+    clRender();
+    if (!r || !r.ok){
+      clErr('cl-err2', (r && r.error) || '获取授权链接失败' + clNet(r));
+      return;
+    }
+    var u = (r.data && r.data.url) || '';
+    if (!u){
+      clErr('cl-err2', '后端未返回授权链接');
+      return;
+    }
+    // 只读 input 展示 + 新标签打开：百度登录页有 X-Frame-Options，iframe 必然白屏。
+    $('cl-url').value = u;
+    $('cl-url-wrap').style.display = '';
+    try { window.open(u, '_blank', 'noopener'); } catch (e) {}
+  });
+}
+
+function clLoginCode(){
+  var code = $('cl-code').value.replace(/^\s+|\s+$/g, '');
+  if (!/^[A-Za-z0-9_-]{4,64}$/.test(code)){
+    clErr('cl-err2', '授权码格式不正确（只允许字母、数字、_ 和 -，长度 4-64）');
+    return;
+  }
+  clErr('cl-err2', '');
+  var btn = $('btn-cl-logincode');
+  CL.busy = true;
+  btn.disabled = true;
+  btn.textContent = '正在提交…';
+
+  post(API.cloud_login_code, { code: code }, function(r){
+    CL.busy = false;
+    btn.textContent = '② 提交授权码';
+    if (r && r.ok){
+      $('cl-code').value = '';
+      $('cl-url').value = '';
+      $('cl-url-wrap').style.display = 'none';
+      clStatus();
+    } else {
+      clErr('cl-err2', (r && r.error) || '授权失败' + clNet(r));
+      clRender();
+    }
+  });
+}
+
+function clLogout(){
+  if (!confirm('退出百度网盘登录？\n退出后需要重新授权才能继续云备份。')) return;
+  CL.busy = true;
+  clRender();
+  post(API.cloud_logout, {}, function(r){
+    CL.busy = false;
+    if (r && r.ok){
+      clErr('cl-err2b', '');
+      clErr('cl-err3', '');
+      clStatus();
+    } else {
+      clErr('cl-err2b', '退出登录失败：' + ((r && r.error) || '未知错误') + clNet(r));
+      clRender();
+    }
+  });
+}
+
+// ---------------------------------------------------------------- 第三步：上传
+function clBackup(){
+  if (!confirm('将在本机创建一份备份并上传到网盘 openclaw-backups/，过程中会占用带宽。\n继续？')) return;
+  CL.busy = true;
+  clRender();
+  clErr('cl-err3', '');
+  clOutReset();
+  clOut('① 正在本机打包备份（配置 + 会话 + 工作区）…');
+
+  post(API.backup_create, { name: '', workspace: '1' }, function(r){
+    var d = jp(r && r.data, {});
+    if (!r || !r.ok || !d.file){
+      CL.busy = false;
+      clRender();
+      clErr('cl-err3', '本地打包失败：' + ((d && d.error) || (r && r.error) || '未知错误') + clNet(r));
+      clOut('本地打包失败。');
+      return;
+    }
+    clOut('本地备份完成：' + d.file + '（' + fmtSize(d.size || 0) + '）');
+    clOut('② 正在上传到网盘 openclaw-backups/ …');
+
+    post(API.cloud_upload, { file: d.file }, function(rr){
+      CL.busy = false;
+      clRender();
+      if (rr && rr.ok){
+        var up = (rr.data && rr.data.remote) || d.file;
+        var sz = (rr.data && rr.data.size) || d.size || 0;
+        clErr('cl-err3', '');
+        clOut('已上传 ' + up + '（' + fmtSize(sz) + '）');
+      } else {
+        clErr('cl-err3', '上传失败：' + ((rr && rr.error) || '未知错误') + clNet(rr));
+        clOut('上传失败。');
+      }
+      clLoadList();
+    });
+  });
+}
+
+// ---------------------------------------------------------------- 加密口令
+function clPassSave(){
+  var p1 = $('cl-pass1').value;
+  var p2 = $('cl-pass2').value;
+  if (p1.length < 8 || p1.length > 128){
+    clErr('cl-err-pass', '口令长度必须为 8-128 个字符');
+    return;
+  }
+  if (p1 !== p2){
+    clErr('cl-err-pass', '两次输入的口令不一致');
+    return;
+  }
+  clErr('cl-err-pass', '');
+  CL.busy = true;
+  clRender();
+  post(API.cloud_pass_set, { pass: p1 }, function(r){
+    CL.busy = false;
+    if (r && r.ok){
+      $('cl-pass1').value = '';
+      $('cl-pass2').value = '';
+      clErr('cl-err-pass', '');
+      clPassStatus();
+    } else {
+      clErr('cl-err-pass', '保存口令失败：' + ((r && r.error) || '未知错误') + clNet(r));
+      clRender();
+    }
+  });
+}
+
+function clPassClear(){
+  if (!confirm('清除本机保存的加密口令？\n清除后，已加密的云端备份将无法再解密。')) return;
+  CL.busy = true;
+  clRender();
+  post(API.cloud_pass_clear, {}, function(r){
+    CL.busy = false;
+    if (r && r.ok){
+      clErr('cl-err-pass', '');
+      clPassStatus();
+    } else {
+      clErr('cl-err-pass', '清除口令失败：' + ((r && r.error) || '未知错误') + clNet(r));
+      clRender();
+    }
+  });
+}
+
+// ---------------------------------------------------------------- 复制按钮
+// 与状态页同一套逻辑：路由器一般用 http:// 访问，属于非安全上下文，
+// navigator.clipboard 可能不可用，必须保留 execCommand 退化路径。
+function ocCopySay(btn, text){
+  if (!btn) return;
+  if (!btn.getAttribute('data-label')) btn.setAttribute('data-label', btn.textContent);
+  if (btn._ocCopyTimer){ clearTimeout(btn._ocCopyTimer); btn._ocCopyTimer = null; }
+  btn.textContent = text;
+  btn._ocCopyTimer = setTimeout(function(){
+    btn._ocCopyTimer = null;
+    btn.textContent = btn.getAttribute('data-label') || '复制';
+  }, 1200);
+}
+
+function ocCopyFallback(input){
+  try {
+    input.focus();
+    input.select();
+    return document.execCommand('copy') === true;
+  } catch (e){ return false; }
+}
+
+document.addEventListener('click', function(e){
+  var t = e.target;
+  var btn = (t && t.closest) ? t.closest('.oc-copy') : null;
+  if (!btn) return;
+  var id = btn.getAttribute('data-copy') || '';
+  var input = id ? $(id) : null;
+  if (!input){ ocCopySay(btn, '复制失败'); return; }
+  var text = String(input.value == null ? '' : input.value);
+  if (!text){ ocCopySay(btn, '复制失败'); return; }
+  var ok   = function(){ ocCopySay(btn, '已复制'); };
+  var fail = function(){ if (ocCopyFallback(input)) ok(); else ocCopySay(btn, '复制失败'); };
+  if (navigator.clipboard && navigator.clipboard.writeText){
+    try { navigator.clipboard.writeText(text).then(ok, fail); }
+    catch (e2){ fail(); }
+  } else {
+    fail();
+  }
+});
+
+// ---------------------------------------------------------------- 事件绑定
+$('btn-cl-install').onclick    = clInstall;
+$('btn-cl-loginurl').onclick   = clLoginUrl;
+$('btn-cl-logincode').onclick  = clLoginCode;
+$('btn-cl-logout').onclick     = clLogout;
+$('btn-cl-backup').onclick     = clBackup;
+$('btn-cl-refresh').onclick    = function(){ clLoadList(); };
+$('btn-cl-pass-save').onclick  = clPassSave;
+$('btn-cl-pass-clear').onclick = clPassClear;
+// 定时备份的保存按钮保持禁用（后端缺写入接口），这里不绑定任何动作。
+
+// 初始渲染 + 只读查询（不会触发任何上传 / 下载）
+clRender();
+clStatus();
+clPassStatus();
+clSchStatus();
 </script>
 <%+footer%>
