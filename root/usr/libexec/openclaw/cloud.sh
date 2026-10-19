@@ -56,7 +56,7 @@
 #
 # 目录（都在数据盘，重启不丢）：
 #   $OC_CLOUD_ROOT   云备份父目录（0700）
-#   $OC_CLOUD_DIR    组件安装目录（只放程序；安装器 --install-dir 指这里）
+#   $OC_CLOUD_DIR    组件安装目录（只放程序；安装器 -dir 指这里）
 #   $OC_CLOUD_HOME   bdpan 的 HOME（登录态）
 #   $OC_CLOUD_PASS   加密口令文件（0600）
 #   $OC_CLOUD_BIN    安装后的 bdpan（找不到时在 $OC_CLOUD_ROOT 内搜索）
@@ -883,9 +883,24 @@ cloud_install_home_cleanup() {
 	return 0
 }
 
+cloud_installer_has_flag() {
+	# cloud_installer_has_flag <usage-file> <flag> -> 0 表示 usage 里列出了该参数
+	#
+	# 只看每行的**第一个词**：Go 的 flag 用法里，一个参数定义行必然是
+	# `  -dir string  说明` 这种形状，第一个词就是参数名。
+	# 不能在整行里搜子串 —— 安装器把错误信息也打到同一个输出里时
+	# （例如 "flag provided but not defined: -install-dir"），那种行会
+	# 让 -install-dir 被误判成"支持"，于是又传一个它不认识的参数，白跑一轮。
+	# 同时兼容 "-flag=value" 的写法。
+	awk -v f="$2" '
+		$1 == f || substr($1, 1, length(f) + 1) == f "=" { found = 1; exit }
+		END { exit(found ? 0 : 1) }
+	' "$1"
+}
+
 cloud_install_version() {
 	# cloud_install_version <ver>
-	# 下载 -> 校验 -> 安装，只写 $OC_CLOUD_DIR（安装器 --install-dir）。
+	# 下载 -> 校验 -> 安装，只写 $OC_CLOUD_DIR（安装器 -dir）。
 	#
 	# 成功：return 0，并设置
 	#   OC_INSTALL_PATH  安装后的 bdpan 路径
@@ -894,8 +909,9 @@ cloud_install_version() {
 	#
 	# 安装器的 HOME 指向 $OC_RUNDIR 下的一次性目录，而不是 $OC_CLOUD_HOME：
 	# 这是「更新只允许动 $OC_CLOUD_DIR」的强制手段 —— 即使安装器忽略
-	# --install-dir，也只能写进临时目录，碰不到登录态与口令。
+	# -dir，也只能写进临时目录，碰不到登录态与口令。
 	local ver="$1" arch url dest size magic head4 mach sha out rc err bin vout
+	local hout usage dirflag yesflag
 	local ver_raw ver_out ihome
 
 	OC_INSTALL_ERR=""
@@ -985,7 +1001,7 @@ cloud_install_version() {
 	fi
 	chmod 700 "$dest" 2>/dev/null || true
 
-	# 一次性 HOME：安装器就算忽略 --install-dir，也只能写进这里。
+	# 一次性 HOME：安装器就算忽略 -dir，也只能写进这里。
 	ihome="$OC_RUNDIR/cloud-install-home.$$"
 	rm -f "$ihome" 2>/dev/null
 	if ! mkdir -p "$ihome" 2>/dev/null; then
@@ -995,16 +1011,58 @@ cloud_install_version() {
 	fi
 	chmod 700 "$ihome" 2>/dev/null || true
 
-	out="$OC_RUNDIR/bdpan-install-$$.log"
-	rm -f "$out" 2>/dev/null
-	cblog "运行安装器（--install-dir=$OC_CLOUD_DIR，临时 HOME=$ihome）"
+	# 探测安装器支持的参数：各版本参数名并不一致（实测 3.7.3 只认 -dir，
+	# 旧实现传的参数名安装器不认识，会以 rc=2 直接退出）。Go flag 的 -h 把
+	# usage 打到 stderr 并以 2 退出，所以这里只看输出，不把非 0 退出码当成失败。
+	hout="$OC_RUNDIR/bdpan-installer-help-$$.log"
+	rm -f "$hout" 2>/dev/null
 	(
 		export HOME="$ihome"
 		export TMPDIR="$OC_RUNDIR"
-		oc_timeout 600 "$dest" --install-dir "$OC_CLOUD_DIR" --yes
+		oc_timeout 20 "$dest" -h
+	) >"$hout" 2>&1 </dev/null
+
+	dirflag=""
+	if cloud_installer_has_flag "$hout" "-dir"; then
+		dirflag="-dir"
+	elif cloud_installer_has_flag "$hout" "-install-dir"; then
+		dirflag="-install-dir"
+	fi
+	yesflag=""
+	if cloud_installer_has_flag "$hout" "-yes"; then
+		yesflag="-yes"
+	elif cloud_installer_has_flag "$hout" "-y"; then
+		yesflag="-y"
+	fi
+	# 折成一行：usage 要进 JSON 错误信息，换行会破坏 JSON。
+	usage="$(head -c 4000 "$hout" 2>/dev/null | tr '\n\r\t' '   ')"
+	rm -f "$hout" 2>/dev/null
+	[ -n "$usage" ] || usage="（安装器 -h 无输出）"
+
+	if [ -z "$dirflag" ]; then
+		# 绝不退回裸调用：裸调用没有 -dir，安装器会装到默认路径，
+		# 破坏「只动 $OC_CLOUD_DIR」的约定。
+		rm -f "$dest" 2>/dev/null
+		cloud_install_home_cleanup "$ihome"
+		OC_INSTALL_ERR="安装器不支持指定安装目录（尝试过 -dir / -install-dir），已中止以免装到错误位置：$(printf '%s' "$usage" | head -c 300)"
+		return 1
+	fi
+
+	out="$OC_RUNDIR/bdpan-install-$$.log"
+	rm -f "$out" 2>/dev/null
+	cblog "运行安装器（$dirflag=$OC_CLOUD_DIR${yesflag:+，$yesflag}，临时 HOME=$ihome）"
+	(
+		export HOME="$ihome"
+		export TMPDIR="$OC_RUNDIR"
+		# yesflag 可能为空：空字符串不能当参数传给安装器。
+		if [ -n "$yesflag" ]; then
+			oc_timeout 600 "$dest" "$dirflag" "$OC_CLOUD_DIR" "$yesflag"
+		else
+			oc_timeout 600 "$dest" "$dirflag" "$OC_CLOUD_DIR"
+		fi
 	) >"$out" 2>&1 </dev/null
 	rc=$?
-	# 不再退化成裸调用：裸调用没有 --install-dir，安装器可能写进 HOME
+	# 不再退化成裸调用：裸调用没有 -dir，安装器可能写进 HOME
 	# 或默认路径，破坏「只动 $OC_CLOUD_DIR」的约定。
 	if [ "$rc" -ne 0 ]; then
 		err="$(tail -n 20 "$out" 2>/dev/null | cloud_redact | head -c 2000)"

@@ -121,12 +121,14 @@ ilog() {
 # 开始/结束两行；路由器上 npm install 常常跑十几分钟，前端每 2 秒重写日志区
 # 却始终看到同一段文字，用户就会以为安装卡死了。所以这里补两样东西：
 #   [i/N] 阶段名 …            每个阶段开始/结束各一行，能看出"到第几步、共几步"
-#   … 仍在进行（已 Xm Ys）     长步骤每 30 秒一行心跳，证明进程还活着
+#   … 仍在进行（已 Xm Ys）     长步骤每 15 秒一行心跳，证明进程还活着
 STAGE_TOTAL=7
 STAGE_IDX=0
 STAGE_NAME=""
 STAGE_START=0
 HB_PID=""
+HB_WATCH=""
+HB_INTERVAL=15
 
 stage_begin() {
 	STAGE_IDX=$((STAGE_IDX + 1))
@@ -137,6 +139,9 @@ stage_begin() {
 }
 
 stage_end() {
+	# 阶段结束时心跳必须已经停掉：否则日志里会出现「阶段已完成」之后
+	# 还在刷「仍在进行」的怪现象。这里兜底收一次，调用方漏停也不会漏。
+	hb_stop
 	local now elapsed
 	now="$(date +%s 2>/dev/null)"
 	case "$now" in ''|*[!0-9]*) now=0 ;; esac
@@ -147,23 +152,46 @@ stage_end() {
 	ilog "[$STAGE_IDX/$STAGE_TOTAL] $STAGE_NAME 完成（耗时 $(oc_fmt_elapsed "$elapsed")）"
 }
 
+hb_size_mb() {
+	# hb_size_mb <file> -> 文件当前大小的 MB 数（一位小数）；取不到时输出空。
+	# 只用于心跳展示，失败一律静默（不能因为统计进度把安装搞挂）。
+	local f="$1" b
+	[ -n "$f" ] && [ -f "$f" ] || return 0
+	b="$(wc -c <"$f" 2>/dev/null | awk '{print $1}')"
+	case "$b" in ''|*[!0-9]*) return 0 ;; esac
+	awk -v b="$b" 'BEGIN { printf "%.1f", b / 1048576 }' 2>/dev/null
+}
+
 hb_start() {
-	# hb_start <label> —— 为可能超过 60 秒的步骤起一个后台心跳。
+	# hb_start <label> [watch-file] —— 为可能超过 15 秒的步骤起一个后台心跳。
+	# watch-file 可选：给了就在心跳里附上它的当前大小（下载进度）。
 	# 子 shell 里 $$ 仍是父 shell 的 pid，所以父进程一旦退出（包括被 kill -9），
 	# 下一轮 kill -0 就会失败并自行结束，不会留下永久循环的孤儿进程。
 	hb_stop
-	local label="$1" parent start
+	local label="$1" watch="${2:-}" parent start
 	parent=$$
 	start="$(date +%s 2>/dev/null)"
 	case "$start" in ''|*[!0-9]*) start=0 ;; esac
+	HB_WATCH="$watch"
 	(
+		# sleep 放后台再 wait：收到 TERM 时 trap 立刻收掉这个 sleep，
+		# 不必依赖 pgrep（busybox 可以不带它），也不会留下孤儿 sleep。
+		spid=""
+		trap '[ -n "$spid" ] && kill "$spid" 2>/dev/null; exit 0' TERM INT HUP
 		while kill -0 "$parent" 2>/dev/null; do
-			sleep 30
+			sleep "$HB_INTERVAL" &
+			spid=$!
+			wait "$spid" 2>/dev/null
+			spid=""
 			kill -0 "$parent" 2>/dev/null || break
 			now="$(date +%s 2>/dev/null)"
 			case "$now" in ''|*[!0-9]*) now="$start" ;; esac
-			printf '%s\n' "[$STAGE_IDX/$STAGE_TOTAL] $label 仍在进行（已 $(oc_fmt_elapsed $((now - start)))）" \
-				>>"$OC_INSTALLLOG" 2>/dev/null
+			msg="[$STAGE_IDX/$STAGE_TOTAL] $label 仍在进行（已 $(oc_fmt_elapsed $((now - start)))）"
+			size="$(hb_size_mb "$HB_WATCH")"
+			if [ -n "$size" ]; then
+				msg="$msg 已下载 ${size} MB"
+			fi
+			ilog "$msg"
 		done
 	) &
 	HB_PID=$!
@@ -171,8 +199,8 @@ hb_start() {
 
 hb_stop() {
 	[ -n "$HB_PID" ] || return 0
-	# 心跳子 shell 通常正阻塞在 sleep 上：先收掉它的 sleep 子进程，再收它自己，
-	# 否则会留下一个最长 30 秒的孤儿 sleep。只按父子关系定位，不按名字杀。
+	# 心跳子 shell 自己的 TERM trap 会收掉正在 wait 的 sleep；这里再按父子
+	# 关系兜底杀一次（有 pgrep 时），覆盖 trap 没能执行的老 ash。
 	local kids
 	if command -v pgrep >/dev/null 2>&1; then
 		kids="$(pgrep -P "$HB_PID" 2>/dev/null)"
@@ -182,7 +210,28 @@ hb_stop() {
 	kill "$HB_PID" 2>/dev/null
 	wait "$HB_PID" 2>/dev/null
 	HB_PID=""
+	HB_WATCH=""
 	return 0
+}
+
+# run_with_heartbeat <label> [--watch <file>] -- <cmd...>
+# 在当前阶段执行 <cmd...>，执行期间每 HB_INTERVAL 秒往安装日志写一行心跳；
+# 命令一结束立刻停掉心跳（含它的 sleep 子进程），退出码原样返回给调用方。
+run_with_heartbeat() {
+	local label="$1" watch="" rc
+	shift
+	case "${1:-}" in
+		--watch)
+			watch="$2"
+			shift 2
+			;;
+	esac
+	[ "${1:-}" = "--" ] && shift
+	hb_start "$label" "$watch"
+	"$@"
+	rc=$?
+	hb_stop
+	return "$rc"
 }
 
 die() {
@@ -373,9 +422,10 @@ install_node_global() {
 		else
 			[ -e "$dest" ] && { ilog "缓存的压缩包已损坏，重新下载：$dest"; rm -f "$dest"; }
 			oc_need_space "$BASE_DIR" 200 || die "空间不足以下载 Node.js（需要约 200MB）"
-			hb_start "下载 Node.js $NODE_V"
-			oc_download "$url" "$dest" "下载 Node.js $NODE_V" 600 || die "Node.js 下载失败：$url"
-			hb_stop
+			# 心跳里带上 $dest 的当前大小：慢网下能看出是在下还是没动。
+			run_with_heartbeat "下载 Node.js $NODE_V" --watch "$dest" -- \
+				oc_download "$url" "$dest" "下载 Node.js $NODE_V" 600 \
+				|| die "Node.js 下载失败：$url"
 		fi
 		node_verify_sum "$base/$NODE_V" "$tarball" "$dest"
 		# 清空目标目录。这里刻意不用 rm -rf：find -depth -delete 只删目录内容，
@@ -448,9 +498,10 @@ install_node() {
 		else
 			[ -e "$dest" ] && { ilog "缓存的压缩包已损坏，重新下载：$dest"; rm -f "$dest"; }
 			oc_need_space "$BASE_DIR" 200 || die "空间不足以下载 Node.js（需要约 200MB）"
-			hb_start "下载 Node.js $NODE_V"
-			oc_download "$url" "$dest" "下载 Node.js $NODE_V" 600 || die "Node.js 下载失败：$url"
-			hb_stop
+			# 心跳里带上 $dest 的当前大小：慢网下能看出是在下还是没动。
+			run_with_heartbeat "下载 Node.js $NODE_V" --watch "$dest" -- \
+				oc_download "$url" "$dest" "下载 Node.js $NODE_V" 600 \
+				|| die "Node.js 下载失败：$url"
 		fi
 		node_verify_sum "$base/$NODE_V" "$tarball" "$dest"
 		rm -rf "$NODE_DIR"
@@ -518,14 +569,13 @@ install_openclaw() {
 	case "$start_ts" in ''|*[!0-9]*) start_ts=0 ;; esac
 
 	# npm 的输出只进独立日志，主日志在整段安装期间不会自己增长；
-	# 心跳是"还在干活"的唯一可见证据，阶段结束后立刻收掉。
-	hb_start "npm install"
-	run_with_timeout "$NPM_INSTALL_TIMEOUT" "$NODE_BIN" "$npmcli" install -g \
+	# 心跳是"还在干活"的唯一可见证据，命令结束（含被 timeout 杀掉）后立刻收掉。
+	run_with_heartbeat "npm install" -- \
+		run_with_timeout "$NPM_INSTALL_TIMEOUT" "$NODE_BIN" "$npmcli" install -g \
 		--prefix "$OC_DIR" --registry "$reg" \
 		--no-audit --no-fund --loglevel=http --prefer-offline \
 		"openclaw@$OCV" >>"$npm_log" 2>&1
 	rc=$?
-	hb_stop
 
 	end_ts="$(date +%s 2>/dev/null)"
 	case "$end_ts" in ''|*[!0-9]*) end_ts=0 ;; esac
