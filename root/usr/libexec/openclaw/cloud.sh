@@ -7,6 +7,8 @@
 # 用法：
 #   cloud.sh status
 #   cloud.sh install-cli
+#   cloud.sh cli-check          探测官方 CDN 上可用的最新组件版本
+#   cloud.sh cli-update [ver]   更新组件（不给版本时用 cli-check 探测到的 latest）
 #   cloud.sh login-url
 #   cloud.sh login-code <code>
 #   cloud.sh logout
@@ -37,7 +39,7 @@
 #   * 所有 bdpan 调用都带私有 HOME（登录态落点）并用 oc_timeout 包住。
 #   * 绝不读取 / 打印 $HOME/.config/bdpan/config.json（内含 access_token）。
 #   * 口令绝不进 argv / env / URL / 日志：set-pass 与 download-dec 从 stdin 读，
-#     加密上传时从 $OC_CLOUD_DIR/pass（0600）读，经 heredoc 交给 node 的 stdin。
+#     加密上传时从 $OC_CLOUD_PASS（0600）读，经 heredoc 交给 node 的 stdin。
 #
 # 加密是否启用由 UCI 的 main.cloud_encrypt 决定（0=明文，1=加密，默认 0）；
 # 口令只是加密的**必要条件**：cloud_encrypt=1 但没有口令时上传直接报错，
@@ -53,9 +55,14 @@
 # 加密后的远端文件名为 <原文件名>.enc。
 #
 # 目录（都在数据盘，重启不丢）：
-#   $OC_CLOUD_DIR    组件目录
+#   $OC_CLOUD_ROOT   云备份父目录（0700）
+#   $OC_CLOUD_DIR    组件安装目录（只放程序；安装器 --install-dir 指这里）
 #   $OC_CLOUD_HOME   bdpan 的 HOME（登录态）
-#   $OC_CLOUD_BIN    安装后的 bdpan（找不到时在组件目录内搜索）
+#   $OC_CLOUD_PASS   加密口令文件（0600）
+#   $OC_CLOUD_BIN    安装后的 bdpan（找不到时在 $OC_CLOUD_ROOT 内搜索）
+#
+# 分层目的：把「可被安装器覆盖的程序目录」与「登录态 / 口令」分开，
+# 重装或更新组件只动 $OC_CLOUD_DIR，绝不会冲掉登录态与口令。
 
 OC_LIB="/usr/libexec/openclaw/lib.sh"
 [ -f "$OC_LIB" ] || OC_LIB="$(dirname "$0")/lib.sh"
@@ -68,12 +75,17 @@ fi
 	exit 1
 }
 
-OC_CLOUD_DIR="$(oc_base_dir)/cloud"
-OC_CLOUD_HOME="$OC_CLOUD_DIR/home"
+OC_CLOUD_ROOT="$(oc_base_dir)/cloud"
+OC_CLOUD_DIR="$OC_CLOUD_ROOT/bin"
+OC_CLOUD_HOME="$OC_CLOUD_ROOT/home"
+OC_CLOUD_PASS="$OC_CLOUD_ROOT/pass"
 OC_CLOUD_BIN="$OC_CLOUD_DIR/bdpan"
+OC_CLOUD_VERSION_FILE="$OC_CLOUD_DIR/.installed-version"
 OC_CLOUD_REMOTE="openclaw-backups"
-OC_CLOUD_PASS="$OC_CLOUD_DIR/pass"
 OC_CLOUD_DEFAULT_VERSION="3.7.3"
+# 官方没有版本清单接口（installer/latest/...、latest.json、version.json 都是 404），
+# 只能按候选版本逐个探测安装器 URL 是否存在。候选按版本升序排列。
+OC_CLOUD_CANDIDATES="3.7.1 3.7.3 3.8.0 3.8.1 3.8.2 3.8.3 3.8.4 3.8.5"
 OC_CLOUD_CDN="https://issuecdn.baidupcs.com/issue/netdisk/ai-bdpan/installer"
 
 # ---------------------------------------------------------------- output
@@ -131,6 +143,10 @@ cloud_arch() {
 }
 
 cloud_ensure_dirs() {
+	# root 0700；bin / home 都在 root 之下，同样收紧到 0700。
+	# pass 是 root 下的普通文件，父目录已由下面第一段建好。
+	mkdir -p "$OC_CLOUD_ROOT" 2>/dev/null || return 1
+	chmod 700 "$OC_CLOUD_ROOT" 2>/dev/null || true
 	mkdir -p "$OC_CLOUD_DIR" 2>/dev/null || return 1
 	chmod 700 "$OC_CLOUD_DIR" 2>/dev/null || true
 	mkdir -p "$OC_CLOUD_HOME" 2>/dev/null || return 1
@@ -144,10 +160,15 @@ cloud_bin() {
 		printf '%s' "$OC_CLOUD_BIN"
 		return 0
 	fi
-	[ -d "$OC_CLOUD_DIR" ] || return 1
+	[ -d "$OC_CLOUD_ROOT" ] || return 1
+	# 兜底只在 $OC_CLOUD_ROOT 内找；只认普通文件（不收符号链接），
+	# 且 basename 必须正好是 bdpan —— 目录内容由安装器写入，不能把它
+	# 当成「可执行任意目标」的入口。
 	local p
-	p="$(find "$OC_CLOUD_DIR" -maxdepth 4 \( -type f -o -type l \) -name bdpan 2>/dev/null | head -n1)"
+	p="$(find "$OC_CLOUD_ROOT" -maxdepth 4 -type f -name bdpan 2>/dev/null | head -n1)"
 	[ -n "$p" ] || return 1
+	[ "$(basename "$p" 2>/dev/null)" = "bdpan" ] || return 1
+	[ -f "$p" ] || return 1
 	printf '%s' "$p"
 }
 
@@ -157,6 +178,76 @@ cloud_bin_ready() {
 	b="$(cloud_bin)" || return 1
 	[ -n "$b" ] && [ -x "$b" ] || return 1
 	printf '%s' "$b"
+}
+
+# ---------------------------------------------------------------- version
+cloud_version_valid() {
+	# 版本号白名单：安装器 URL 与 UCI 值都会进 URL / 路径，必须严格。
+	case "${1:-}" in
+		''|*[!0-9A-Za-z._-]*) return 1 ;;
+	esac
+	[ "${#1}" -le 32 ] || return 1
+	return 0
+}
+
+cloud_norm_version() {
+	# cloud_norm_version <string> -> 归一化的 x.y.z；取不到时输出空。
+	# `bdpan version` 的输出格式没有承诺（可能是 "bdpan version 3.7.3" 或
+	# "v3.7.3"），所以只提取第一个 x.y.z；没有 x.y.z 时退回「去掉前导 v 的
+	# 白名单串」，再不行就留空 —— 绝不把整行输出当成版本号去比较。
+	local s="${1:-}" t
+	s="$(printf '%s' "$s" | tr -d '\r\000-\037\177')"
+	t="$(printf '%s' "$s" | grep -o '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' 2>/dev/null | head -n1)"
+	if [ -z "$t" ]; then
+		t="$(printf '%s' "$s" | sed -n 's/^[[:space:]]*[vV]\{0,1\}\([0-9][0-9A-Za-z._-]*\).*$/\1/p' | head -n1)"
+	fi
+	cloud_version_valid "$t" || t=""
+	printf '%s' "$t"
+}
+
+cloud_version_file_read() {
+	# 读 $OC_CLOUD_DIR/.installed-version（一行）；读不到返回 1。
+	local v
+	[ -f "$OC_CLOUD_VERSION_FILE" ] || return 1
+	v="$(head -n1 "$OC_CLOUD_VERSION_FILE" 2>/dev/null | tr -d '\r\000-\037\177')"
+	v="$(cloud_norm_version "$v")"
+	[ -n "$v" ] || return 1
+	printf '%s' "$v"
+}
+
+cloud_version_file_write() {
+	# cloud_version_file_write <ver> -> 原子写一行版本号；失败返回 1。
+	# 只是记录，写不进去不影响安装结果（调用方只告警）。
+	local ver="$1" tmp
+	cloud_version_valid "$ver" || return 1
+	cloud_ensure_dirs || return 1
+	tmp="$OC_CLOUD_VERSION_FILE.$$"
+	rm -f "$tmp" 2>/dev/null
+	if ! printf '%s\n' "$ver" >"$tmp" 2>/dev/null; then
+		rm -f "$tmp" 2>/dev/null
+		return 1
+	fi
+	chmod 600 "$tmp" 2>/dev/null
+	if ! mv -f "$tmp" "$OC_CLOUD_VERSION_FILE" 2>/dev/null; then
+		rm -f "$tmp" 2>/dev/null
+		return 1
+	fi
+	return 0
+}
+
+cloud_current_version() {
+	# 当前组件版本：优先 `bdpan version`，取不到退回 .installed-version；
+	# 都没有时输出空（= 未安装 / 无法确认）。
+	local bin v=""
+	bin="$(cloud_bin_ready)" || bin=""
+	if [ -n "$bin" ]; then
+		v="$(cloud_run 30 "$bin" version 2>/dev/null | head -n1)"
+		v="$(cloud_norm_version "$v")"
+	fi
+	if [ -z "$v" ]; then
+		v="$(cloud_version_file_read)" || v=""
+	fi
+	printf '%s' "$v"
 }
 
 # ---------------------------------------------------------------- bdpan call
@@ -606,9 +697,11 @@ cmd_set_pass() {
 	esac
 
 	# 先写同目录临时文件（umask 077 + chmod 600），再 mv 原子替换。
+	# 临时文件必须与 $OC_CLOUD_PASS 同目录（$OC_CLOUD_ROOT），
+	# 既保证 mv 是原子替换，也不会把口令临时落到安装器可覆盖的 bin/ 里。
 	# 下面这一处 printf 是口令唯一的落盘点：目标是 0600 私有文件，
 	# 绝不重定向到 stdout / stderr / 日志。
-	tmp="$OC_CLOUD_DIR/.pass.$$"
+	tmp="$OC_CLOUD_ROOT/.pass.$$"
 	rm -f "$tmp" 2>/dev/null
 	if ! ( umask 077; printf '%s' "$pass" > "$tmp" ) 2>/dev/null; then
 		rm -f "$tmp" 2>/dev/null
@@ -692,12 +785,12 @@ cmd_status() {
 		path="$bin"
 	fi
 
-	if [ "$installed" = "true" ] && [ -x "$bin" ]; then
-		ver="$(cloud_run 30 "$bin" version 2>/dev/null | head -n1)"
-		ver="$(printf '%s' "$ver" | tr -d '\000-\037\177')"
-	elif [ -n "$bin" ]; then
+	if [ "$installed" = "true" ] && [ ! -x "$bin" ]; then
 		oc_warn "找到 bdpan（$bin）但不可执行，请重新安装组件"
 	fi
+	# 版本优先取 `bdpan version`；取不到（二进制损坏 / 架构不匹配 / 临时
+	# 不可执行）时退回安装时写下的 .installed-version，两者都没有才留空。
+	ver="$(cloud_current_version)"
 
 	if [ "$installed" = "true" ] && [ -x "$bin" ]; then
 		tmp="$OC_RUNDIR/cloud-whoami.$$"
@@ -760,57 +853,106 @@ cmd_status() {
 		rm -f "$tmp" 2>/dev/null
 	fi
 
-	printf '{"ok":true,"arch":"%s","cli":{"installed":%s,"path":"%s","version":"%s"},"auth":{"logged_in":%s,"user":"%s","expires":"%s","raw":"%s"},"remote_dir":"%s","dir":"%s","home":"%s"}\n' \
+	printf '{"ok":true,"arch":"%s","cli":{"installed":%s,"path":"%s","version":"%s"},"auth":{"logged_in":%s,"user":"%s","expires":"%s","raw":"%s"},"remote_dir":"%s","root":"%s","dir":"%s","home":"%s"}\n' \
 		"$arch" "$installed" "$(jstr "$path")" "$(jstr "$ver")" \
 		"$logged" "$(jstr "$user")" "$(jstr "$expires")" "$(jstr "$raw")" \
-		"$(jstr "$OC_CLOUD_REMOTE")" "$(jstr "$OC_CLOUD_DIR")" "$(jstr "$OC_CLOUD_HOME")"
+		"$(jstr "$OC_CLOUD_REMOTE")" "$(jstr "$OC_CLOUD_ROOT")" \
+		"$(jstr "$OC_CLOUD_DIR")" "$(jstr "$OC_CLOUD_HOME")"
 }
 
 # ---------------------------------------------------------------- install-cli
-cmd_install_cli() {
-	local arch ver url dest size magic mach sha out rc err bin vout ver_out
+cloud_installer_url() {
+	# cloud_installer_url <ver> -> 官方安装器 URL
+	printf '%s/%s/bdpan-installer-linux-%s' "$OC_CLOUD_CDN" "$1" "$(cloud_arch)"
+}
 
+cloud_install_home_cleanup() {
+	# 只清理 $OC_RUNDIR 下由 cloud_install_version 创建的一次性 HOME。
+	# 不使用 rm -rf：先删文件 / 链接，再逐层 rmdir；清不掉也不影响结果
+	# （它在 /tmp 的私有 rundir 里，重启即清空）。
+	local d="$1"
+	case "$d" in
+		"$OC_RUNDIR"/cloud-install-home.*) ;;
+		*) return 0 ;;
+	esac
+	[ -d "$d" ] || return 0
+	find "$d" -mindepth 1 -depth -type f -exec rm -f {} + 2>/dev/null
+	find "$d" -mindepth 1 -depth -type l -exec rm -f {} + 2>/dev/null
+	find "$d" -mindepth 1 -depth -type d -exec rmdir {} + 2>/dev/null
+	rmdir "$d" 2>/dev/null
+	return 0
+}
+
+cloud_install_version() {
+	# cloud_install_version <ver>
+	# 下载 -> 校验 -> 安装，只写 $OC_CLOUD_DIR（安装器 --install-dir）。
+	#
+	# 成功：return 0，并设置
+	#   OC_INSTALL_PATH  安装后的 bdpan 路径
+	#   OC_INSTALL_VER   归一化后的版本号（取不到时为原始首行）
+	# 失败：return 1，并设置 OC_INSTALL_ERR（已脱敏，可直接进 JSON）。
+	#
+	# 安装器的 HOME 指向 $OC_RUNDIR 下的一次性目录，而不是 $OC_CLOUD_HOME：
+	# 这是「更新只允许动 $OC_CLOUD_DIR」的强制手段 —— 即使安装器忽略
+	# --install-dir，也只能写进临时目录，碰不到登录态与口令。
+	local ver="$1" arch url dest size magic mach sha out rc err bin vout
+	local ver_raw ver_out ihome
+
+	OC_INSTALL_ERR=""
+	OC_INSTALL_PATH=""
+	OC_INSTALL_VER=""
+
+	cloud_version_valid "$ver" || {
+		OC_INSTALL_ERR="bdpan 版本号非法：$ver"
+		return 1
+	}
 	arch="$(cloud_arch)"
 	if [ "$arch" = "unsupported" ]; then
-		printf '{"ok":false,"error":"%s"}\n' "$(jstr "不支持的架构：$(uname -m 2>/dev/null)")"
-		exit 2
+		OC_INSTALL_ERR="不支持的架构：$(uname -m 2>/dev/null)"
+		return 1
 	fi
 
 	if ! oc_validate_base_dir "$(oc_base_dir)"; then
-		cloud_fail "安装目录不可用：$(oc_base_dir)"
+		OC_INSTALL_ERR="安装目录不可用：$(oc_base_dir)"
+		return 1
 	fi
 	if [ ! -d "$OC_RUNDIR" ] || [ ! -w "$OC_RUNDIR" ]; then
-		cloud_fail "临时目录不可用：$OC_RUNDIR"
+		OC_INSTALL_ERR="临时目录不可用：$OC_RUNDIR"
+		return 1
 	fi
-	cloud_ensure_dirs || cloud_fail "无法创建云备份目录：$OC_CLOUD_DIR"
+	cloud_ensure_dirs || {
+		OC_INSTALL_ERR="无法创建云备份目录：$OC_CLOUD_ROOT"
+		return 1
+	}
 
-	ver="$(uci_get main.bdpan_version "$OC_CLOUD_DEFAULT_VERSION")"
-	[ -n "$ver" ] || ver="$OC_CLOUD_DEFAULT_VERSION"
-	case "$ver" in
-		*[!0-9A-Za-z._-]*) cloud_fail "bdpan 版本号非法：$ver" ;;
-	esac
-	url="$OC_CLOUD_CDN/$ver/bdpan-installer-linux-$arch"
+	url="$(cloud_installer_url "$ver")"
 
 	dest="$OC_RUNDIR/bdpan-installer-$arch.$$"
 	rm -f "$dest" 2>/dev/null
 	cblog "下载百度网盘组件安装器：$url"
 	if ! oc_fetch "$url" "$dest" 600; then
 		rm -f "$dest" 2>/dev/null
-		cloud_fail "下载安装器失败：$url"
+		OC_INSTALL_ERR="下载安装器失败：$url"
+		return 1
 	fi
-	[ -f "$dest" ] || cloud_fail "下载安装器失败：文件不存在"
+	if [ ! -f "$dest" ]; then
+		OC_INSTALL_ERR="下载安装器失败：文件不存在"
+		return 1
+	fi
 
 	size="$(wc -c <"$dest" 2>/dev/null | tr -d ' ')"
 	case "$size" in ''|*[!0-9]*) size=0 ;; esac
 	if [ "$size" -le 5242880 ]; then
 		rm -f "$dest" 2>/dev/null
-		cloud_fail "安装器体积异常（${size} 字节，期望 > 5MB）"
+		OC_INSTALL_ERR="安装器体积异常（${size} 字节，期望 > 5MB）"
+		return 1
 	fi
 
 	magic="$(od -An -tx1 -N4 "$dest" 2>/dev/null | tr -d ' \n')"
 	if [ "$magic" != "7f454c46" ]; then
 		rm -f "$dest" 2>/dev/null
-		cloud_fail "下载内容不是 ELF 可执行文件（magic=${magic:-未知}）"
+		OC_INSTALL_ERR="下载内容不是 ELF 可执行文件（magic=${magic:-未知}）"
+		return 1
 	fi
 
 	# ELF e_machine（偏移 18，小端 2 字节）：arm64=0xb7，x86_64=0x3e
@@ -819,7 +961,8 @@ cmd_install_cli() {
 		arm64:b700|amd64:3e00) ;;
 		*)
 			rm -f "$dest" 2>/dev/null
-			cloud_fail "安装器架构不匹配：期望 $arch，ELF machine=${mach:-未知}" ;;
+			OC_INSTALL_ERR="安装器架构不匹配：期望 $arch，ELF machine=${mach:-未知}"
+			return 1 ;;
 	esac
 
 	if command -v sha256sum >/dev/null 2>&1; then
@@ -828,48 +971,304 @@ cmd_install_cli() {
 	fi
 	chmod 700 "$dest" 2>/dev/null || true
 
+	# 一次性 HOME：安装器就算忽略 --install-dir，也只能写进这里。
+	ihome="$OC_RUNDIR/cloud-install-home.$$"
+	rm -f "$ihome" 2>/dev/null
+	if ! mkdir -p "$ihome" 2>/dev/null; then
+		rm -f "$dest" 2>/dev/null
+		OC_INSTALL_ERR="无法创建安装临时目录：$ihome"
+		return 1
+	fi
+	chmod 700 "$ihome" 2>/dev/null || true
+
 	out="$OC_RUNDIR/bdpan-install-$$.log"
 	rm -f "$out" 2>/dev/null
-	cblog "运行安装器（私有 HOME=$OC_CLOUD_HOME）"
+	cblog "运行安装器（--install-dir=$OC_CLOUD_DIR，临时 HOME=$ihome）"
 	(
-		export HOME="$OC_CLOUD_HOME"
+		export HOME="$ihome"
 		export TMPDIR="$OC_RUNDIR"
 		oc_timeout 600 "$dest" --install-dir "$OC_CLOUD_DIR" --yes
 	) >"$out" 2>&1 </dev/null
 	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		oc_warn "安装器带 --install-dir/--yes 调用失败（rc=$rc），尝试裸调用"
-		(
-			export HOME="$OC_CLOUD_HOME"
-			export TMPDIR="$OC_RUNDIR"
-			oc_timeout 600 "$dest"
-		) >>"$out" 2>&1 </dev/null
-		rc=$?
-	fi
+	# 不再退化成裸调用：裸调用没有 --install-dir，安装器可能写进 HOME
+	# 或默认路径，破坏「只动 $OC_CLOUD_DIR」的约定。
 	if [ "$rc" -ne 0 ]; then
 		err="$(tail -n 20 "$out" 2>/dev/null | cloud_redact | head -c 2000)"
 		[ -n "$err" ] || err="无输出"
 		rm -f "$dest" "$out" 2>/dev/null
-		cloud_fail "安装器执行失败（rc=$rc）：$err"
+		cloud_install_home_cleanup "$ihome"
+		OC_INSTALL_ERR="安装器执行失败（rc=$rc）：$err"
+		return 1
 	fi
 	rm -f "$dest" "$out" 2>/dev/null
+	cloud_install_home_cleanup "$ihome"
 
-	bin="$(cloud_bin)" || cloud_fail "安装完成但未找到 bdpan 可执行文件"
+	bin="$(cloud_bin)" || {
+		OC_INSTALL_ERR="安装完成但未找到 bdpan 可执行文件"
+		return 1
+	}
 	chmod +x "$bin" 2>/dev/null || true
-	[ -x "$bin" ] || cloud_fail "安装后的 bdpan 不可执行：$bin"
+	if [ ! -x "$bin" ]; then
+		OC_INSTALL_ERR="安装后的 bdpan 不可执行：$bin"
+		return 1
+	fi
 
 	vout="$OC_RUNDIR/bdpan-ver-$$.log"
 	rm -f "$vout" 2>/dev/null
 	cloud_run 30 "$bin" version >"$vout" 2>&1
 	rc=$?
-	ver_out="$(head -n1 "$vout" 2>/dev/null | cloud_redact | tr -d '\000-\037\177')"
+	ver_raw="$(head -n1 "$vout" 2>/dev/null | cloud_redact | tr -d '\000-\037\177')"
 	rm -f "$vout" 2>/dev/null
 	if [ "$rc" -ne 0 ]; then
-		cloud_fail "安装后无法执行：${ver_out:-rc=$rc}"
+		OC_INSTALL_ERR="安装后无法执行：${ver_raw:-rc=$rc}"
+		return 1
+	fi
+
+	ver_out="$(cloud_norm_version "$ver_raw")"
+	[ -n "$ver_out" ] || ver_out="$ver_raw"
+	# 记录已装版本（一行版本号）。优先用目标版本（安装器的 version 输出
+	# 格式不稳定），目标版本不可用时退回运行时输出。
+	if cloud_version_valid "$ver"; then
+		cloud_version_file_write "$ver" || oc_warn "无法写入版本文件：$OC_CLOUD_VERSION_FILE"
+	elif cloud_version_valid "$ver_out"; then
+		cloud_version_file_write "$ver_out" || oc_warn "无法写入版本文件：$OC_CLOUD_VERSION_FILE"
+	fi
+
+	OC_INSTALL_PATH="$bin"
+	OC_INSTALL_VER="$ver_out"
+	return 0
+}
+
+cmd_install_cli() {
+	# 首次安装：版本取 UCI main.bdpan_version（缺省用 OC_CLOUD_DEFAULT_VERSION）。
+	local arch ver
+
+	arch="$(cloud_arch)"
+	if [ "$arch" = "unsupported" ]; then
+		printf '{"ok":false,"error":"%s"}\n' "$(jstr "不支持的架构：$(uname -m 2>/dev/null)")"
+		exit 2
+	fi
+
+	ver="$(uci_get main.bdpan_version "$OC_CLOUD_DEFAULT_VERSION")"
+	[ -n "$ver" ] || ver="$OC_CLOUD_DEFAULT_VERSION"
+
+	if ! cloud_install_version "$ver"; then
+		cloud_fail "${OC_INSTALL_ERR:-安装失败}"
 	fi
 
 	printf '{"ok":true,"path":"%s","version":"%s","arch":"%s"}\n' \
-		"$(jstr "$bin")" "$(jstr "$ver_out")" "$arch"
+		"$(jstr "$OC_INSTALL_PATH")" "$(jstr "$OC_INSTALL_VER")" "$arch"
+}
+
+# ---------------------------------------------------------------- check / update
+cloud_probe_status() {
+	# cloud_probe_status <url> -> stdout HTTP 状态码（探测失败时输出空）
+	# 只做 HEAD（-I）并跟随重定向（-L），单次 10 秒上限；外层再用 oc_timeout
+	# 兜底（没有 timeout applet 时它会退化为直接执行）。
+	local url="$1" proxy code=""
+
+	oc_safe_url "$url" || return 1
+	proxy="$(uci_get main.http_proxy '')"
+	if [ -n "$proxy" ]; then
+		oc_safe_url "$proxy" || proxy=""
+	fi
+
+	if command -v curl >/dev/null 2>&1; then
+		if [ -n "$proxy" ]; then
+			code="$(oc_timeout 15 curl -sIL --connect-timeout 10 --max-time 10 \
+				-x "$proxy" -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)"
+		else
+			code="$(oc_timeout 15 curl -sIL --connect-timeout 10 --max-time 10 \
+				-o /dev/null -w '%{http_code}' "$url" 2>/dev/null)"
+		fi
+	elif command -v wget >/dev/null 2>&1; then
+		# 没有 curl 时退化为 wget --spider -S，取最后一个状态码。
+		code="$(oc_timeout 15 wget -q --spider -S -T 10 "$url" 2>&1 \
+			| awk '/^[[:space:]]*HTTP\// { c = $2 } END { print c }')"
+	fi
+	case "$code" in
+		''|*[!0-9]*) code="" ;;
+	esac
+	printf '%s' "$code"
+}
+
+cloud_candidate_versions() {
+	# stdout: 去重并按版本升序排列的候选版本（空格分隔）。
+	# 官方没有版本清单接口，只能拿「缺省版本 + 固定候选」逐个探测。
+	local all v out="" sorted="" new placed s
+
+	all="$OC_CLOUD_DEFAULT_VERSION $OC_CLOUD_CANDIDATES"
+	for v in $all; do
+		cloud_version_valid "$v" || continue
+		case " $out " in
+			*" $v "*) continue ;;
+		esac
+		out="$out $v"
+	done
+
+	# 插入排序：候选很少，用 ver_lt 保证 3.8.10 vs 3.8.9 这类位数也正确。
+	for v in $out; do
+		new=""
+		placed=0
+		for s in $sorted; do
+			if [ "$placed" -eq 0 ] && ver_lt "$v" "$s"; then
+				new="$new $v"
+				placed=1
+			fi
+			new="$new $s"
+		done
+		[ "$placed" -eq 1 ] || new="$new $v"
+		sorted="$new"
+	done
+	printf '%s' "${sorted# }"
+}
+
+cloud_probe_latest() {
+	# 逐个探测候选版本；stdout: 可用的最大版本号（一个都没有时为空）。
+	# 设置：
+	#   OC_PROBED_LIST  探测到 200 的版本（空格分隔，升序）
+	#   OC_PROBE_OK     探测到 200 的个数
+	# 单个候选失败（超时 / 404 / 网络错误）只跳过它，不影响其它候选。
+	local cand v code latest=""
+
+	OC_PROBED_LIST=""
+	OC_PROBE_OK=0
+	cand="$(cloud_candidate_versions)"
+	for v in $cand; do
+		code="$(cloud_probe_status "$(cloud_installer_url "$v")")"
+		[ "$code" = "200" ] || continue
+		OC_PROBED_LIST="$OC_PROBED_LIST $v"
+		OC_PROBE_OK=$((OC_PROBE_OK + 1))
+		if [ -z "$latest" ] || ver_gt "$v" "$latest"; then
+			latest="$v"
+		fi
+	done
+	OC_PROBED_LIST="${OC_PROBED_LIST# }"
+	printf '%s' "$latest"
+}
+
+cmd_cli_check() {
+	# 检查更新：只读探测，不下载、不安装。
+	local latest current update=false probed="" v
+
+	if [ "$(cloud_arch)" = "unsupported" ]; then
+		cloud_fail "不支持的架构：$(uname -m 2>/dev/null)"
+	fi
+
+	latest="$(cloud_probe_latest)"
+	if [ "${OC_PROBE_OK:-0}" -le 0 ]; then
+		# 全部候选都探测失败只能是网络问题：绝不谎报「已是最新」。
+		cloud_fail "无法连接官方下载源，请检查网络"
+	fi
+
+	current="$(cloud_current_version)"
+	if [ -z "$current" ]; then
+		# 未安装 / 无法确认当前版本：视为需要更新
+		update=true
+	elif ver_lt "$current" "$latest"; then
+		update=true
+	fi
+
+	for v in $OC_PROBED_LIST; do
+		if [ -z "$probed" ]; then
+			probed="\"$v\""
+		else
+			probed="$probed,\"$v\""
+		fi
+	done
+
+	printf '{"ok":true,"current":"%s","latest":"%s","update":%s,"probed":[%s],"checked_at":"%s"}\n' \
+		"$(jstr "$current")" "$(jstr "$latest")" "$update" "$probed" \
+		"$(date '+%Y-%m-%d %H:%M:%S')"
+}
+
+cmd_cli_update() {
+	# 更新组件：版本来源 = 参数 > cli-check 探测到的 latest。
+	# 只写 $OC_CLOUD_DIR；$OC_CLOUD_HOME 与 $OC_CLOUD_PASS 全程只 stat，不写不删。
+	local want="${1:-}" latest current from to bak oldbin restored err warn=""
+	local had_cfg=false now_cfg=false
+
+	if [ -n "$want" ]; then
+		cloud_version_valid "$want" || \
+			cloud_fail "版本号不合法（只允许字母、数字与 . _ -，长度 1-32）"
+	fi
+
+	if [ -z "$want" ]; then
+		latest="$(cloud_probe_latest)"
+		if [ "${OC_PROBE_OK:-0}" -le 0 ] || [ -z "$latest" ]; then
+			cloud_fail "无法连接官方下载源，请检查网络"
+		fi
+		want="$latest"
+	fi
+
+	current="$(cloud_current_version)"
+	from="$current"
+	if [ -n "$current" ] && ver_eq "$current" "$want"; then
+		printf '{"ok":true,"updated":false,"current":"%s","message":"已是最新"}\n' \
+			"$(jstr "$current")"
+		return 0
+	fi
+
+	# 更新前记录登录态是否存在；更新后只读复查，绝不写入 / 删除。
+	if [ -f "$OC_CLOUD_HOME/.config/bdpan/config.json" ]; then
+		had_cfg=true
+	fi
+
+	# 旧二进制备份到 rundir（安装目录之外，安装器碰不到）。
+	bak=""
+	oldbin="$(cloud_bin_ready)" || oldbin=""
+	if [ -n "$oldbin" ]; then
+		bak="$OC_RUNDIR/bdpan-old.$$"
+		rm -f "$bak" 2>/dev/null
+		if cp -f "$oldbin" "$bak" 2>/dev/null; then
+			chmod 700 "$bak" 2>/dev/null
+		else
+			bak=""
+		fi
+	fi
+
+	if ! cloud_install_version "$want"; then
+		err="$OC_INSTALL_ERR"
+		[ -n "$err" ] || err="更新失败"
+		restored=false
+		# 安装器可能删掉了旧文件、或留下不可执行的文件：能用备份就恢复。
+		if [ -n "$bak" ] && [ -f "$bak" ]; then
+			if [ ! -f "$OC_CLOUD_DIR/bdpan" ] || [ ! -x "$OC_CLOUD_DIR/bdpan" ]; then
+				if cp -f "$bak" "$OC_CLOUD_DIR/bdpan" 2>/dev/null; then
+					chmod +x "$OC_CLOUD_DIR/bdpan" 2>/dev/null
+					restored=true
+				fi
+			fi
+		fi
+		rm -f "$bak" 2>/dev/null
+		if [ "$restored" = "true" ]; then
+			cloud_fail "$err（已恢复旧版本 ${from:-未知}）"
+		fi
+		if [ ! -f "$OC_CLOUD_DIR/bdpan" ] || [ ! -x "$OC_CLOUD_DIR/bdpan" ]; then
+			cloud_fail "$err；旧版本文件已不存在，请重新安装组件"
+		fi
+		cloud_fail "$err"
+	fi
+	rm -f "$bak" 2>/dev/null
+
+	# 登录态复查：只判断文件是否存在，不读内容（config.json 含 access_token）。
+	if [ -f "$OC_CLOUD_HOME/.config/bdpan/config.json" ]; then
+		now_cfg=true
+	fi
+	if [ "$had_cfg" = "true" ] && [ "$now_cfg" != "true" ]; then
+		warn="组件已更新，但登录信息丢失，请重新登录"
+	fi
+
+	to="$(cloud_current_version)"
+	[ -n "$to" ] || to="$want"
+
+	if [ -n "$warn" ]; then
+		printf '{"ok":true,"updated":true,"from":"%s","to":"%s","warn":"%s"}\n' \
+			"$(jstr "$from")" "$(jstr "$to")" "$(jstr "$warn")"
+	else
+		printf '{"ok":true,"updated":true,"from":"%s","to":"%s"}\n' \
+			"$(jstr "$from")" "$(jstr "$to")"
+	fi
 }
 
 # ---------------------------------------------------------------- login
@@ -2501,6 +2900,8 @@ cmd_backup_run() {
 case "${1:-}" in
 	status)      cmd_status ;;
 	install-cli) cmd_install_cli ;;
+	cli-check)   cmd_cli_check ;;
+	cli-update)  shift; cmd_cli_update "$@" ;;
 	login-url)   cmd_login_url ;;
 	login-code)  shift; cmd_login_code "$@" ;;
 	logout)      cmd_logout ;;
@@ -2522,7 +2923,7 @@ case "${1:-}" in
 	*)
 		printf '{"ok":false,"error":"%s"}\n' "$(jstr "未知动作：${1:-}")"
 		cat >&2 <<EOF
-Usage: cloud.sh {status|install-cli|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|download-dec <name> <local>|rm <name>|pass-status|set-pass|clear-pass|encrypt-status|set-encrypt|schedule-status|schedule-apply|schedule-set|schedule-clear|backup-run}
+Usage: cloud.sh {status|install-cli|cli-check|cli-update [version]|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|download-dec <name> <local>|rm <name>|pass-status|set-pass|clear-pass|encrypt-status|set-encrypt|schedule-status|schedule-apply|schedule-set|schedule-clear|backup-run}
 EOF
 		exit 2 ;;
 esac
