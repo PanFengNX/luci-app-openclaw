@@ -95,15 +95,11 @@ oc_state_dir() {
 	printf '%s' "$d"
 }
 
-_state_dir_safe() {
-	# _state_dir_safe <dir> -> 0 safe / 1 unsafe
+_state_dir_shape_ok() {
+	# _state_dir_shape_ok <dir> -> 0 ok / 1 reject
 	#
-	# main.state_dir 是用户可配置路径，下面会对它做 `chown -R` / `chmod -R`。
-	# 落到系统目录上是灾难，所以动手前必须校验。
-	#
-	# ⚠️ 前缀黑名单必须与 lib.sh 的 oc_validate_base_dir_shape() 保持一致
-	#    （本文件不 source lib.sh，只能各留一份，同 oc_state_dir() 的做法）。
-	#    这里在其基础上补了 /lib64 与 /boot；/run 也在 lib.sh 的列表里。
+	# 纯字符串过滤，不碰文件系统。_state_dir_safe() 会对「原路径」和
+	# 「readlink -f 之后的物理路径」各调用一次，所以逻辑只留这一份。
 	#
 	# 只接受：绝对路径、不是 "/"、无 "."/".." 段、不在系统前缀下、至少两级
 	# （/mnt/data 可以，/mnt 太顶层 —— 递归操作容易误伤整块盘）。
@@ -132,6 +128,47 @@ _state_dir_safe() {
 		*/*) ;;
 		*) return 1 ;;
 	esac
+	return 0
+}
+
+_state_dir_safe() {
+	# _state_dir_safe <dir> -> 0 safe / 1 unsafe
+	#
+	# main.state_dir 是用户可配置路径，下面会对它做 `chown -R` / `chmod -R`。
+	# 落到系统目录上是灾难，所以动手前必须校验。
+	#
+	# 与 lib.sh 的 oc_validate_base_dir 三层校验口径一致：
+	#   1. 形态过滤（_state_dir_shape_ok）—— 绝对路径、不是 "/"、无 "."/".." 段、
+	#      不在系统前缀下、至少两级
+	#   2. 物理解析 —— `/mnt/data/OpenClaw -> /etc` 能骗过纯字符串过滤，但随后
+	#      的 `chown -R` / `chmod -R` 会跟随链接，所以存在时必须 readlink -f
+	#      取物理路径，并对物理路径再做一遍同样的过滤
+	#   3. 末段本身不能是符号链接 —— `chown -R link` 会解引用它的参数，
+	#      直接打到链接目标那棵树上
+	#
+	# ⚠️ 前缀黑名单必须与 lib.sh 的 oc_validate_base_dir_shape() 保持一致
+	#    （本文件不 source lib.sh，只能各留一份，同 oc_state_dir() 的做法）。
+	#    这里在其基础上补了 /lib64 与 /boot；/run 也在 lib.sh 的列表里。
+	local d="$1" phys
+	_state_dir_shape_ok "$d" || return 1
+
+	# 第 3 层：路径本身就是符号链接，拒绝
+	if [ -L "$d" ]; then
+		return 1
+	fi
+
+	# 第 2 层：路径存在时才谈得上解析。新建目录（不存在）只过字符串过滤。
+	if [ -e "$d" ]; then
+		phys="$(readlink -f "$d" 2>/dev/null)" || phys=""
+		# 存在却解析不出来：宁可拒绝，也不要放行一个看不清的路径
+		[ -n "$phys" ] || return 1
+		# 物理路径可能落到 /etc、/var 之类，必须再过一遍形态过滤
+		_state_dir_shape_ok "$phys" || return 1
+		# 物理路径与原路径不同 => 中间某一段是链接。随后会对该路径递归
+		# chown/chmod，链接目标可能不在我们预期的挂载点上，一律拒绝。
+		[ "$phys" = "$d" ] || return 1
+	fi
+
 	return 0
 }
 
