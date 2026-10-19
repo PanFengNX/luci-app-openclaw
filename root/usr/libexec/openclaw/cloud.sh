@@ -20,6 +20,7 @@
 #   cloud.sh clear-pass
 #   cloud.sh schedule-status   当前定时备份设置 + crontab 里的那一行
 #   cloud.sh schedule-apply    按 UCI 写入/更新 crontab（幂等）
+#   cloud.sh schedule-set      stdin 读 key=value，校验后写 UCI 并同步 crontab
 #   cloud.sh schedule-clear    从 crontab 删除本脚本的行
 #   cloud.sh backup-run        定时任务入口：create -> upload -> prune
 #
@@ -2055,6 +2056,145 @@ cmd_schedule_clear() {
 	printf '{"ok":true,"cleared":true}\n'
 }
 
+# ---- schedule-set ---------------------------------------------------------
+# stdin 每行一个 key=value（空行 / 未知 key 忽略，缺省的 key 保持 UCI 原值）。
+#
+# key 与 UCI 选项名的映射必须显式写出来：界面上的 `enabled` 指的是「定时备份
+# 开关」，配置里叫 `cloud_enabled`；直接写 main.enabled 会覆盖「服务开机自启」
+# 那个同名但完全无关的选项，而且 schedule-apply 读不到新值。
+cloud_sched_opt() {
+	case "$1" in
+		enabled) printf 'cloud_enabled' ;;
+		period)  printf 'cloud_period' ;;
+		weekday) printf 'cloud_weekday' ;;
+		hour)    printf 'cloud_hour' ;;
+		minute)  printf 'cloud_minute' ;;
+		keep)    printf 'cloud_keep' ;;
+		*)       return 1 ;;
+	esac
+}
+
+cloud_sched_check() {
+	# cloud_sched_check <key> <value> -> 0 合法（结果放 OC_SCH_OUT）/ 1 非法
+	#
+	# 与读路径的 cloud_sched_int() 不同：这里**绝不回落到默认值**。这些值是
+	# 用户在界面上的显式输入，静默改掉只会让人以为保存成功。
+	local key="$1" v="$2" lo hi
+
+	case "$key" in
+		enabled)
+			case "$v" in 0|1) OC_SCH_OUT="$v"; return 0 ;; esac
+			return 1 ;;
+		period)
+			case "$v" in daily|weekly) OC_SCH_OUT="$v"; return 0 ;; esac
+			return 1 ;;
+		weekday) lo=0; hi=6 ;;
+		hour)    lo=0; hi=23 ;;
+		minute)  lo=0; hi=59 ;;
+		keep)    lo=1; hi=30 ;;
+		*)       return 1 ;;
+	esac
+
+	# 只认十进制数字：挡掉空值、正负号、空格、十六进制与超长串
+	case "$v" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ ${#v} -le 3 ] || return 1
+	# 去掉前导 0：避免 busybox test 把 "08" 当八进制
+	v="$(printf '%s' "$v" | sed 's/^0*//')"
+	[ -n "$v" ] || v=0
+	[ "$v" -ge "$lo" ] 2>/dev/null || return 1
+	[ "$v" -le "$hi" ] 2>/dev/null || return 1
+	OC_SCH_OUT="$v"
+	return 0
+}
+
+cloud_sched_rollback() {
+	# cloud_sched_rollback <"opt=旧值" 换行分隔> -> 0 全部写回 / 1 有失败
+	# 尽力而为：每个旧值都试一遍，不因一条失败就放弃后面的。
+	local rec opt val rc=0
+
+	while IFS= read -r rec; do
+		[ -n "$rec" ] || continue
+		opt="${rec%%=*}"
+		val="${rec#*=}"
+		# 旧值为空时 `uci set k=` 等价于删除该选项，正是我们要的还原语义。
+		uci -q set "${OC_UCI}.main.${opt}=${val}" 2>/dev/null || rc=1
+	done <<EOF
+$1
+EOF
+	uci -q commit "$OC_UCI" 2>/dev/null || rc=1
+	return "$rc"
+}
+
+cmd_schedule_set() {
+	# line 同时用于「读 stdin → 构建待写清单」与「遍历待写清单」；必须声明为
+	# local，否则第二个循环退出后会把 main 里的循环变量改掉。
+	local line key val opt apply_out enabled
+	local seen="" oldvals="" pending=""
+
+	# 1) 先全部解析 + 校验，一个字节都不写：非法输入不能留下半套配置。
+	while IFS= read -r line || [ -n "$line" ]; do
+		# 去 CRLF 与首尾空白；空行直接跳过
+		line="$(printf '%s\n' "$line" | sed 's/\r$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+		[ -n "$line" ] || continue
+		key="${line%%=*}"
+		# 没有 '=' 的行按「未知格式」忽略，与未知 key 同等对待
+		[ "$key" != "$line" ] || continue
+		val="${line#*=}"
+		opt="$(cloud_sched_opt "$key")" || continue
+
+		cloud_sched_check "$key" "$val" || cloud_fail "参数不合法：$key=$val"
+		# 同一个 key 出现多次时后者生效；回滚记录只保留最早一次的原值。
+		case " $seen " in
+			*" $opt "*) ;;
+			*) seen="$seen $opt"
+			   oldvals="${oldvals}${opt}=$(uci_get "main.${opt}" '')
+" ;;
+		esac
+		pending="${pending}${opt}=${OC_SCH_OUT}
+"
+	done
+
+	# 2) 逐个写；任何一步失败都回滚已写入的部分。
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		opt="${line%%=*}"
+		val="${line#*=}"
+		if ! uci -q set "${OC_UCI}.main.${opt}=${val}" 2>/dev/null; then
+			cloud_sched_rollback "$oldvals" >/dev/null 2>&1
+			cloud_fail "写入配置失败：${opt}=${val}"
+		fi
+	done <<EOF
+$pending
+EOF
+
+	# 3) commit；失败时把旧值写回并再次 commit。
+	if ! uci -q commit "$OC_UCI" 2>/dev/null; then
+		if cloud_sched_rollback "$oldvals" >/dev/null 2>&1; then
+			cloud_fail "写入配置失败：uci commit 失败（已回滚）"
+		fi
+		cloud_fail "写入配置失败：uci commit 失败，且回滚未完全成功，请检查 /etc/config/openclaw"
+	fi
+
+	# 4) 复用已有的 apply 逻辑（直接调函数，不 exec 自己）把 crontab 同步过去。
+	#    apply 失败时它自己会 cloud_fail 并以 JSON 报错；这里把它的输出原样透传，
+	#    否则重定向到 /dev/null 会让前端只看到空响应。
+	if ! apply_out="$(cmd_schedule_apply)"; then
+		printf '%s\n' "$apply_out"
+		exit 1
+	fi
+
+	# 5) 回读 UCI + crontab，确保输出反映的是落盘后的真实状态。
+	cloud_sched_vals
+	line="$(cloud_cron_line)"
+	if [ "$OC_SCH_ENABLED" = "1" ]; then enabled=true; else enabled=false; fi
+
+	printf '{"ok":true,"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"line":"%s"}\n' \
+		"$enabled" "$OC_SCH_PERIOD" "$OC_SCH_WEEKDAY" "$OC_SCH_HOUR" \
+		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$(jstr "$line")"
+}
+
 # ---------------------------------------------------------------- backup-run
 # cron 调用的入口。约束：
 #   * 任何失败都只输出一行 JSON 并 exit 0 —— cron 会把非 0 退出码当任务失败。
@@ -2310,12 +2450,13 @@ case "${1:-}" in
 	clear-pass)  cmd_clear_pass ;;
 	schedule-status) cmd_schedule_status ;;
 	schedule-apply)  cmd_schedule_apply ;;
+	schedule-set)    cmd_schedule_set ;;
 	schedule-clear)  cmd_schedule_clear ;;
 	backup-run)      cmd_backup_run ;;
 	*)
 		printf '{"ok":false,"error":"%s"}\n' "$(jstr "未知动作：${1:-}")"
 		cat >&2 <<EOF
-Usage: cloud.sh {status|install-cli|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|download-dec <name> <local>|rm <name>|pass-status|set-pass|clear-pass|schedule-status|schedule-apply|schedule-clear|backup-run}
+Usage: cloud.sh {status|install-cli|login-url|login-code <code>|logout|upload <local> <name>|ls|download <name> <local>|download-dec <name> <local>|rm <name>|pass-status|set-pass|clear-pass|schedule-status|schedule-apply|schedule-set|schedule-clear|backup-run}
 EOF
 		exit 2 ;;
 esac
