@@ -839,124 +839,10 @@ cmd_devices_approve() {
 	return 1
 }
 
-cmd_link() {
-	# link <dir> : 把本机已有的 OpenClaw 安装「关联」到本插件。
-	#
-	# 只改 UCI（main.base_dir / main.state_dir 指向它，并清掉指向旧 base_dir 的
-	# 残留 main.state_dir / main.openclaw_dir）—— 不复制文件、不建目录、不 chown、
-	# 不取锁，所以这里不调 require_safe：它校验的是「当前」的 base_dir 与端口，
-	# 而 link 的目的恰恰是把它们指到别处。
-	#
-	# stdout 只允许出现 JSON（前端直接 JSON.parse）：日志一律走 oc_err（stderr），
-	# 与 cmd_discover 同一条约定 —— 谁在这里加一行 oc_info，谁的 JSON 就坏掉。
-	#
-	# 已知缺口（已修复）：kind=ours 时 base_dir 会被指到 <dir>，但 UCI 里若残留
-	# main.state_dir / main.openclaw_dir，它们优先于 base_dir 推导出的默认值，
-	# 关联可能「报成功但不生效」（数据其实还在旧目录）。这里只清「残留」，不清
-	# 「用户显式设置」——判定见下方：非空且位于旧 base_dir 之下 ⇒ 残留（是从旧
-	# base_dir 推导出来的）；非空但不在旧 base_dir 之下 ⇒ 用户显式指到别处，保留。
-	local dir="${2:-}" kind target="" base_dir="" state_dir=""
-	local old_base="" cur="" cleared="" state_cleared=0 f
-
-	[ -n "$dir" ] || {
-		oc_err "link: 缺少目录参数"
-		printf '{"ok":false,"error":"缺少目录参数"}\n'
-		return 2
-	}
-	# 归一化：去掉尾随斜杠（"/" 单独保留，交给下面的探测/校验去拒绝）
-	dir="${dir%/}"
-	[ -n "$dir" ] || dir="/"
-
-	if [ ! -d "$dir" ]; then
-		oc_err "link: 目录不存在：$dir"
-		printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "目录不存在：$dir")"
-		return 2
-	fi
-
-	kind="$(oc_probe_openclaw_dir "$dir")"
-	# 旧 base_dir 必须在下面写 main.base_dir 之前取到：残留判定要拿它做基准，
-	# 否则会把「新」base_dir 当成旧值，残留项就判不出来了。
-	old_base="$(oc_base_dir)"
-	case "$kind" in
-		ours)
-			# 本插件布局：base_dir 会被 oc_fix_perms 递归 chown/chmod，
-			# 数据默认在 <dir>/home/.openclaw
-			target="$dir"
-			base_dir="$dir"
-			;;
-		istore)
-			# iStoreOS luci-app-openclawmgr 布局：数据在 <dir>/data/.openclaw
-			target="$dir/data/.openclaw"
-			state_dir="$target"
-			;;
-		data)
-			# 只有数据：<dir>/.openclaw
-			target="$dir/.openclaw"
-			state_dir="$target"
-			;;
-		*)
-			oc_err "link: 不是有效的 OpenClaw 安装：$dir"
-			printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "不是有效的 OpenClaw 安装：$dir")"
-			return 2
-			;;
-	esac
-
-	# 要写入的路径都要过同一套校验：base_dir 会被递归 chown/chmod，
-	# state_dir 会被备份/还原整体移动或删除 —— 系统路径一律拒绝，且不写入。
-	if ! oc_validate_base_dir "$target"; then
-		oc_err "link: 拒绝关联不安全的路径：$target（需为绝对路径，且不能是 / /etc /tmp /var 等系统路径）"
-		printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "拒绝关联不安全的路径：$target")"
-		return 2
-	fi
-
-	# 只清「残留」：kind=ours 会把 base_dir 指到别处，旧 base_dir 派生出的
-	# main.state_dir / main.openclaw_dir 随之失效并覆盖新默认值，必须清掉，
-	# 否则 link 报成功但数据仍在旧目录。用户显式指到别处（不在旧 base_dir
-	# 之下，例如大容量盘）的值保留不动 —— 清掉它会把数据改回一份旧副本。
-	if [ "$kind" = "ours" ] && [ -n "$old_base" ] && [ "$old_base" != "/" ]; then
-		for f in main.state_dir main.openclaw_dir; do
-			cur="$(uci_get "$f" '')"
-			[ -n "$cur" ] || continue
-			cur="${cur%/}"
-			[ -n "$cur" ] || continue
-			case "$cur" in
-				"$old_base"/*)
-					uci -q delete "${OC_UCI}.${f}" 2>/dev/null
-					oc_warn "link: 清除残留的 $f=$cur（位于旧安装目录 $old_base 之下）"
-					[ "$f" = "main.state_dir" ] && state_cleared=1
-					:
-					if [ -z "$cleared" ]; then
-						cleared="\"$f\""
-					else
-						cleared="$cleared,\"$f\""
-					fi
-					;;
-			esac
-		done
-	fi
-
-	case "$kind" in
-		ours) uci_set main.base_dir "$dir" ;;
-		*)    uci_set main.state_dir "$state_dir" ;;
-	esac
-	uci_commit
-
-	# state_dir 被清空后不再由 UCI 指定，实际生效值就是 base_dir 派生出的默认
-	# 数据目录；把它如实报给前端（不清空时 ours 仍报空串，保持原有语义）。
-	if [ "$state_cleared" = "1" ]; then
-		state_dir="$(oc_probe_data_dir "$base_dir" ours)"
-	fi
-
-	# 未设置的字段给空字符串，保持结构稳定；cleared 是被清空的 UCI 项（无则 []）
-	printf '{"ok":true,"kind":"%s","base_dir":"%s","state_dir":"%s","cleared":[%s]}\n' \
-		"$kind" "$(oc_json_str "$base_dir")" "$(oc_json_str "$state_dir")" "$cleared"
-}
-
 # ---------------------------------------------------------------- migrate
 # migrate <dir> : 把本机已有的 OpenClaw 安装「迁移」到本插件的默认目录。
 #
-# 与 link 的区别：link 只改 UCI 指过去（零拷贝，两边共享同一份文件）；
-# migrate 是真的把文件复制过来 —— 之后两边完全独立，源目录保持原样，
+# 迁移会把文件真正复制过来 —— 之后本插件只使用自己的目录，源目录保持原样，
 # 用户确认无误后可以自行删除。
 #
 # 原子性：先把内容 cp -a 到「与目标同一分区」的暂存目录，校验关键文件通过后
@@ -975,11 +861,11 @@ cmd_link() {
 # 数据/程序目录有两种来源：
 #   A) main.state_dir / main.openclaw_dir 指向 <安装目录> 之内（含未设置时的
 #      默认值）：按相对路径搬到新目录的对应位置，UCI 保持不变。
-#   B) 指向 <安装目录> 之外（典型场景：先 link 到已有的 iStoreOS 安装）：
+#   B) 指向 <安装目录> 之外（典型场景：数据 / 程序目录被指到已有的 iStoreOS 安装）：
 #      重定位到上述默认位置 —— state_dir → <base>/home/.openclaw，
 #      openclaw_dir → <base>/openclaw；原子换入成功后删除对应 UCI 项并
-#      commit，让配置回到「由 base_dir 推导」的状态。这样 link 之后直接
-#      migrate 就能把外部安装搬进来，不需要用户先手工清空 UCI。
+#      commit，让配置回到「由 base_dir 推导」的状态。这样外部安装可以直接
+#      migrate 进来，不需要用户先手工清空 UCI。
 #
 # stdout 只允许 JSON（前端直接 JSON.parse）：日志一律走 stderr，不用 oc_info。
 
@@ -1138,7 +1024,7 @@ cmd_migrate() {
 	# 数据/程序目录的来源分两种：
 	#   A) 在 base_dir 之内（含未设置时的默认值）：沿用相对路径，搬到新目录
 	#      的对应位置，UCI 保持不变；
-	#   B) 在 base_dir 之外（典型：link 之后 state_dir 指向已有安装）：重定位
+	#   B) 在 base_dir 之外（典型：state_dir 被指到已有安装）：重定位
 	#      到默认位置，原子换入成功后再清掉对应 UCI 项（见第 9b 步）。
 	# 目标位置仍然必须落在 base_dir 之下：暂存目录建在 base 的同级，只有这样
 	# 才能用一次 mv 原子换入 —— 这一点不因来源在外部而改变。
@@ -2132,7 +2018,6 @@ case "${1:-}" in
 	node-existing) cmd_node_existing ;;
 	devices-pending) cmd_devices_pending ;;
 	devices-approve) cmd_devices_approve "$@" ;;
-	link)          cmd_link "$@" ;;
 	migrate)       cmd_migrate "$@" ;;
 	save)          cmd_save "$@" ;;
 	port)          get_port; printf '\n' ;;
@@ -2192,8 +2077,6 @@ Usage: openclaw.sh <command> [options]
                             pending Control UI pairing requests (raw fallback when
                             the CLI output format is not recognised)
   devices-approve <id>      approve ONE pending device (no approve-all by design)
-  link <dir>                point the config at an existing install (UCI only,
-                            nothing is copied: base_dir / state_dir per layout)
   migrate <dir>             copy an existing install into this plugin's default
                             dirs (cp -a + atomic mv; the source is left as-is).
                             If main.state_dir / main.openclaw_dir point outside

@@ -235,7 +235,7 @@ start_service() {
 		user_opt="$OC_USER"
 		chown -R "$OC_USER:$OC_USER" "$home" 2>/dev/null || true
 		chmod -R u+rwX "$home" 2>/dev/null || true
-		# state_dir 在 $home 之外时（关联/迁移已有安装），上面的 chown 覆盖不到它，
+		# state_dir 在 $home 之外时（迁移已有安装），上面的 chown 覆盖不到它，
 		# 服务用户对网关要写的 openclaw.json / 会话 / 工作区没有权限。
 		# 但这是用户可配置路径：先校验再递归操作，不安全的只告警、继续启动。
 		if [ "$state_dir" != "$home/.openclaw" ]; then
@@ -260,7 +260,7 @@ start_service() {
 		--allow-unconfigured $force_opt
 	# HOME / OPENCLAW_HOME 表示进程 HOME，与 state 目录是两个概念，保持不变。
 	# 但 STATE_DIR / CONFIG_PATH 不能写死 "$home/.openclaw"：main.state_dir 可
-	# 覆盖 state_dir（关联/迁移已有安装到大容量盘），写死会让网关与 UI 操作
+	# 覆盖 state_dir（迁移已有安装到大容量盘），写死会让网关与 UI 操作
 	# 不同的目录 —— 网关按这里读 token、UI 按 state_dir 写配置，表现为
 	# 「改了模型/端口不生效」「API Key 写了仍报未配置」。
 	# shellcheck disable=SC2086

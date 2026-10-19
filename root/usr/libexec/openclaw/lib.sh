@@ -186,7 +186,7 @@ oc_state_dir() {
 	# OpenClaw 数据根目录：openclaw.json / .env / 会话 / 工作区都在它下面。
 	# 默认 <安装目录>/home/.openclaw（历史行为）；可用 main.state_dir 覆盖 ——
 	# 例如把数据放到大容量磁盘，或者指向本机已有的 OpenClaw 数据目录
-	# （「关联 / 迁移已有 OpenClaw」功能就是从这里接进去的）。
+	# （「迁移已有 OpenClaw」功能就是从这里接进去的）。
 	#
 	# ⚠️ 与 oc_oc_dir() 同理，这是用户可配置路径：任何会 chown / chmod / 删除它
 	# 的地方都必须先过安全校验，不能拿 UCI 值直接递归操作。
@@ -207,7 +207,7 @@ oc_conf()      { printf '%s/openclaw.json' "$(oc_state_dir)"; }
 # 所以在这里统一导出，所有 source lib.sh 的脚本（以及 /usr/bin/openclaw 包装器）
 # 调用 CLI 时都会自动带上，不用每个调用点各写一遍。
 #
-# 若 state_dir 被覆盖（关联/迁移已有安装、数据放大容量盘）而这里不导出，CLI 会
+# 若 state_dir 被覆盖（迁移已有安装、数据放大容量盘）而这里不导出，CLI 会
 # 继续读写 <安装目录>/home/.openclaw，与网关和 oc_conf() 用的 state_dir 分家：
 # 表现为模型页保存成功但网关不生效、改端口重启没变、API Key 写了仍报未配置。
 #
@@ -810,8 +810,8 @@ oc_mounts() {
 }
 
 # ---------------------------------------------------------------- discovery
-# 「关联 / 迁移本机已有 OpenClaw」的只读探测层。
-# 这里只判断"某个目录像不像 OpenClaw 安装"，不做任何 link / migrate 动作。
+# 「迁移本机已有 OpenClaw」的只读探测层。
+# 这里只判断"某个目录像不像 OpenClaw 安装"，不做任何 migrate 动作。
 #
 # 约定：oc_discover_existing() 的输出会被直接当成 JSON 响应体，所以这一节里的
 # 函数**只能往 stdout 写结果**，日志一律走 oc_warn / oc_err（stderr）。
@@ -989,7 +989,7 @@ oc_node_rt_candidates() {
 	if [ -n "$bd" ]; then
 		printf 'plugin-private\t%s/node/bin/node\n' "$bd"
 	fi
-	# 挂载点范围复用 oc_mounts()（与「关联本机已有安装」同一份口径），
+	# 挂载点范围复用 oc_mounts()（与「迁移本机已有安装」同一份口径），
 	# 每个挂载点只试下面几个固定名字。
 	while IFS="$(printf '\t')" read -r m free fst; do
 		[ -n "$m" ] || continue

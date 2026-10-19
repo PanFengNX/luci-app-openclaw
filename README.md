@@ -332,7 +332,7 @@ python3 scripts/build_apk.py
 
 ### 10. 菜单结构与多渠道支持
 
-- **父菜单**：状态 / 设置（基础、关联迁移、模型、渠道、备份）/ 命令行 / 日志；「检测到已有 OpenClaw 安装」独立为「关联迁移」页。
+- **父菜单**：状态 / 设置（基础、迁移、模型、渠道、备份）/ 命令行 / 日志；「检测到已有 OpenClaw 安装」独立为「迁移」页（只提供迁移，统一在本插件自己的目录下运行）。
 - **状态页**：概览条 + 设备配对一键批准；修复按钮收敛为「体检」与「一键修复」（含 `doctor --fix`）；**设置页**拆成多张卡片，模型页按 Base URL 实时拉取上游模型列表（仅自定义 provider 可见）。
 - **多渠道支持**：渠道页统一管理 **Telegram、飞书、Discord、Slack、微信、钉钉、QQ**
   共 7 个平台，可启用渠道、登录并填写凭据；凭据经 0600 临时文件传递，页面不回填明文。
@@ -450,7 +450,7 @@ openclaw.sh unlock                            # 清理陈旧操作锁
 ```
 Makefile                                  OpenWrt 包定义（feeds / SDK）
 luasrc/controller/openclaw.lua            LuCI 路由 + JSON API
-luasrc/view/openclaw/*.htm                状态、设置（基础/关联迁移/模型/渠道/备份）、命令行、日志
+luasrc/view/openclaw/*.htm                状态、设置（基础/迁移/模型/渠道/备份）、命令行、日志
 root/usr/bin/openclaw                    系统命令行入口（透传 CLI，root 自动降权）
 root/etc/config/openclaw                 UCI 默认配置（独立）
 root/etc/init.d/openclaw                 procd 服务

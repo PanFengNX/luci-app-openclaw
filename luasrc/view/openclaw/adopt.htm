@@ -125,13 +125,12 @@ select,input[type=text],input[type=password]{min-height:30px}
   .oc-kv{flex-wrap:wrap}.oc-kv>span{text-align:left}}
 </style>
 
-<h2><a id="content" name="content">OpenClaw 助手 · 关联与迁移</a></h2>
+<h2><a id="content" name="content">OpenClaw 助手 · 迁移已有安装</a></h2>
 
 <div class="oc-hint" style="margin-bottom:12px">
-  本页用于接管本机其它位置已有的 OpenClaw 安装。两种方式只需选一种：<br>
-  <b>关联</b>：只把本插件的配置指向该目录，<b>不复制任何文件</b>；两边共用同一份数据，源目录及其中的文件都不动。<br>
-  <b>迁移</b>：把内容<b>复制</b>到本插件目录，之后两边各自独立；源目录保持不动，确认无误后可自行删除。<br>
-  拿不准时：想继续使用原目录里的会话与凭据、也不想多占空间，选关联；想让本插件完全接管、之后不再依赖原目录，选迁移。
+  本页用于把本机其它位置已有的 OpenClaw 安装迁移到本插件自己的目录。<br>
+  迁移会把候选目录里的程序与数据<b>复制</b>到本插件的安装目录；<b>源目录保持原样</b>，确认无误后可自行删除。<br>
+  复制前若目标已有数据，会自动做一次安全快照。迁移完成后本插件只使用自己的目录，不再依赖源目录。
 </div>
 
 <div class="oc-card" id="oc-disc-card" style="display:none">
@@ -139,9 +138,7 @@ select,input[type=text],input[type=password]{min-height:30px}
     <h3>检测到已有 OpenClaw 安装</h3>
   </div>
   <div class="oc-hint">
-    在本机其它位置发现了可用的 OpenClaw 安装 / 数据目录。两种处理方式：<br>
-    <b>关联</b>：只把本插件配置指向它，<b>不复制任何文件</b>（两边共用同一份数据）。<br>
-    <b>迁移</b>：把内容复制到本插件目录，<b>源目录保持不动</b>，确认无误后可自行删除。<br>
+    在本机其它位置发现了可用的 OpenClaw 安装 / 数据目录。迁移会把其中的程序与数据<b>复制</b>到本插件目录，<b>源目录保持原样</b>，确认无误后可自行删除；复制前若目标已有数据，会自动做一次安全快照。<br>
     体积一栏是<b>数据目录</b>的大小，不含程序本体与 Node 运行时；迁移所需空间会比它更大。
   </div>
   <div id="oc-disc-list" style="margin-top:10px"></div>
@@ -165,7 +162,6 @@ var API = {
   mounts: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","mounts")%>',
   discover: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","discover")%>',
   node_existing: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","node_existing")%>',
-  link: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","link")%>',
   migrate: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate")%>',
   doctor: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>',
   repair: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","repair")%>',
@@ -227,7 +223,7 @@ function loadInfo(){
   });
 }
 
-// ------------------------------------------- 已有 OpenClaw 安装：关联 / 迁移
+// ------------------------------------------- 已有 OpenClaw 安装：迁移
 // 后端 openclaw.sh discover 输出 JSON 数组，元素形如
 //   {path,kind,has_program,has_node,has_data,size_mb}
 // kind 只有 ours / istore / data 三种取值，这里统一翻成中文说明。
@@ -252,7 +248,7 @@ function discCaps(e){
   if (e.has_node)    caps.push('含私有 Node 运行时');
   if (e.has_data)    caps.push('含数据');
   var s = caps.length ? caps.join(' / ') : '内容未知';
-  if (!e.has_program) s += '（不含程序本体，关联或迁移后仍需在本插件内安装一次）';
+  if (!e.has_program) s += '（不含程序本体，迁移后仍需在本插件内安装一次）';
   return s;
 }
 
@@ -273,13 +269,6 @@ function discRow(e){
 
   var acts = document.createElement('div');
   acts.style.marginTop = '8px';
-
-  var bLink = document.createElement('button');
-  bLink.textContent = '关联';
-  bLink.className = 'oc-btn ghost';
-  bLink.onclick = function(){ doLink(e, bLink); };
-  acts.appendChild(bLink);
-  acts.appendChild(document.createTextNode(' '));
 
   var bMig = document.createElement('button');
   bMig.textContent = '迁移';
@@ -315,29 +304,10 @@ function loadDiscover(){
   });
 }
 
-function doLink(e, btn){
-  if (btn) btn.disabled = true;
-  discSay('正在关联 ' + e.path + ' …（只改配置，不复制文件）');
-  post(API.link, { dir: e.path }, function(r){
-    if (btn) btn.disabled = false;
-    var d = jp((r && r.data) || '{}', {});
-    if (!r || r.ok === false || !d.ok){
-      discSay('关联失败：' + (d.error || (r && r.error) || '服务无响应，请重试'), true);
-      return;
-    }
-    discSay('已关联 ' + e.path
-      + (d.base_dir ? '\n安装目录 → ' + d.base_dir : '')
-      + (d.state_dir ? '\n数据目录 → ' + d.state_dir : '')
-      + '\n若状态页显示的目录没有变化，请到「基本设置」检查安装目录 / 程序目录是否残留了旧值。');
-    // 关联只改 UCI：刷新安装目录信息，稍后再重新探测一次
-    loadInfo();
-    setTimeout(loadDiscover, 800);
-  });
-}
-
 function doMigrate(e){
   if (!confirm('将把\n\n  ' + e.path + '\n\n的内容复制到本插件的安装目录。\n'
              + '· 源目录保持不动，确认无误后你可以自行删除；\n'
+             + '· 迁移完成后本插件只使用自己的目录，不再依赖源目录；\n'
              + '· 若数据目录 / 程序目录当前指向安装目录之外，会一并搬到默认位置并清除对应的 UCI 设置；\n'
              + '· 目标已有的数据会先自动做一次安全快照；\n'
              + '· 大目录可能需要数分钟，期间请勿关闭页面。\n\n继续？')) return;

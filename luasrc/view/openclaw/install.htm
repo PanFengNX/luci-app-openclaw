@@ -130,7 +130,7 @@ select,input[type=text],input[type=password]{min-height:30px}
 <div class="oc-tabs">
   <a class="oc-tab" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","general")%>">基本设置</a>
   <a class="oc-tab active" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","install")%>">安装</a>
-  <a class="oc-tab" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","adopt")%>">关联迁移</a>
+  <a class="oc-tab" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","adopt")%>">迁移</a>
   <a class="oc-tab" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","model")%>">模型</a>
   <a class="oc-tab" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","channels")%>">渠道</a>
   <a class="oc-tab" href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","changelog")%>">更新说明</a>
@@ -202,7 +202,6 @@ var API = {
   mounts: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","mounts")%>',
   discover: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","discover")%>',
   node_existing: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","node_existing")%>',
-  link: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","link")%>',
   migrate: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate")%>',
   doctor: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>',
   repair: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","repair")%>',
@@ -219,7 +218,7 @@ var API = {
 var state = { info:null, baseDir:'', ocVersion:'', nodeVersion:'', logTimer:null,
   // ocdirCustom：服务端当前保存的自定义程序目录（main.openclaw_dir），空串 = 默认
   // <安装目录>/openclaw。本页不提供编辑，但安装时必须原样回传 —— 否则会把 SSH
-  // 或关联流程设置的值冲掉。
+  // 或迁移流程设置的值冲掉。
   ocdirCustom: '',
   // nodeMirrorCustom：UCI 里保存、但不在下拉列表中的自定义 Node 源（例如 SSH
   // 手填的镜像）。下拉只能显示"自动"，保存时必须原样回传这个值。
@@ -328,7 +327,7 @@ function ocDirProblem(base, ocdir){
 function currentDirs(){
   return {
     base:  normDir(state.baseDir),
-    // 程序目录只来自服务端（SSH / 关联已有安装写入的 UCI），本页没有输入框
+    // 程序目录只来自服务端（SSH / 迁移已有安装写入的 UCI），本页没有输入框
     ocdir: normDir(state.ocdirCustom)
   };
 }

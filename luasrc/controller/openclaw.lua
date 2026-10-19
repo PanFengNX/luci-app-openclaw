@@ -19,7 +19,7 @@ function index()
 	entry({"admin", "services", "openclaw", "setup"},    firstchild(), _("设置"), 15)
 	entry({"admin", "services", "openclaw", "setup", "general"}, template("openclaw/setup"), _("基础"), 10)
 	entry({"admin", "services", "openclaw", "setup", "install"}, template("openclaw/install"), _("安装"), 15)
-	entry({"admin", "services", "openclaw", "setup", "adopt"},   template("openclaw/adopt"), _("关联迁移"), 20)
+	entry({"admin", "services", "openclaw", "setup", "adopt"},   template("openclaw/adopt"), _("迁移"), 20)
 	entry({"admin", "services", "openclaw", "setup", "model"},    template("openclaw/model"),    _("模型"), 30)
 	entry({"admin", "services", "openclaw", "setup", "channels"}, template("openclaw/channels"), _("渠道"), 40)
 	entry({"admin", "services", "openclaw", "setup", "changelog"}, template("openclaw/changelog"), _("更新说明"), 50)
@@ -50,7 +50,6 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "node_existing"}, call("api_node_existing")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "devices_pending"}, call("api_devices_pending")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "devices_approve"}, call("api_devices_approve")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "link"},      call("api_link")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "migrate"},   call("api_migrate")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "doctor"},    call("api_doctor")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "providers"}, call("api_providers")).leaf = true
@@ -605,11 +604,11 @@ function api_mounts()
 	out({ ok = true, data = r })
 end
 
--- ------------------------------------------------- 已有安装：发现 / 关联 / 迁移
--- 这三条走 openclaw.sh 自己的子命令（discover / link / migrate），不是 openclaw
+-- ------------------------------------------------- 已有安装：发现 / 迁移
+-- 这两条走 openclaw.sh 自己的子命令（discover / migrate），不是 openclaw
 -- CLI，所以 api_run 的白名单帮不上忙，必须单独开端点。
---   discover 只读；link 只改 UCI；migrate 会复制文件（重操作，前端二次确认）。
--- 三者的 stdout 都是 JSON（helper 的日志一律走 stderr），控制器原样透传给前端。
+--   discover 只读；migrate 会复制文件（重操作，前端二次确认）。
+-- 两者的 stdout 都是 JSON（helper 的日志一律走 stderr），控制器原样透传给前端。
 
 local function oc_dir_arg(s)
 	-- 目录参数形状校验。真正的安全判断在 shell 侧（oc_probe_openclaw_dir /
@@ -681,16 +680,6 @@ function api_devices_approve()
 		return
 	end
 	out({ ok = true, data = r })
-end
-
-function api_link()
-	local dir = oc_dir_arg(http.formvalue("dir"))
-	if not dir then
-		out({ ok = false, error = "目录参数无效" })
-		return
-	end
-	local r = sh(SH .. " link " .. q(dir))
-	out({ ok = r:find('"ok":true') ~= nil, data = r })
 end
 
 function api_migrate()
