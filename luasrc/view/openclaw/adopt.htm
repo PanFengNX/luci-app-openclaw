@@ -129,16 +129,25 @@ select,input[type=text],input[type=password]{min-height:30px}
 
 <div class="oc-card" id="oc-mig-card">
   <div class="oc-head">
-    <h3>手动指定目录迁移</h3>
+    <h3>迁移</h3>
   </div>
   <div class="oc-hint">
-    如果自动检测没有列出你的旧安装（目录名或层级不同），可以直接填写它的绝对路径。
+    从下拉中选择检测到的旧安装；如果列表里没有（目录名或层级不同），选「其他路径（手动输入）…」后填写绝对路径。
     迁移会把其中的程序与数据<b>复制</b>到本插件目录，<b>源目录保持原样</b>，确认无误后可自行删除；
     复制前若目标已有数据，会自动做一次安全快照。
   </div>
-  <div class="oc-rowline" style="margin-top:10px">
-    <input type="text" id="mig-dir" class="oc-addr" aria-label="要迁移的源目录" placeholder="/mnt/data/OpenClawMgr" style="flex:1;min-width:0">
-    <button id="btn-mig-manual">迁移这个目录</button>
+  <div class="oc-row" style="margin-top:10px">
+    <label for="mig-dir">源目录</label>
+    <select id="mig-dir" style="min-width:320px" disabled>
+      <option value="">正在检测…</option>
+    </select>
+  </div>
+  <div class="oc-row" id="mig-custom-row" style="display:none">
+    <label for="mig-dir-custom">自定义路径</label>
+    <input type="text" id="mig-dir-custom" class="oc-addr" placeholder="/mnt/data/OpenClawMgr">
+  </div>
+  <div class="oc-actions">
+    <button id="btn-mig-manual" disabled>迁移这个目录</button>
   </div>
   <div id="oc-mig-log" class="oc-log" style="display:none;height:auto;max-height:220px;margin-top:10px"></div>
 </div>
@@ -152,7 +161,6 @@ select,input[type=text],input[type=password]{min-height:30px}
     体积一栏是<b>数据目录</b>的大小，不含程序本体与 Node 运行时；迁移所需空间会比它更大。
   </div>
   <div id="oc-disc-list" style="margin-top:10px"></div>
-  <div id="oc-disc-log" class="oc-log" style="display:none;height:auto;max-height:180px;margin-top:10px"></div>
 </div>
 
 <div class="oc-hint" style="margin-top:4px">安装 / 修复运行环境与基本设置见
@@ -187,7 +195,7 @@ var API = {
   backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
   restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>'
 };
-var state = { info:null, disc:null };
+var state = { info:null, disc:null, discLoaded:false };
 
 function $(id){ return document.getElementById(id); }
 // 回调只允许触发一次：readyState==4 与 onerror 在某些浏览器上会同时到达，
@@ -235,7 +243,9 @@ function loadInfo(){
   get(API.info, function(r){
     state.info = jp(r.data||'{}', {});
     // info 与 discover 谁后到谁重绘一次：晚到的 base_dir 会把本插件目录过滤掉。
-    renderDiscover(state.disc || []);
+    // discover 尚未返回时不要动下拉，让它保持「正在检测…」。
+    renderDiscList();
+    if (state.discLoaded) renderMigSelect();
   });
 }
 
@@ -249,13 +259,14 @@ var DISC_KIND = {
   data:   '仅数据目录（.openclaw，不含程序本体）'
 };
 
-function discSay(msg, bad){
-  var box = $('oc-disc-log');
-  if (!box) return;
-  box.style.display = '';
-  box.textContent = msg;                     // 服务端数据只进 textContent
-  box.style.color = bad ? '#ffb4b4' : '';
-}
+// 下拉选项里的短类型名；只读列表仍用上面的完整说明。
+var DISC_KIND_SHORT = {
+  ours:   '本插件布局',
+  istore: 'iStoreOS 管理器',
+  data:   '仅数据目录'
+};
+
+var MIG_MANUAL = '__manual__';
 
 // 可做的操作 / 内容摘要：把 has_program / has_node / has_data 说人话。
 function discCaps(e){
@@ -266,6 +277,23 @@ function discCaps(e){
   var s = caps.length ? caps.join(' / ') : '内容未知';
   if (!e.has_program) s += '（不含程序本体，迁移后仍需在本插件内安装一次）';
   return s;
+}
+
+// discover 结果里去掉本插件自己的安装目录：列出来只会让人误选
+// （后端也会以"源目录就是本插件的安装目录"拒绝）。
+function discItems(){
+  var cur = ((state.info && state.info.base_dir) || '').replace(/\/$/, '');
+  var arr = Array.isArray(state.disc) ? state.disc : [];
+  return arr.filter(function(e){
+    if (!e || !e.path) return false;
+    return !(cur && String(e.path).replace(/\/$/, '') === cur);
+  });
+}
+
+// 下拉文案：路径 + 类型 + 数据体积（与只读列表使用同一批字段）。
+function discLabel(e){
+  var kind = DISC_KIND_SHORT[e.kind] || e.kind || '未知类型';
+  return String(e.path) + ' （' + kind + '，' + (e.size_mb || 0) + ' MB）';
 }
 
 function discRow(e){
@@ -283,41 +311,69 @@ function discRow(e){
     + '　数据体积：' + (e.size_mb || 0) + ' MB　' + discCaps(e);
   wrap.appendChild(meta);
 
-  var acts = document.createElement('div');
-  acts.style.marginTop = '8px';
-
-  var bMig = document.createElement('button');
-  bMig.textContent = '迁移';
-  if (migBusy) bMig.disabled = true;
-  bMig.onclick = function(){ doMigrate(e.path, discSay); };
-  acts.appendChild(bMig);
-
-  wrap.appendChild(acts);
   return wrap;
 }
 
-function renderDiscover(arr){
+// 只读信息卡片：检测结果仅供参考，迁移入口统一在下拉卡片里。
+function renderDiscList(){
   var card = $('oc-disc-card'), host = $('oc-disc-list');
   if (!card || !host) return;
-  var cur = ((state.info && state.info.base_dir) || '').replace(/\/$/, '');
-  // 本插件自己当前的安装目录不算"检测到的已有安装"，列出来只会让人误点迁移
-  // （后端也会以"源目录就是本插件的安装目录"拒绝）。
-  var items = (arr || []).filter(function(e){
-    if (!e || !e.path) return false;
-    return !(cur && String(e.path).replace(/\/$/, '') === cur);
-  });
-  host.innerHTML = '';
+  var items = discItems();
+  while (host.firstChild) host.removeChild(host.firstChild);
   if (!items.length){ card.style.display = 'none'; return; }
   items.forEach(function(e){ host.appendChild(discRow(e)); });
   card.style.display = '';
 }
 
+// 重建下拉。discover 与 info 都会触发重建，所以必须保留用户当前的选择：
+// info 晚到时 base_dir 才可用于过滤，不能因此把已选目录重置成第一项。
+function renderMigSelect(){
+  var sel = $('mig-dir');
+  if (!sel) return;
+  var prev = sel.value;
+  var items = discItems();
+  while (sel.firstChild) sel.removeChild(sel.firstChild);
+  items.forEach(function(e){
+    sel.appendChild(new Option(discLabel(e), String(e.path)));
+  });
+  // 始终保留手动入口：discover 没有结果时页面仍然可用。
+  sel.appendChild(new Option('其他路径（手动输入）…', MIG_MANUAL));
+
+  var want = prev || '';
+  var found = false;
+  for (var i = 0; i < sel.options.length; i++){
+    if (sel.options[i].value === want){ found = true; break; }
+  }
+  if (!found) want = items.length ? String(items[0].path) : MIG_MANUAL;
+  sel.value = want;
+  updateMigControls();
+  syncMigCustom(false);
+}
+
+// __manual__ 时展开输入框；选回具体路径时收起并清空。
+// focus 只在用户主动切换时传 true，程序化重建（info / discover 晚到）不抢焦点。
+function syncMigCustom(focus){
+  var sel = $('mig-dir'), row = $('mig-custom-row'), inp = $('mig-dir-custom');
+  if (!sel || !row || !inp) return;
+  var manual = sel.value === MIG_MANUAL;
+  row.style.display = manual ? '' : 'none';
+  if (!manual) inp.value = '';
+  inp.disabled = migBusy;
+  if (manual && focus) { try { inp.focus(); } catch(e){} }
+}
+
 function loadDiscover(){
   get(API.discover, function(r){
-    // 失败 / 解析不出数组 / 没有结果：安静隐藏整张卡片，不弹窗、不报错。
-    if (!r || r.ok === false || r.net){ state.disc = []; renderDiscover([]); return; }
-    state.disc = jp(r.data || '[]', []);
-    renderDiscover(state.disc);
+    state.discLoaded = true;
+    // 失败 / 解析不出数组 / 没有结果：安静退化为「仅手动输入」，不弹窗、不报错。
+    if (!r || r.ok === false || r.net){
+      state.disc = [];
+    } else {
+      var arr = jp(r.data || '[]', []);
+      state.disc = Array.isArray(arr) ? arr : [];
+    }
+    renderDiscList();
+    renderMigSelect();
   });
 }
 
@@ -334,16 +390,18 @@ function migSayManual(msg, bad){
   box.style.color = bad ? '#ffb4b4' : '';
 }
 
-// 迁移期间禁用两个入口的所有按钮（后端也会 busy 拒绝，这里只是体验）
+// discover 返回前下拉与按钮不可用；迁移期间三者都禁用（后端也会 busy 拒绝）。
+function updateMigControls(){
+  var b = $('btn-mig-manual'), sel = $('mig-dir'), inp = $('mig-dir-custom');
+  var off = migBusy || !state.discLoaded;
+  if (b) b.disabled = off;
+  if (sel) sel.disabled = off;
+  if (inp) inp.disabled = migBusy;
+}
+
 function setMigBusy(b){
   migBusy = b;
-  var bm = $('btn-mig-manual'), inp = $('mig-dir');
-  if (bm) bm.disabled = b;
-  if (inp) inp.disabled = b;
-  var host = $('oc-disc-list');
-  if (!host) return;
-  var btns = host.getElementsByTagName('button');
-  for (var i = 0; i < btns.length; i++) btns[i].disabled = b;
+  updateMigControls();
 }
 
 // 后台日志里进度行与最终结果混在一起，但最终结果一定是单独一行 JSON。
@@ -472,15 +530,18 @@ function doMigrate(path, say){
   });
 }
 
-// 手动输入：始终可用，不依赖 discover 是否有结果
+// 迁移入口：下拉选择检测结果，__manual__ 时用下方文本框兜底。
 (function(){
-  var b = $('btn-mig-manual'), inp = $('mig-dir');
-  if (!b || !inp) return;
+  var b = $('btn-mig-manual'), sel = $('mig-dir'), inp = $('mig-dir-custom');
+  if (!b || !sel || !inp) return;
+  sel.onchange = function(){ syncMigCustom(true); };
   b.onclick = function(){
-    if (migBusy) return;
-    var v = String(inp.value || '').replace(/^\s+|\s+$/g, '');
+    if (migBusy || !state.discLoaded) return;
+    var v = sel.value === MIG_MANUAL ? inp.value : sel.value;
+    v = String(v == null ? '' : v).replace(/^\s+|\s+$/g, '');
     if (!v) {
-      migSayManual('请先填写要迁移的目录（绝对路径，例如 /mnt/data/OpenClawMgr）。', true);
+      migSayManual('请先在下拉中选择要迁移的目录；选择「其他路径（手动输入）…」时请填写绝对路径，'
+        + '例如 /mnt/data/OpenClawMgr。', true);
       return;
     }
     if (v.charAt(0) !== '/') {
