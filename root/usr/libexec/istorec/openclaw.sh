@@ -150,11 +150,15 @@ cmd_diag_run() {
 	rm -f "$DIAG_EXIT" 2>/dev/null || true
 	: >"$DIAG_LOG"
 	date +%s >"$DIAG_TS"
+	# 子 shell 自己也要接 /dev/null：它继承了 LuCI 请求的 stdout 管道，而
+	# popen 的 close 会等到**所有**写端关闭才返回。doctor 跑几分钟，请求就会
+	# 一直挂着直到浏览器超时（前端只会报「服务无响应」）。内层 diag_body 的
+	# 输出仍然写 $DIAG_LOG，不受影响。
 	(
 		diag_body "$name" >"$DIAG_LOG" 2>&1
 		echo "$?" >"$DIAG_EXIT"
 		rm -rf "$DIAG_LOCK" 2>/dev/null || true
-	) &
+	) </dev/null >/dev/null 2>&1 &
 	# $$ is still the parent's pid inside a subshell, so record the real
 	# worker pid from $! - otherwise liveness checks look at the wrong process
 	echo "$!" >"$DIAG_PID"
@@ -263,6 +267,9 @@ cmd_install_bg() {
 	rm -f "$OC_INSTALLLOG" "$OC_INST_DONE" "$OC_INST_RC" "$OC_INST_PID" 2>/dev/null || true
 	mkdir -p "$OC_LOGDIR" "$(dirname "$OC_INST_RC")" 2>/dev/null || true
 	date +%s >"$OC_INST_START" 2>/dev/null || true
+	# 子 shell 的 stdio 必须离开 LuCI 请求的管道（同 diag / migrate）：内层已经
+	# 自己 & 了，所以现在能返回只是巧合 —— 一旦内层改成前台（为了 wait 拿 rc，
+	# 现在正是 & + wait），请求就会挂到安装结束。这里显式关掉，不依赖内层形状。
 	(
 		# Record install.sh's own pid, not the subshell's: a forked shell keeps
 		# the parent's cmdline (openclaw.sh install-bg ...), which does not
@@ -279,7 +286,7 @@ cmd_install_bg() {
 		inst_rc=$?
 		printf '%s' "$inst_rc" >"$OC_INST_RC"
 		touch "$OC_INST_DONE"
-	) &
+	) </dev/null >/dev/null 2>&1 &
 	# OC_INSTALLLOG may contain quotes after the user picked a custom path
 	printf '{"started":true,"log":"%s"}\n' "$(oc_json_str "$OC_INSTALLLOG")"
 }
@@ -1039,11 +1046,16 @@ cmd_migrate_start() {
 	echo "$$" >"$MIGRATE_PID" 2>/dev/null || true
 	rm -f "$MIGRATE_EXIT" 2>/dev/null || true
 	: >"$MIGRATE_LOG"
+	# 整个子 shell 的 stdio 都接到 /dev/null。只给内层的 migrate 加 >log 是不够的：
+	# 子 shell 自己的 stdout 仍然指向 LuCI 请求的管道（io.popen 的写端），
+	# popen:close() 会等到所有持有写端的进程退出才返回 —— 迁移复制整个安装目录
+	# 要几分钟，请求就会一直挂到浏览器超时，前端误报「服务无响应」，而后台其实
+	# 已经在复制了。内层命令自己的 stdout 仍写 $MIGRATE_LOG。
 	(
-		sh "$0" migrate "$dir" >"$MIGRATE_LOG" 2>&1
+		sh "$0" migrate "$dir" >"$MIGRATE_LOG" 2>&1 </dev/null
 		echo "$?" >"$MIGRATE_EXIT"
 		rmdir "$MIGRATE_LOCK" 2>/dev/null || true
-	) &
+	) </dev/null >/dev/null 2>&1 &
 	# $$ inside a subshell is still the parent pid; record the real worker pid
 	echo "$!" >"$MIGRATE_PID"
 	printf '{"started":true,"dir":"%s"}\n' "$(oc_json_str "$dir")"

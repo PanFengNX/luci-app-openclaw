@@ -1899,22 +1899,124 @@ cmd_cli_update() {
 }
 
 # ---------------------------------------------------------------- login
+# 新版 bdpan 在非交互环境（uhttpd 下 stdin 不是 tty）要求显式
+# --accept-disclaimer，否则 login 直接 rc=1 并打印 usage：
+#   Error: 首次使用请添加 --accept-disclaimer 参数，或在交互式环境下运行 bdpan login 进行确认
+# 老版本不认识这个参数（Go flag 会以 "flag provided but not defined" 拒绝），
+# 所以先探测 usage 再决定加不加 —— 与安装器 -dir / -install-dir 的探测同一思路。
+cloud_login_has_flag() {
+	# cloud_login_has_flag <usage-file> <flag> -> 0 表示 usage 里列出了该参数
+	#
+	# 只看**行首 token**：Go 的 flag 用法里一个参数定义行是
+	# `  -accept-disclaimer  说明` 这种形状，第一个词就是参数名。
+	# 绝不能在整行里搜子串：bdpan 的报错文案里本身就写着
+	# "--accept-disclaimer"（见上面那句 Error），子串匹配会把「不支持」判成
+	# 「支持」，然后传一个它不认识的参数，白跑一轮 —— 安装器参数探测就是这么
+	# 栽的（"flag provided but not defined: -install-dir"）。
+	#
+	# 前导 "-" 的数量不参与比较：Go 的 flag 包打印用法时用单破折号
+	# （-accept-disclaimer），但接受双破折号写法，两种都要认。
+	awk -v f="$2" '
+		{
+			s = $0
+			sub(/^[ \t]+/, "", s)
+			if (s == "") next
+			n = split(s, w, /[ \t]+/)
+			t = w[1]
+			if (n < 1) next
+			# 归一化前导破折号：-flag 与 --flag 视为同一个
+			sub(/^-+/, "", t)
+			want = f
+			sub(/^-+/, "", want)
+			if (t == want) { found = 1; exit }
+			# 兼容 "-flag=value" / "--flag=value" 写法
+			if (substr(t, 1, length(want) + 1) == want "=") { found = 1; exit }
+		}
+		END { exit(found ? 0 : 1) }
+	' "$1"
+}
+
+cloud_login_flags() {
+	# cloud_login_flags <bin> -> 登录命令要追加的参数（空串 / "--accept-disclaimer"）
+	#
+	# 取不到帮助时**保守**按新版行为加上该参数：调用方（cloud_login_exec）在
+	# 被拒时会自动去掉它重试一次，所以猜错只多花一次调用，猜「不加」则会
+	# 让新版 bdpan 必然失败。
+	# `login -h` 的退出码不可用：Go flag 把 usage 打到 stderr 并以 2 退出，
+	# 成功打印帮助也可能是非 0，所以只判断输出是否为空。
+	local bin="$1" tmp
+	tmp="$OC_RUNDIR/cloud-login-help.$$"
+	rm -f "$tmp" 2>/dev/null
+	cloud_run 20 "$bin" login -h >"$tmp" 2>&1 </dev/null
+	if [ -s "$tmp" ] && ! cloud_login_has_flag "$tmp" "--accept-disclaimer"; then
+		rm -f "$tmp" 2>/dev/null
+		return 0
+	fi
+	rm -f "$tmp" 2>/dev/null
+	printf '%s' "--accept-disclaimer"
+}
+
+cloud_login_flag_error() {
+	# cloud_login_flag_error <file> -> 0 表示输出是「不认识这个参数」
+	grep -qiE 'unknown flag|unknown shorthand flag|flag provided but not defined' "$1" 2>/dev/null
+}
+
+cloud_login_exec() {
+	# cloud_login_exec <timeout> <outfile> <bin> <arg...>
+	# 统一入口：自动带上探测到的登录参数；参数被拒时去掉它重试一次。
+	# 输出（stdout+stderr）落在 <outfile>，返回最后一次调用的退出码。
+	local t="$1" out="$2" bin="$3" flags rc
+	shift 3
+	flags="$(cloud_login_flags "$bin")"
+	rm -f "$out" 2>/dev/null
+	# flags 是脚本内的常量（不是用户输入），按空白拆成参数是安全的；
+	# 用户可控的值（授权码）始终以 "$@" 原样转发，绝不拼进字符串。
+	# shellcheck disable=SC2086
+	cloud_run "$t" "$bin" login $flags "$@" >"$out" 2>&1 </dev/null
+	rc=$?
+	if [ "$rc" -ne 0 ] && [ -n "$flags" ] && cloud_login_flag_error "$out"; then
+		oc_warn "bdpan 不支持 $flags（老版本），已去掉该参数重试"
+		rm -f "$out" 2>/dev/null
+		cloud_run "$t" "$bin" login "$@" >"$out" 2>&1 </dev/null
+		rc=$?
+	fi
+	return "$rc"
+}
+
+cloud_login_err() {
+	# cloud_login_err [file] -> 脱敏 + 去掉 usage 段 + 截断的错误文本
+	# 不给参数时读 stdin（cmd_login_code 里是 `cloud_scrub_code ... | cloud_login_err`）。
+	#
+	# bdpan 失败时会把整段 usage（Usage / Flags 几十行）打在错误后面，原样回给
+	# 页面既长又盖住真正的原因。只保留第一个 "Usage:" / "Flags:" 之前的部分。
+	# 截断仍走 oc_cut_utf8，避免把中文切成半个字符破坏 JSON。
+	#
+	# ${1:+"$1"} 而不是 "$1"：空参数会被 awk 当成文件名去打开，报
+	# `can't open file ""`，2>/dev/null 把错误吞掉、输出为空 —— 于是管道那一侧
+	# 永远显示「无输出」，真正的失败原因反而丢了。
+	awk '
+		{ sub(/\r$/, "") }
+		$1 == "Usage:" || $1 == "Flags:" || $1 == "Global" { exit }
+		{ print }
+	' ${1:+"$1"} 2>/dev/null | cloud_redact | oc_cut_utf8 500
+}
+
 cmd_login_url() {
 	local bin tmp rc out url
 
 	bin="$(cloud_bin_ready)" || cloud_fail "请先安装网盘组件"
 	tmp="$OC_RUNDIR/cloud-loginurl.$$"
 	rm -f "$tmp" 2>/dev/null
-	cloud_run 60 "$bin" login --get-auth-url >"$tmp" 2>&1
+	# --accept-disclaimer 在前，--get-auth-url 在后（探测结果决定前者是否出现）
+	cloud_login_exec 60 "$tmp" "$bin" --get-auth-url
 	rc=$?
 
 	# 取输出里第一个 http(s) 链接（排除空白、引号、尖括号与右括号）
 	url="$(awk 'match($0, /https?:\/\/[^[:space:]"<>)]+/) { print substr($0, RSTART, RLENGTH); exit }' "$tmp" 2>/dev/null)"
-	out="$(cat "$tmp" 2>/dev/null)"
+	out="$(cloud_login_err "$tmp")"
 	rm -f "$tmp" 2>/dev/null
 
 	if [ -z "$url" ]; then
-		out="$(printf '%s\n' "$out" | cloud_redact | oc_cut_utf8 500)"
 		cloud_fail "无法获取授权链接（rc=$rc）：${out:-无输出}"
 	fi
 	oc_safe_url "$url" || cloud_fail "授权链接格式异常：$url"
@@ -1960,10 +2062,12 @@ cmd_login_code() {
 	bin="$(cloud_bin_ready)" || cloud_fail "请先安装网盘组件"
 	tmp="$OC_RUNDIR/cloud-logincode.$$"
 	rm -f "$tmp" 2>/dev/null
-	cloud_run 60 "$bin" login --set-code "$code" >"$tmp" 2>&1
+	# 与 login-url 走同一个入口：参数探测 + 被拒时去掉重试一次。
+	# 授权码只经 "$@" 转发，不拼进任何字符串。
+	cloud_login_exec 60 "$tmp" "$bin" --set-code "$code"
 	rc=$?
 	# 输出里若回显了授权码，一并抹掉；日志里也绝不写 code。
-	out="$(cloud_scrub_code "$tmp" "$code" | cloud_redact | tail -n 5 | oc_cut_utf8 800)"
+	out="$(cloud_scrub_code "$tmp" "$code" | cloud_login_err)"
 	rm -f "$tmp" 2>/dev/null
 
 	[ "$rc" -eq 0 ] || cloud_fail "授权失败（rc=$rc）：${out:-无输出}"
