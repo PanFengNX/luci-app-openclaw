@@ -17,7 +17,7 @@
   --oc-fg-mute:color-mix(in srgb, currentColor 72%, transparent);
   --oc-line:rgba(127,127,127,.26);--oc-line-soft:rgba(127,127,127,.13);
   --oc-surface:rgba(127,127,127,.055);--oc-surface-2:rgba(127,127,127,.10);
-  --oc-accent:#0a63bb;--oc-ok:#1f6b2c;--oc-warn:#c05621;--oc-err:#cc2222;
+  --oc-accent:#5563d2;--oc-ok:#1f6b2c;--oc-warn:#c05621;--oc-err:#cc2222;
   --oc-r:12px;--oc-r-sm:8px;--oc-label:116px;}
 
 /* ── 卡片 ───────────────────────────────────────────────────────── */
@@ -54,6 +54,9 @@
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .oc-kv>span{justify-self:start;text-align:left;word-break:break-word;min-width:0}
 
+/* 在 .oc-grid 里跨满整行（值很长、又不属于某一边的键值对用） */
+.oc-kv.oc-span{grid-column:1 / -1}
+
 /* ── 概览数字条：标签在上、数值在下，列间竖线分隔 ───────────────── */
 .oc-kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0;
   padding:2px 0 16px;margin:0 0 4px;border-bottom:1px solid var(--oc-line-soft)}
@@ -72,11 +75,11 @@
 .oc-stop{background:rgba(127,127,127,.14);color:var(--oc-fg-dim)}
 .oc-none{background:rgba(192,86,33,.12);color:var(--oc-warn)}
 .oc-pill{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:600;
-  font-variant-numeric:tabular-nums;background:rgba(10,99,187,.10);color:var(--oc-accent);
-  border:1px solid rgba(10,99,187,.18);line-height:1.6;vertical-align:middle;white-space:nowrap}
+  font-variant-numeric:tabular-nums;background:rgba(85,99,210,.10);color:var(--oc-accent);
+  border:1px solid rgba(85,99,210,.18);line-height:1.6;vertical-align:middle;white-space:nowrap}
 .oc-pill.ok{background:rgba(31,107,44,.12);color:var(--oc-ok);border-color:rgba(31,107,44,.28)}
 .oc-pill.warn{background:rgba(192,86,33,.12);color:var(--oc-warn);border-color:rgba(192,86,33,.28)}
-.oc-pill.accent{background:rgba(10,99,187,.12);color:var(--oc-accent);border-color:rgba(10,99,187,.26)}
+.oc-pill.accent{background:rgba(85,99,210,.12);color:var(--oc-accent);border-color:rgba(85,99,210,.26)}
 .oc-tag{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11.5px;
   background:var(--oc-surface-2);color:var(--oc-fg-dim);white-space:nowrap;vertical-align:middle}
 .oc-tag.ok{color:var(--oc-ok)}
@@ -110,6 +113,17 @@
    把「上传并恢复」这类按钮挤到下一行单独成行。 */
 .oc-row>.oc-hint{flex:0 0 auto;box-sizing:border-box;margin:0 0 0 calc(var(--oc-label) + 12px);
   width:calc(100% - var(--oc-label) - 12px)}
+/* 定宽行：标签 | 药丸 | 控件 | 右侧按钮。四列各占固定轨道，
+   两行的输入框与按钮因此左右都对齐（版本升级那两行就是靠这个）。 */
+.oc-row-fixed{display:grid;grid-template-columns:var(--oc-label) 190px minmax(0,1fr) auto;
+  align-items:center;gap:8px 12px;margin:0 0 12px}
+.oc-row-fixed>label{width:auto}
+.oc-row-fixed>input[type=text],.oc-row-fixed>input[type=password],
+.oc-row-fixed>select{width:100%;max-width:none;min-width:0}
+.oc-row-fixed>.oc-pill{justify-self:start;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.oc-row-fixed>button,.oc-row-fixed>.oc-btn{justify-self:end;min-width:76px;text-align:center}
+.oc-row-fixed>.oc-hint{grid-column:2 / -1;width:auto;margin:0}
+
 /* 行内横向组合（输入框 + 复制按钮等） */
 .oc-inline{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
 .oc-inline>input[type=text],.oc-inline>input[type=password],.oc-inline>.oc-addr{flex:1 1 220px;min-width:0}
@@ -172,7 +186,7 @@ input[type=checkbox]{width:15px;height:15px;min-height:0;padding:0;margin:0;
   accent-color:var(--oc-accent);vertical-align:-2px;border-radius:3px}
 select:focus,input[type=text]:focus,input[type=password]:focus,input[type=number]:focus,
 input[type=time]:focus,textarea:focus{border-color:var(--oc-accent);outline:none;
-  box-shadow:0 0 0 3px rgba(10,99,187,.14)}
+  box-shadow:0 0 0 3px rgba(85,99,210,.14)}
 input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   background:var(--oc-surface-2);min-width:0}
 
@@ -195,6 +209,9 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   .oc-card{padding:16px 14px}
   .oc-row>label{flex:0 0 100%;width:auto}
   .oc-row>input[type=text],.oc-row>input[type=password],.oc-row>select{flex:1 1 100%;max-width:none}
+  .oc-row-fixed{grid-template-columns:minmax(0,1fr)}
+  .oc-row-fixed>label,.oc-row-fixed>.oc-pill,.oc-row-fixed>button,.oc-row-fixed>.oc-btn,
+  .oc-row-fixed>.oc-hint{grid-column:1 / -1;justify-self:start;width:auto;margin:0}
   .oc-row>.oc-hint{margin-left:0;width:100%}
   .oc-cols{grid-template-columns:1fr}
   .oc-kv{grid-template-columns:92px minmax(0,1fr)}

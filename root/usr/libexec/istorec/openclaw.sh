@@ -850,6 +850,142 @@ cmd_devices_approve() {
 	return 1
 }
 
+# ---------------------------------------------------------------- directory browser
+# 「迁移」页的目录浏览器：按层列出某个目录下的**子目录**，前端据此做成
+# "点进去选文件夹"，用户不必再手打绝对路径。
+#
+# 约定与 discover / node-existing 相同：stdout 只有一行 JSON，日志（如果有）
+# 一律走 stderr —— 绝不能使用 oc_info，它写的是 stdout，会把 JSON 顶掉。
+#
+# 纯只读：不取锁、不写任何文件、不改 UCI。
+
+BROWSE_MAX=300       # 单层最多返回的条目数
+BROWSE_PATH_MAX=512  # 路径长度上限（防符号链接自环把路径越拉越长）
+
+browse_esc() {
+	# browse_esc <name> -> 可直接放进 JSON 字符串字面量的内容
+	#
+	# 单层最多 300 条，每条都 fork 一次 tr + awk 在路由器上会明显变慢。
+	# 控制字符在调用方已经整条跳过，剩下的只有反斜杠 / 双引号 / 制表符
+	# 需要转义（oc_json_str 对其它字符是原样返回），所以这里走快路径。
+	case "$1" in
+		*\\*|*\"*|*"	"*) oc_json_str "$1" ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+browse_fail() {
+	# browse_fail <message> : stdout 输出错误 JSON，返回非 0。
+	# 只写 stderr（不碰 oc_err：它会往 /var/log/openclaw.log 追加，而本命令
+	# 承诺不写任何文件）。
+	local msg="$1"
+	printf 'openclaw browse: %s\n' "$msg" >&2
+	printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "$msg")"
+	return 2
+}
+
+cmd_browse() {
+	# browse [<dir>] -> {"ok":true,"path":..,"parent":..,"truncated":..,"entries":[..]}
+	#
+	# 只列子目录（不列文件），跳过 . 开头的隐藏目录（.openclaw 这类数据目录
+	# 由 discover 负责，不属于浏览目标）。每个条目带 kind：
+	# oc_probe_openclaw_dir 命中时是 ours / istore / data，否则空串 —— 前端
+	# 可以据此在列表里直接标出"这里是一个 OpenClaw 安装"。
+	local dir="${2:-}" parent prefix p base name ep esc esc_dir body=""
+	local truncated=false n=0 kind
+
+	# 不传参数时的默认起点：优先 /mnt（外置盘都挂在这里），没有则 /
+	if [ -z "$dir" ]; then
+		if [ -d /mnt ]; then dir="/mnt"; else dir="/"; fi
+	fi
+
+	case "$dir" in
+		/*) ;;
+		*) browse_fail "目录必须是绝对路径"; return 2 ;;
+	esac
+	case "$dir" in
+		*[[:cntrl:]]*) browse_fail "目录不能包含控制字符"; return 2 ;;
+	esac
+	if [ "${#dir}" -gt "$BROWSE_PATH_MAX" ]; then
+		browse_fail "目录路径过长（上限 ${BROWSE_PATH_MAX} 字符）"; return 2
+	fi
+
+	# 规范化：去尾斜杠，"/" 单独保留
+	dir="${dir%/}"
+	[ -n "$dir" ] || dir="/"
+
+	# 内核 / 运行时伪文件系统：列出来既慢又没有意义，进入时直接拒绝。
+	# 这里按**字面前缀**判断（不做符号链接解析）：宁可多拒，也不去读它们。
+	case "$dir" in
+		/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*)
+			browse_fail "该目录不支持浏览"; return 2 ;;
+	esac
+	if [ ! -e "$dir" ]; then
+		browse_fail "目录不存在：$dir"; return 2
+	fi
+	if [ ! -d "$dir" ]; then
+		browse_fail "不是目录：$dir"; return 2
+	fi
+	if [ ! -r "$dir" ]; then
+		browse_fail "没有权限读取该目录"; return 2
+	fi
+
+	if [ "$dir" = "/" ]; then
+		parent=""
+		prefix="/"
+	else
+		parent="$(dirname "$dir" 2>/dev/null)"
+		[ -n "$parent" ] || parent="/"
+		prefix="$dir/"
+	fi
+
+	# 转义一次当前目录，条目路径由它拼出来。转义是逐字符的，而 "/" 不会被
+	# 改写，所以 esc("<dir>/<name>") == esc("<dir>") + "/" + esc("<name>")，
+	# 每条省掉一次 fork（单层最多 300 条，路由器上这个差别能感觉到）。
+	esc_dir="$(browse_esc "$dir")"
+
+	# ash 的 */ 通配本身按名字有序、天然跳过 . 开头的目录；空目录 / 无匹配
+	# 时 $p 原样等于模式串，靠 -d 判断自然跳过。不要换成 ls | while read：
+	# 名字里有空格 / 换行时那条路会出错。
+	#
+	# entries 先攒在 body 里，最后一次性打印：truncated 只有遍历结束才知道，
+	# 而它在 JSON 里排在 entries 前面，没法边遍历边写。
+	for p in "$prefix"*/; do
+		[ -d "$p" ] || continue
+		base="${p%/}"
+		name="${base##*/}"
+		case "$name" in .*) continue ;; esac
+		# 名字里的换行等控制字符无法安全地放进 JSON（oc_json_str 会静默丢掉
+		# 它们，前端拿到的 path 就点不进去），整条跳过而不是转义。
+		case "$name" in *[[:cntrl:]]*) continue ;; esac
+		if [ "$n" -ge "$BROWSE_MAX" ]; then
+			truncated=true
+			break
+		fi
+		n=$((n + 1))
+
+		esc="$(browse_esc "$name")"
+		if [ "$dir" = "/" ]; then
+			# 当前目录是 / 时不要再拼成 "//name"：前端会把它当成另一个路径
+			ep="/$name"
+			esc_ep="/$esc"
+		else
+			ep="$dir/$name"
+			esc_ep="$esc_dir/$esc"
+		fi
+
+		kind="$(oc_probe_openclaw_dir "$ep" 2>/dev/null)" || kind=""
+		case "$kind" in ours|istore|data) ;; *) kind="" ;; esac
+
+		[ -z "$body" ] || body="$body,"
+		body="$body{\"name\":\"$esc\",\"path\":\"$esc_ep\",\"kind\":\"$kind\"}"
+	done
+
+	printf '{"ok":true,"path":"%s","parent":"%s","truncated":%s,"entries":[%s]}\n' \
+		"$esc_dir" "$(oc_json_str "$parent")" "$truncated" "$body"
+	return 0
+}
+
 # ---------------------------------------------------------------- migrate
 # migrate <dir> : 把本机已有的 OpenClaw 安装「迁移」到本插件的默认目录。
 #
@@ -2170,6 +2306,7 @@ case "${1:-}" in
 	node-existing) cmd_node_existing ;;
 	devices-pending) cmd_devices_pending ;;
 	devices-approve) cmd_devices_approve "$@" ;;
+	browse)        cmd_browse "$@" ;;
 	migrate)       cmd_migrate "$@" ;;
 	migrate-start) cmd_migrate_start "$@" ;;
 	migrate-poll)  cmd_migrate_poll "$@" ;;
@@ -2238,6 +2375,11 @@ Usage: openclaw.sh <command> [options]
                             pending Control UI pairing requests (raw fallback when
                             the CLI output format is not recognised)
   devices-approve <id>      approve ONE pending device (no approve-all by design)
+  browse [<dir>]            {"ok":true,"path":..,"parent":..,"truncated":..,
+                            "entries":[{name,path,kind}]}  sub-directories of
+                            <dir> (default /mnt, or / when absent) for the
+                            migrate picker; hidden dirs and /proc /sys /dev /run
+                            are not listed; read-only, at most 300 entries
   migrate <dir>             copy an existing install into this plugin's default
                             dirs (cp -a + atomic mv; the source is left as-is).
                             If main.state_dir / main.openclaw_dir point outside

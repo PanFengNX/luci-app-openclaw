@@ -17,7 +17,7 @@
   --oc-fg-mute:color-mix(in srgb, currentColor 72%, transparent);
   --oc-line:rgba(127,127,127,.26);--oc-line-soft:rgba(127,127,127,.13);
   --oc-surface:rgba(127,127,127,.055);--oc-surface-2:rgba(127,127,127,.10);
-  --oc-accent:#0a63bb;--oc-ok:#1f6b2c;--oc-warn:#c05621;--oc-err:#cc2222;
+  --oc-accent:#5563d2;--oc-ok:#1f6b2c;--oc-warn:#c05621;--oc-err:#cc2222;
   --oc-r:12px;--oc-r-sm:8px;--oc-label:116px;}
 
 /* ── 卡片 ───────────────────────────────────────────────────────── */
@@ -54,6 +54,9 @@
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .oc-kv>span{justify-self:start;text-align:left;word-break:break-word;min-width:0}
 
+/* 在 .oc-grid 里跨满整行（值很长、又不属于某一边的键值对用） */
+.oc-kv.oc-span{grid-column:1 / -1}
+
 /* ── 概览数字条：标签在上、数值在下，列间竖线分隔 ───────────────── */
 .oc-kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0;
   padding:2px 0 16px;margin:0 0 4px;border-bottom:1px solid var(--oc-line-soft)}
@@ -72,11 +75,11 @@
 .oc-stop{background:rgba(127,127,127,.14);color:var(--oc-fg-dim)}
 .oc-none{background:rgba(192,86,33,.12);color:var(--oc-warn)}
 .oc-pill{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:600;
-  font-variant-numeric:tabular-nums;background:rgba(10,99,187,.10);color:var(--oc-accent);
-  border:1px solid rgba(10,99,187,.18);line-height:1.6;vertical-align:middle;white-space:nowrap}
+  font-variant-numeric:tabular-nums;background:rgba(85,99,210,.10);color:var(--oc-accent);
+  border:1px solid rgba(85,99,210,.18);line-height:1.6;vertical-align:middle;white-space:nowrap}
 .oc-pill.ok{background:rgba(31,107,44,.12);color:var(--oc-ok);border-color:rgba(31,107,44,.28)}
 .oc-pill.warn{background:rgba(192,86,33,.12);color:var(--oc-warn);border-color:rgba(192,86,33,.28)}
-.oc-pill.accent{background:rgba(10,99,187,.12);color:var(--oc-accent);border-color:rgba(10,99,187,.26)}
+.oc-pill.accent{background:rgba(85,99,210,.12);color:var(--oc-accent);border-color:rgba(85,99,210,.26)}
 .oc-tag{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11.5px;
   background:var(--oc-surface-2);color:var(--oc-fg-dim);white-space:nowrap;vertical-align:middle}
 .oc-tag.ok{color:var(--oc-ok)}
@@ -110,6 +113,17 @@
    把「上传并恢复」这类按钮挤到下一行单独成行。 */
 .oc-row>.oc-hint{flex:0 0 auto;box-sizing:border-box;margin:0 0 0 calc(var(--oc-label) + 12px);
   width:calc(100% - var(--oc-label) - 12px)}
+/* 定宽行：标签 | 药丸 | 控件 | 右侧按钮。四列各占固定轨道，
+   两行的输入框与按钮因此左右都对齐（版本升级那两行就是靠这个）。 */
+.oc-row-fixed{display:grid;grid-template-columns:var(--oc-label) 190px minmax(0,1fr) auto;
+  align-items:center;gap:8px 12px;margin:0 0 12px}
+.oc-row-fixed>label{width:auto}
+.oc-row-fixed>input[type=text],.oc-row-fixed>input[type=password],
+.oc-row-fixed>select{width:100%;max-width:none;min-width:0}
+.oc-row-fixed>.oc-pill{justify-self:start;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.oc-row-fixed>button,.oc-row-fixed>.oc-btn{justify-self:end;min-width:76px;text-align:center}
+.oc-row-fixed>.oc-hint{grid-column:2 / -1;width:auto;margin:0}
+
 /* 行内横向组合（输入框 + 复制按钮等） */
 .oc-inline{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
 .oc-inline>input[type=text],.oc-inline>input[type=password],.oc-inline>.oc-addr{flex:1 1 220px;min-width:0}
@@ -172,7 +186,7 @@ input[type=checkbox]{width:15px;height:15px;min-height:0;padding:0;margin:0;
   accent-color:var(--oc-accent);vertical-align:-2px;border-radius:3px}
 select:focus,input[type=text]:focus,input[type=password]:focus,input[type=number]:focus,
 input[type=time]:focus,textarea:focus{border-color:var(--oc-accent);outline:none;
-  box-shadow:0 0 0 3px rgba(10,99,187,.14)}
+  box-shadow:0 0 0 3px rgba(85,99,210,.14)}
 input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   background:var(--oc-surface-2);min-width:0}
 
@@ -195,6 +209,9 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   .oc-card{padding:16px 14px}
   .oc-row>label{flex:0 0 100%;width:auto}
   .oc-row>input[type=text],.oc-row>input[type=password],.oc-row>select{flex:1 1 100%;max-width:none}
+  .oc-row-fixed{grid-template-columns:minmax(0,1fr)}
+  .oc-row-fixed>label,.oc-row-fixed>.oc-pill,.oc-row-fixed>button,.oc-row-fixed>.oc-btn,
+  .oc-row-fixed>.oc-hint{grid-column:1 / -1;justify-self:start;width:auto;margin:0}
   .oc-row>.oc-hint{margin-left:0;width:100%}
   .oc-cols{grid-template-columns:1fr}
   .oc-kv{grid-template-columns:92px minmax(0,1fr)}
@@ -220,11 +237,16 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   <div class="oc-sub">运行环境</div>
   <div class="oc-grid">
     <div class="oc-kv"><b>OpenClaw 版本</b><span class="oc-pill"><span id="st-oc">-</span></span></div>
-    <div class="oc-kv"><b>Node.js</b><span class="oc-pill"><span id="st-node">-</span></span><span id="st-node-mode" class="oc-hint" style="display:block"></span></div>
+    <div class="oc-kv"><b>Node.js</b><span class="oc-pill"><span id="st-node">-</span></span></div>
     <div class="oc-kv"><b>架构 / libc</b><span id="st-arch">-</span></div>
     <div class="oc-kv"><b>安装目录</b><span id="st-dir">-</span></div>
     <div class="oc-kv"><b>程序目录</b><span id="st-ocdir">-</span></div>
     <div class="oc-kv"><b>剩余空间</b><span id="st-free">-</span></div>
+    <!-- 安装模式的值很长（含路径说明），放在某一列里会被折成四五行的窄条，
+         所以让它单独占满一行；后端没有 node_mode 时整行隐藏。 -->
+    <div class="oc-kv oc-span" id="row-node-mode" style="display:none">
+      <b>Node 安装模式</b><span id="st-node-mode">-</span>
+    </div>
   </div>
   <div id="st-node-existing" class="oc-hint" style="display:none;margin-top:10px"></div>
   <div class="oc-sub">版本升级</div>
@@ -232,14 +254,14 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
     <div id="ver-err-lines"></div>
     <button id="btn-ver-retry" class="oc-btn ghost" style="margin-top:6px">重试</button>
   </div>
-  <div class="oc-row">
+  <div class="oc-row oc-row-fixed">
     <label>OpenClaw</label>
     <span class="oc-pill" id="up-oc-cur">-</span>
     <input type="text" id="oc-ver-input" placeholder="latest 或 2026.10.4">
     <button id="btn-oc-upgrade" class="oc-btn">升级</button>
     <span id="oc-ver-hint" class="oc-hint"></span>
   </div>
-  <div class="oc-row">
+  <div class="oc-row oc-row-fixed">
     <label>Node.js</label>
     <span class="oc-pill" id="up-node-cur">-</span>
     <input type="text" id="node-ver-input" placeholder="例如 v22.22.2，留空=自动">
@@ -303,12 +325,6 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   </div>
 </div>
 
-<div class="oc-hint" style="margin-top:4px">安装 / 修复运行环境、基本设置 →
-  <a href="<%=luci.dispatcher.build_url("admin","services","openclaw","setup","general")%>">设置</a>
-</div>
-<div class="oc-hint" style="margin-top:2px">备份与恢复 →
-  <a href="<%=luci.dispatcher.build_url("admin","services","openclaw","backup")%>">备份与恢复</a>
-</div>
 
 <script>
 var API = {
@@ -490,10 +506,12 @@ function loadInfo(){
     // 安装模式（private / global）由后端 info 的 node_mode 字段给出；
     // 老版本后端可能没有该字段，缺失时留空即可，不影响其它信息。
     var nmode = d.node_mode || '';
-    $('st-node-mode').textContent = nmode === 'global'
-      ? '安装模式：全局 global（/usr/lib/nodejs，全系统可用）'
-      : (nmode === 'private' ? '安装模式：私有 private（仅本插件使用）'
-                             : (nmode ? '安装模式：' + nmode : ''));
+    // 标签由 .oc-kv 的 <b> 提供，这里只写值，否则会出现「安装模式 安装模式：…」
+    var nmodeText = nmode === 'global'
+      ? '全局 global（/usr/lib/nodejs，全系统可用）'
+      : (nmode === 'private' ? '私有 private（仅本插件使用）' : nmode);
+    $('st-node-mode').textContent = nmodeText || '-';
+    if ($('row-node-mode')) $('row-node-mode').style.display = nmodeText ? '' : 'none';
     $('st-port').textContent = (d.port||'-') + ' / ' + (d.bind||'-');
     // 概览条：与 st-badge / st-oc / st-port 同源，只是冗余的醒目展示，不新增请求。
     // 服务端数据只进 textContent / className，不拼 innerHTML。

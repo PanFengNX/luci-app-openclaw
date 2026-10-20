@@ -54,6 +54,7 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "devices_approve"}, call("api_devices_approve")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "migrate"},   call("api_migrate")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "migrate_start"}, call("api_migrate_start")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "browse"}, call("api_browse")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "migrate_poll"},  call("api_migrate_poll")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "doctor"},    call("api_doctor")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "providers"}, call("api_providers")).leaf = true
@@ -768,6 +769,23 @@ end
 function api_migrate_poll()
 	local r = sh(SH .. " migrate-poll")
 	out({ ok = true, data = r })
+end
+
+function api_browse()
+	-- 只读列目录，给迁移页的「浏览…」用。path 为空表示用 helper 的默认起点
+	-- （/mnt，其次 /）。这里只做形状校验，真正的安全判断在 helper 里
+	-- （绝对路径 / 控制字符 / 路径长度 / 拒绝 /proc 等伪文件系统）。
+	local p = http.formvalue("path")
+	if p and p ~= "" then
+		local dir = oc_dir_arg(p)
+		if not dir then
+			out({ ok = false, error = "目录参数无效" })
+			return
+		end
+		out({ ok = true, data = sh(SH .. " browse " .. q(dir)) })
+		return
+	end
+	out({ ok = true, data = sh(SH .. " browse") })
 end
 
 function api_doctor()
