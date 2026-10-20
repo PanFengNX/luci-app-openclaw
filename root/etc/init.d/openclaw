@@ -174,6 +174,16 @@ _state_dir_safe() {
 
 oc_home()     { printf '%s/home' "$(oc_base_dir)"; }
 
+# 权限修正失败不阻止启动（权限问题不该让服务起不来），但必须留下痕迹：
+# 静默吞掉的结果是网关以错误的权限运行，日志里却只有一行正常的 started。
+_warn_chown() {
+	logger -t openclaw "警告：无法把 $1 的属主改为 $OC_USER，网关可能因权限不足失败"
+}
+
+_warn_chmod() {
+	logger -t openclaw "警告：无法修正 $1 的权限，网关可能因权限不足失败"
+}
+
 _find_entry() {
 	local d="${1}/lib/node_modules/openclaw" e
 	for e in "$d/openclaw.mjs" "$d/dist/cli.js" "$d/dist/index.js" "$d/openclaw.js"; do
@@ -255,11 +265,18 @@ start_service() {
 	}
 	[ -n "$token" ] || { logger -t openclaw "未生成网关 token，拒绝启动"; return 1; }
 
-	mkdir -p "$state_dir/workspace" "$base/logs" "$base/workspace" "$base/tmp" 2>/dev/null || true
-	chmod 700 "$base/tmp" 2>/dev/null || true
-	if id "$OC_USER" >/dev/null 2>&1; then
-		chown "$OC_USER:$OC_USER" "$base/tmp" 2>/dev/null || true
+	# 服务用户是启动前提，不是可选项：procd 的 user 参数一旦缺失，网关会以
+	# root 运行 —— 它对外监听 LAN 并执行模型工具调用，等于把路由器交出去。
+	# 与上面的 token 检查同一口径（fail-closed）：用户不存在就不启动。
+	if ! id "$OC_USER" >/dev/null 2>&1; then
+		logger -t openclaw "服务用户 $OC_USER 不存在，拒绝以 root 启动网关（请重新安装本插件以创建该用户）"
+		return 1
 	fi
+	user_opt="$OC_USER"
+
+	mkdir -p "$state_dir/workspace" "$base/logs" "$base/workspace" "$base/tmp" 2>/dev/null || true
+	chmod 700 "$base/tmp" 2>/dev/null || _warn_chmod "$base/tmp"
+	chown "$OC_USER:$OC_USER" "$base/tmp" 2>/dev/null || _warn_chown "$base/tmp"
 
 	# --- --force lets OpenClaw kill a conflicting listener, but only when it
 	#     can do so safely and only on unprivileged ports.
@@ -268,20 +285,17 @@ start_service() {
 		force_opt="--force"
 	fi
 
-	if id "$OC_USER" >/dev/null 2>&1; then
-		user_opt="$OC_USER"
-		chown -R "$OC_USER:$OC_USER" "$home" 2>/dev/null || true
-		chmod -R u+rwX "$home" 2>/dev/null || true
-		# state_dir 在 $home 之外时（迁移已有安装），上面的 chown 覆盖不到它，
-		# 服务用户对网关要写的 openclaw.json / 会话 / 工作区没有权限。
-		# 但这是用户可配置路径：先校验再递归操作，不安全的只告警、继续启动。
-		if [ "$state_dir" != "$home/.openclaw" ]; then
-			if _state_dir_safe "$state_dir"; then
-				chown -R "$OC_USER:$OC_USER" "$state_dir" 2>/dev/null || true
-				chmod -R u+rwX "$state_dir" 2>/dev/null || true
-			else
-				logger -t openclaw "state_dir 不在允许清理的范围内，跳过属主修正：$state_dir"
-			fi
+	chown -R "$OC_USER:$OC_USER" "$home" 2>/dev/null || _warn_chown "$home"
+	chmod -R u+rwX "$home" 2>/dev/null || _warn_chmod "$home"
+	# state_dir 在 $home 之外时（迁移已有安装），上面的 chown 覆盖不到它，
+	# 服务用户对网关要写的 openclaw.json / 会话 / 工作区没有权限。
+	# 但这是用户可配置路径：先校验再递归操作，不安全的只告警、继续启动。
+	if [ "$state_dir" != "$home/.openclaw" ]; then
+		if _state_dir_safe "$state_dir"; then
+			chown -R "$OC_USER:$OC_USER" "$state_dir" 2>/dev/null || _warn_chown "$state_dir"
+			chmod -R u+rwX "$state_dir" 2>/dev/null || _warn_chmod "$state_dir"
+		else
+			logger -t openclaw "state_dir 不在允许清理的范围内，跳过属主修正：$state_dir"
 		fi
 	fi
 
@@ -312,7 +326,10 @@ start_service() {
 		TMPDIR="$base/tmp" \
 		PATH="${nodedir}/bin:${globaldir}/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
 		$env_args
-	[ -n "$user_opt" ] && procd_set_param user "$user_opt"
+	# 无条件设置：走到这里 user_opt 必然等于 $OC_USER（上面的 fail-closed
+	# 检查已经保证该用户存在）。绝不能再加 [ -n ] 之类的条件 —— 一旦条件
+	# 不成立，procd 会以 root 启动网关且没有任何提示。
+	procd_set_param user "$user_opt"
 	procd_set_param respawn 3600 10 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1

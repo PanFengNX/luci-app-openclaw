@@ -749,16 +749,40 @@ oc_json_str() {
 }
 
 oc_safe_url() {
-	# oc_safe_url <url> -> 0 when it is a plain http(s) URL we may hand to curl.
-	# Blocks option injection (leading "-") and URLs with embedded whitespace,
-	# and stops a configured mirror from silently downgrading to plain http.
-	case "${1:-}" in
-		https://*) ;;
-		http://*) ;;
-		*) return 1 ;;
+	# oc_safe_url <url> [mode] -> 0 when the URL may be handed to curl/wget.
+	#
+	# 两种模式：
+	#   allow-http（缺省）接受 http:// 与 https://。这是历史行为，内网镜像
+	#                       大量使用明文 http，一刀切禁掉会让它们全部失效。
+	#   strict            只接受 https://，用于下载**可执行文件**（Node.js
+	#                      运行时压缩包等）。http 会被拒绝，除非用户显式
+	#                      打开 main.allow_http_binaries=1（此时退化为
+	#                      allow-http，并告警一次）。
+	# 两种模式都拒绝选项注入（以 "-" 开头）与内嵌空白的 URL —— 这些值来自
+	# UCI，可被 LuCI 编辑，而这个函数后面接的是以 root 执行的 curl/wget。
+	local url="${1:-}" mode="${2:-allow-http}"
+	case "$mode" in
+		strict) ;;
+		*) mode="allow-http" ;;
 	esac
-	case "$1" in
+	case "$url" in
 		*' '*|*'	'*) return 1 ;;
+	esac
+	case "$url" in
+		https://*) ;;
+		http://*)
+			[ "$mode" = "strict" ] || return 0
+			[ "$(uci_get main.allow_http_binaries 0)" = "1" ] || {
+				oc_err "拒绝通过明文 http 下载可执行文件：$url（请把镜像改成 https；确需明文请设置 uci set openclaw.main.allow_http_binaries=1）"
+				return 1
+			}
+			# 每次调用都告警会刷屏（下载路径可能被调用两次），只警告一次。
+			if [ "${OC_HTTP_BINARIES_WARNED:-0}" != "1" ]; then
+				OC_HTTP_BINARIES_WARNED=1
+				oc_warn "main.allow_http_binaries=1：已允许通过明文 http 下载可执行文件（校验和不保护传输过程）"
+			fi
+			;;
+		*) return 1 ;;
 	esac
 	return 0
 }

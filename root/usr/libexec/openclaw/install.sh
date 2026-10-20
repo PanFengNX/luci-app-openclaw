@@ -376,19 +376,54 @@ verify_node_version() {
 # ---------------------------------------------------------------- node
 node_verify_sum() {
 	# node_verify_sum <version-url> <tarball> <file>
-	# 比对 SHASUMS256.txt；取不到清单时只告警不阻断（与旧行为一致）。
-	local vurl="$1" tarball="$2" file="$3" want got
-	oc_fetch "$vurl/SHASUMS256.txt" "$OC_DL/SHASUMS256.txt" 60 2>/dev/null || return 0
-	want="$(grep "  *$tarball\$" "$OC_DL/SHASUMS256.txt" | awk '{print $1}')"
-	if [ -n "$want" ]; then
-		got="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
-		if [ -n "$got" ] && [ "$got" != "$want" ]; then
-			die "校验和不匹配（$tarball）：期望 $want 实际 $got"
+	#
+	# 比对 SHASUMS256.txt。**fail-closed**：清单拉不到 / 清单里没有该文件 /
+	# 系统缺 sha256sum，一律中止安装。这是可执行文件的完整性校验，静默跳过
+	# 等于把「镜像被换包」变成「装了个能跑的二进制」。
+	#
+	# 唯一的显式出路是 UCI main.allow_unverified_node=1（默认 0）：此时保留
+	# 旧行为放行，但每一条都要在安装日志里写明跳过了什么，事后可追溯。
+	# 校验和不匹配永远中止，不受开关影响。
+	local vurl="$1" tarball="$2" file="$3" want got allow
+	allow="$(uci_get main.allow_unverified_node 0)"
+	case "$allow" in
+		1|true|yes|on) allow=1 ;;
+		*) allow=0 ;;
+	esac
+
+	if ! oc_fetch "$vurl/SHASUMS256.txt" "$OC_DL/SHASUMS256.txt" 60 2>/dev/null; then
+		if [ "$allow" = "1" ]; then
+			ilog "WARN: 无法获取 Node.js 校验清单（$vurl/SHASUMS256.txt），已按 main.allow_unverified_node=1 跳过校验"
+			return 0
 		fi
-		ilog "校验和 OK"
-	else
-		ilog "WARN: SHASUMS256.txt 中没有该文件的记录，跳过校验"
+		die "无法获取 Node.js 校验清单（$vurl/SHASUMS256.txt），已中止安装。确认网络/镜像可用后重试；确需跳过校验请设置 uci set openclaw.main.allow_unverified_node=1"
 	fi
+
+	want="$(grep "  *$tarball\$" "$OC_DL/SHASUMS256.txt" | awk '{print $1}')"
+	if [ -z "$want" ]; then
+		if [ "$allow" = "1" ]; then
+			ilog "WARN: SHASUMS256.txt 中没有 $tarball 的记录，已按 main.allow_unverified_node=1 跳过校验"
+			return 0
+		fi
+		die "Node.js 校验清单（$vurl/SHASUMS256.txt）中没有 $tarball 的记录，已中止安装。确认镜像与版本匹配后重试；确需跳过校验请设置 uci set openclaw.main.allow_unverified_node=1"
+	fi
+
+	if ! command -v sha256sum >/dev/null 2>&1; then
+		if [ "$allow" = "1" ]; then
+			ilog "WARN: 系统缺少 sha256sum，已按 main.allow_unverified_node=1 跳过校验（$tarball）"
+			return 0
+		fi
+		die "系统缺少 sha256sum 工具，无法校验 Node.js 压缩包（$tarball），已中止安装。请先安装 coreutils-sha256sum（或 busybox 的 sha256sum）后重试；确需跳过校验请设置 uci set openclaw.main.allow_unverified_node=1"
+	fi
+
+	got="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
+	if [ -z "$got" ]; then
+		die "无法计算校验和（$file）：sha256sum 执行失败或文件不可读"
+	fi
+	if [ "$got" != "$want" ]; then
+		die "校验和不匹配（$tarball）：期望 $want 实际 $got"
+	fi
+	ilog "校验和 OK"
 	return 0
 }
 
@@ -422,6 +457,10 @@ install_node_global() {
 		else
 			[ -e "$dest" ] && { ilog "缓存的压缩包已损坏，重新下载：$dest"; rm -f "$dest"; }
 			oc_need_space "$BASE_DIR" 200 || die "空间不足以下载 Node.js（需要约 200MB）"
+			# Node.js 压缩包解压后就是会被执行的二进制，所以这里用 strict：
+			# 明文 http 一律拒绝（除非显式打开 main.allow_http_binaries）。
+			# 拒绝原因由 oc_safe_url 打印（含可操作的修复提示），这里只负责中止。
+			oc_safe_url "$url" strict || die "Node.js 下载被拒绝：$url"
 			# 心跳里带上 $dest 的当前大小：慢网下能看出是在下还是没动。
 			run_with_heartbeat "下载 Node.js $NODE_V" --watch "$dest" -- \
 				oc_download "$url" "$dest" "下载 Node.js $NODE_V" 600 \
@@ -498,6 +537,8 @@ install_node() {
 		else
 			[ -e "$dest" ] && { ilog "缓存的压缩包已损坏，重新下载：$dest"; rm -f "$dest"; }
 			oc_need_space "$BASE_DIR" 200 || die "空间不足以下载 Node.js（需要约 200MB）"
+			# 同 install_node_global：可执行文件只走 https。
+			oc_safe_url "$url" strict || die "Node.js 下载被拒绝：$url"
 			# 心跳里带上 $dest 的当前大小：慢网下能看出是在下还是没动。
 			run_with_heartbeat "下载 Node.js $NODE_V" --watch "$dest" -- \
 				oc_download "$url" "$dest" "下载 Node.js $NODE_V" 600 \

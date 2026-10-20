@@ -18,6 +18,13 @@ config main 'main'
 	option npm_registry ''
 	option node_mirror ''
 	option http_proxy ''
+	# Node.js 压缩包的 SHA256 校验是强制的：校验清单拉不到、清单里没有该文件、
+	# 或系统缺少 sha256sum，安装都会中止。只有明确接受「可能装到被替换的二进制」
+	# 这一风险时，才把它置 1 跳过校验（每次跳过都会写进安装日志）。
+	option allow_unverified_node '0'
+	# 下载可执行文件（Node.js 运行时）只允许 https。内网镜像只有明文 http 时，
+	# 置 1 才会降级放行，并在安装日志里告警一次。
+	option allow_http_binaries '0'
 	option preinstall_providers 'deepseek'
 	# 安装成功后自动启动服务（1=设置开机自启并启动，0=装完保持停止，稍后手动启动）
 	option auto_start '1'
