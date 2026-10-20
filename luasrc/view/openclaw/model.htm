@@ -123,6 +123,10 @@
 .oc-row-fixed>.oc-pill{justify-self:start;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .oc-row-fixed>button,.oc-row-fixed>.oc-btn{justify-self:end;min-width:76px;text-align:center}
 .oc-row-fixed>.oc-hint{grid-column:2 / -1;width:auto;margin:0}
+/* 版本选择器：外层容器当网格项，里面是下拉或手填框（二者互斥显示） */
+.oc-row-fixed>.oc-pick{min-width:0}
+.oc-pick{display:block;min-width:0}
+.oc-pick>select,.oc-pick>input[type=text]{width:100%;max-width:none;min-width:0}
 
 /* 行内横向组合（输入框 + 复制按钮等） */
 .oc-inline{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
@@ -274,8 +278,6 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   <ul class="oc-list">
     <li>模型清单优先级：<b>已填 API Key</b> 时直接向该服务商的上游查询；<b>未填 Key</b> 时查询公开模型目录（OpenRouter，无需鉴权）；两者都失败才回退到内置精选预设。每次拉取后都会标明当前清单来自哪一级。</li>
     <li>点击绿色按钮会依次完成：<b>安装该服务商官方插件</b> → <b>写入 API Key</b>（<code>~/.openclaw/.env</code> 与配置）→ <b>设为默认模型</b> → 重启网关。</li>
-    <li><b>DeepSeek</b> 由官方插件 <code>@openclaw/deepseek-provider</code> 提供，默认模型 <code>deepseek/deepseek-v4-flash</code>。</li>
-    <li><b>Z.AI（GLM / 智谱）</b> 为 OpenClaw 内置 provider（<code>zai</code>），默认模型 <code>zai/glm-5.3</code>，支持国际 / 国内 / Coding Plan 端点。</li>
     <li>标记说明：<span class="oc-tag ok">内置</span> 无需插件 · <span class="oc-tag">需插件</span> 会自动安装 · <span class="oc-tag ok">已配置</span> 已写入过配置。</li>
   </ul>
 </div>
@@ -288,6 +290,7 @@ var API = {
   models_url: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","models_url")%>',
   apply:    '<%=luci.dispatcher.build_url("admin","services","openclaw","api","apply")%>',
   run:      '<%=luci.dispatcher.build_url("admin","services","openclaw","api","run")%>',
+  model_current: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","model_current")%>',
   service:  '<%=luci.dispatcher.build_url("admin","services","openclaw","api","service")%>'
 };
 var CATALOG = [];
@@ -331,8 +334,12 @@ function curProvider(){
 }
 
 function loadCurrent(){
-  get(API.run + '?cmd=models%20current', function(r){
-    $('cur-model').textContent = (r.output||'').trim() || '(未设置)';
+  // 直接读配置里的默认模型（后端 models.sh current 不启动 CLI）。
+  // 早先这里走的是 `openclaw models current`，而部分 OpenClaw 版本没有这个
+  // 子命令 —— 页面上「当前生效」显示的是一整段报错文字。
+  get(API.model_current, function(r){
+    var v = (r && r.current) ? String(r.current).replace(/^\s+|\s+$/g, '') : '';
+    $('cur-model').textContent = v || '(未设置)';
   });
 }
 

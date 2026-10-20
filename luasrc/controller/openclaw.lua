@@ -42,6 +42,7 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "save"},      call("api_save")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "presets"},   call("api_presets")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "models"},    call("api_models")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "model_current"}, call("api_model_current")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "models_url"}, call("api_models_url")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "apply"},     call("api_apply")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "run"},       call("api_run")).leaf = true
@@ -361,6 +362,14 @@ function api_models()
 	out({ ok = true, data = r })
 end
 
+function api_model_current()
+	-- 当前默认模型：models.sh current 直接读 state_dir/openclaw.json 的
+	-- agents.defaults.model.primary，不启动 CLI。
+	-- 曾经这里是 api_run 的 `models current`，而 openclaw 的部分版本没有这个
+	-- 子命令，页面上于是显示成一段报错文字（还带着 WARN 前缀）。
+	out({ ok = true, current = sh("/usr/libexec/openclaw/models.sh current") })
+end
+
 -- 上游模型列表：models.sh models-url <provider> 自己解析 Base URL 与 .env 里的
 -- Key（Key 只经 curl --config - 的 stdin 传递），stdout 只有一行 JSON。
 -- provider 会被拼进 shell 命令，也会被 helper 用来拼 .env 变量名，所以先按
@@ -428,7 +437,14 @@ local RUN_CMDS = {
 	update = true, models = true, plugins = true, channels = true,
 	gateway = true, config = true, agents = true, sessions = true,
 	cron = true, skills = true, logs = true, onboard = true,
-	message = true, memory = true, workspace = true
+	message = true, memory = true, workspace = true,
+	-- 2026-10-20 补充：都是"看"为主的子命令。判断标准是
+	-- 「能不能通过它把任意命令塞进 shell」——这些都不能，参数仍逐 token 过 q()。
+	providers = true,  -- 列出已知的模型服务商
+	tools = true,      -- 列出可用工具（排查工具调用时最常用）
+	mcp = true,        -- 列出 / 增删 MCP 服务器（本地配置，可回退）
+	devices = true,    -- 局域网配对：list 只读，approve 与设置页的按钮等价
+	["--version"] = true, ["--help"] = true   -- 不带子命令的两种常规问法
 }
 
 function api_run()

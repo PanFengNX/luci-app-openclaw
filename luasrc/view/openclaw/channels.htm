@@ -123,6 +123,10 @@
 .oc-row-fixed>.oc-pill{justify-self:start;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .oc-row-fixed>button,.oc-row-fixed>.oc-btn{justify-self:end;min-width:76px;text-align:center}
 .oc-row-fixed>.oc-hint{grid-column:2 / -1;width:auto;margin:0}
+/* 版本选择器：外层容器当网格项，里面是下拉或手填框（二者互斥显示） */
+.oc-row-fixed>.oc-pick{min-width:0}
+.oc-pick{display:block;min-width:0}
+.oc-pick>select,.oc-pick>input[type=text]{width:100%;max-width:none;min-width:0}
 
 /* 行内横向组合（输入框 + 复制按钮等） */
 .oc-inline{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}

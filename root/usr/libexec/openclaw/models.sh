@@ -22,10 +22,23 @@ oc_env() {
 }
 
 oc_run() {
-	# oc_run <timeout> <args...>
+	# oc_run <timeout> <args...> —— 合并 stderr（给人看的场景用）
+	#
+	# 用 oc_timeout 而不是裸 timeout：部分 busybox 没有 timeout 命令，
+	# 裸调会把 "timeout: not found" 打进输出 —— 而被 2>&1 合并后，这行错误
+	# 会被下游当成"模型 id"（真机上出现过 /usr/libexec/openclaw/models.sh: 27:
+	# found 这种下拉项）。oc_timeout 缺失时会告警到 stderr 并直接执行。
 	local t="$1"; shift
 	HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-		timeout "$t" "$(oc_oc_bin)" "$@" 2>&1
+		oc_timeout "$t" "$(oc_oc_bin)" "$@" 2>&1
+}
+
+oc_run_q() {
+	# oc_run_q <timeout> <args...> —— **丢弃 stderr**，只留 stdout。
+	# 凡是"解析输出"的地方都必须用它：CLI 的报错、本插件的 WARN 都不是数据。
+	local t="$1"; shift
+	HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+		oc_timeout "$t" "$(oc_oc_bin)" "$@" 2>/dev/null
 }
 
 preset_ids() {
@@ -330,12 +343,26 @@ live_models() {
 	# live_models <provider>
 	[ -x "$(oc_oc_bin)" ] || return 0
 	local out
-	out="$(oc_run 20 models list --all --provider "$1")"
-	[ -n "$out" ] || out="$(oc_run 20 models list --provider "$1")"
+	out="$(oc_run_q 20 models list --all --provider "$1")"
+	[ -n "$out" ] || out="$(oc_run_q 20 models list --provider "$1")"
 	[ -n "$out" ] || return 0
-	printf '%s' "$out" | grep -o '[A-Za-z0-9._:/-]*' | \
-		awk 'length($0) < 3 { next } /^(id|name|model|provider|models|all|list)$/ { next } { print }' | \
-		sort -u
+	# 只认"像模型 id"的 token：必须有字母、不含路径片段、不以冒号结尾。
+	# 宁可少列几个，也不能把 CLI 的报错文字当成模型塞进下拉框 —— 用户会以为
+	# 那是能选的模型，选中后必然失败。
+	printf '%s' "$out" | \
+		grep -viE 'not found|no command|Try:|Docs:|Usage:|command not found|Permission denied' | \
+		grep -v '^/' | \
+		grep -o '[A-Za-z0-9][A-Za-z0-9._:/-]*' | \
+		awk -v prov="$1" '
+			length($0) < 3 { next }
+			$0 ~ /[A-Z]/ { next }          # 模型 id 全是小写，大写只可能来自报错文字
+			$0 ~ /\// && $0 !~ /^[a-z0-9._-]+\/[a-z0-9._:-]+$/ { next }
+			$0 ~ /\.sh$/ || $0 ~ /:$/ { next }
+			$0 !~ /[a-z]/ { next }
+			$0 == prov { next }
+			$0 ~ /^(id|name|model|models|provider|providers|all|list|true|false|null|default|none|help|usage|error|warn|warning|command|docs|https|current|openclaw)$/ { next }
+			{ print }
+		' | sort -u
 }
 
 live_models_of() {

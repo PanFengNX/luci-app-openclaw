@@ -5,6 +5,10 @@
 #   * OpenClaw releases + required Node.js range -> npm registry (official package)
 #   * Node.js runtimes (musl only; OpenWrt has no glibc) -> unofficial-builds.nodejs.org
 #
+# 两个数据源都有国内镜像兜底（各回退一次）：npm 用 registry.npmmirror.com，
+# Node 用 registry.npmmirror.com/-/binary/node-unofficial-builds —— 后者镜像的是
+# **同一棵 unofficial-builds 树**，含 linux-*-musl tarball，不是 glibc 构建。
+#
 # Output is JSON so the LuCI controller can pass it straight through.
 
 OC_LIB="$(dirname "$0")/lib.sh"
@@ -32,6 +36,13 @@ NPM_ACCEPT='application/vnd.npm.install-v1+json'
 # 绝不写回 main.npm_registry —— 那是用户在 LuCI 里的设置。
 OC_MIRROR_REGISTRY="https://registry.npmmirror.com"
 
+# Node.js 国内镜像。npmmirror 镜像的是**整棵 unofficial-builds 树**（不是
+# nodejs.org 的 glibc 发布树）：index.json 与官方同尺寸，且带 linux-x64-musl /
+# linux-arm64-musl / linux-loong64 等条目，tarball 也照发。所以 musl 设备可以
+# 安全地用它兜底 —— 版本号与下载地址都还是同一棵树里的同一批文件。
+# 同样只用于本次请求，绝不写回 main.node_mirror。
+OC_MIRROR_NODE="https://registry.npmmirror.com/-/binary/node-unofficial-builds"
+
 npm_registry() {
 	local r
 	r="$(uci_get main.npm_registry '')"
@@ -54,29 +65,142 @@ node_url_is_glibc() {
 	return 1
 }
 
-node_base_url() {
-	# base url serving index.json + <version>/node-v<version>-linux-<arch>*.tar.xz
-	local m
-	m="$(uci_get main.node_mirror '')"
-	if [ -n "$m" ]; then
-		m="${m%/}"
-		# user supplied in LuCI; fall back to the official mirror when unsafe
-		if oc_safe_url "$m"; then
-			# OpenWrt is musl-only: the official nodejs.org release trees have
-			# no musl builds, so honouring this value would install a node that
-			# cannot even start (no ld-linux). Ignore it and use the musl source.
-			if oc_is_musl && node_url_is_glibc "$m"; then
-				oc_warn "配置的 Node 源指向 glibc 构建（$m），OpenWrt 无 glibc，已改用 musl 源"
-			else
-				printf '%s' "$m"; return
-			fi
-		fi
-	fi
+# main.node_mirror 的有效值（进程内只算一次，见 node_mirror_user_load）。
+OC_NODE_MIRROR_USER=""
+OC_NODE_MIRROR_USER_SET=0
+
+node_base_default() {
+	# 内置基址：musl -> unofficial-builds（唯一发布 musl 构建的树），其余 -> nodejs.org
 	if oc_is_musl; then
 		printf 'https://unofficial-builds.nodejs.org/download/release'
 	else
 		printf 'https://nodejs.org/dist'
 	fi
+}
+
+node_base_fallback() {
+	# 官方基址不可达时的兜底基址。
+	#
+	# 只在 musl 上返回镜像：npmmirror 那棵树只提供 linux-*-musl（以及 loong64）
+	# 构建，非 musl 机器用它只会拿到不存在的 tarball。非 musl 返回空串 = 不兜底。
+	if oc_is_musl; then
+		printf '%s' "$OC_MIRROR_NODE"
+	fi
+}
+
+node_mirror_user_load() {
+	# 计算并记忆 main.node_mirror 的有效值，结果放在全局 OC_NODE_MIRROR_USER。
+	#
+	# 为什么不用 `$(node_mirror_user)` 取值：命令替换是子 shell，记忆在里面
+	# 丢掉，一次 status 请求会重复读 UCI、重复打印 glibc 告警。需要值的调用方
+	# 直接读全局（或调用 node_mirror_user）。
+	#
+	# 输出空 = 未设置 / 不安全 / 在 musl 上指向 glibc 树，调用方可以兜底；
+	# 输出非空 = 用户自己选了源，兜底一律不做。
+	[ "${OC_NODE_MIRROR_USER_SET:-0}" = "1" ] && return 0
+	local m
+	m="$(uci_get main.node_mirror '')"
+	if [ -n "$m" ]; then
+		m="${m%/}"
+		# user supplied in LuCI; never hand an arbitrary string to curl
+		if ! oc_safe_url "$m"; then
+			m=""
+		elif oc_is_musl && node_url_is_glibc "$m"; then
+			# OpenWrt is musl-only: the official nodejs.org release trees have no
+			# musl builds, so honouring this value would install a node that
+			# cannot even start (no ld-linux). Ignore it and use the musl source.
+			oc_warn "配置的 Node 源指向 glibc 构建（$m），OpenWrt 无 glibc，已改用 musl 源"
+			m=""
+		fi
+	fi
+	OC_NODE_MIRROR_USER="$m"
+	OC_NODE_MIRROR_USER_SET=1
+	return 0
+}
+
+node_mirror_user() {
+	# stdout: main.node_mirror 的有效值（可能为空）。需要判断「用户是否显式设了
+	# 源」的调用方请先 node_mirror_user_load，然后读 $OC_NODE_MIRROR_USER ——
+	# 命令替换会开子 shell，记忆带不回来。
+	node_mirror_user_load
+	printf '%s' "$OC_NODE_MIRROR_USER"
+}
+
+node_base_allowed() {
+	# node_base_allowed <base> -> 0 仅当它是本脚本自己写下的两个基址之一。
+	#
+	# node-base.tsv 里的值会被当作下载地址的前缀（install.sh 用它拼 tarball
+	# URL），而缓存文件在磁盘上 —— 只认白名单，绝不接受任意字符串。
+	case "${1%/}" in
+		"$OC_MIRROR_NODE"|https://unofficial-builds.nodejs.org/download/release|https://nodejs.org/dist)
+			return 0 ;;
+	esac
+	return 1
+}
+
+node_base_save() {
+	# node_base_save <base> —— 记下「上一次成功拉到索引的基址」。
+	# 白名单之外的值（例如用户自填的镜像）直接忽略：那种基址不需要记住。
+	local b="${1%/}"
+	node_base_allowed "$b" || return 1
+	mkdir -p "$OC_CACHE_DIR" 2>/dev/null || return 1
+	printf '%s\n' "$b" >"$OC_CACHE_DIR/node-base.tsv" 2>/dev/null || return 1
+	return 0
+}
+
+node_base_saved() {
+	# node_base_saved -> 上一次成功的基址（没有 / 不在白名单时输出空）
+	local b
+	b="$(cat "$OC_CACHE_DIR/node-base.tsv" 2>/dev/null)"
+	b="${b%/}"
+	[ -n "$b" ] || return 0
+	node_base_allowed "$b" || return 0
+	printf '%s' "$b"
+}
+
+node_source_of() {
+	# node_source_of <base> -> official | mirror（沿用 npm 那套字段名）
+	case "${1%/}" in
+		"$OC_MIRROR_NODE") printf 'mirror' ;;
+		*) printf 'official' ;;
+	esac
+}
+
+node_source_save() {
+	# node_source_save <official|mirror> —— 缓存命中（不联网）时仍能如实报来源
+	case "${1:-}" in
+		official|mirror) printf '%s\n' "$1" >"$OC_CACHE_DIR/node-source.tsv" 2>/dev/null || true ;;
+	esac
+}
+
+node_source_saved() {
+	local s
+	s="$(cat "$OC_CACHE_DIR/node-source.tsv" 2>/dev/null)"
+	case "$s" in
+		official|mirror) printf '%s' "$s" ;;
+	esac
+}
+
+node_base_url() {
+	# base url serving index.json + <version>/node-v<version>-linux-<arch>*.tar.xz
+	#
+	# 优先级（列表与下载共用同一个基址 —— 只让列表走镜像是不够的：列表能拉到、
+	# 点升级时 tarball 却从不可达的官方站下，用户会以为升级按钮坏了）：
+	#   1. main.node_mirror   用户显式设置，保持原语义与 glibc 拦截
+	#   2. node-base.tsv      上一次成功拉到索引的基址
+	#   3. 内置默认           musl -> unofficial-builds，其余 -> nodejs.org
+	local s
+	node_mirror_user_load
+	if [ -n "$OC_NODE_MIRROR_USER" ]; then
+		printf '%s' "$OC_NODE_MIRROR_USER"
+		return
+	fi
+	s="$(node_base_saved)"
+	if [ -n "$s" ]; then
+		printf '%s' "$s"
+		return
+	fi
+	node_base_default
 }
 
 cache_get() {
@@ -392,8 +516,12 @@ oc_engines_of() {
 
 # ---------------------------------------------------------------- Node.js
 node_index_url() {
-	# every mirror (official + npmmirror) serves the release index at <base>/index.json
-	printf '%s/index.json' "$(node_base_url)"
+	# node_index_url [base] —— every mirror (official + npmmirror) serves the
+	# release index at <base>/index.json. 基址与路径只在这里拼一次，兜底时
+	# 两个候选共用同一段代码，不会拼出两种形状。
+	local b="${1:-}"
+	[ -n "$b" ] || b="$(node_base_url)"
+	printf '%s/index.json' "${b%/}"
 }
 
 node_arch_suffix() {
@@ -448,18 +576,55 @@ node_emit_versions() {
 	printf ']'
 }
 
+# ---------------------------------------------------------------- Node.js fetch
+# 本轮取数的状态。与 npm 侧共用 OC_V_R1 / OC_V_R2 / OC_V_TMP 这几个全局，
+# 两个列表函数各自在入口重置，不会互相串。
+OC_NODE_BASE_OK=""	# 本次成功拉到索引的基址（写进 node-base.tsv）
+
+node_try_fetch() {
+	# node_try_fetch <base> <slot>  slot = 1|2
+	#   成功: OC_V_TMP / OC_V_URL / OC_NODE_BASE_OK 就位，返回 0
+	#   失败: 对应 OC_V_R<slot> 记下原因，返回 1
+	local base="${1%/}" slot="$2" url tmp rc reason
+	url="$(node_index_url "$base")"
+	tmp="$(mktemp "${OC_CACHE_DIR}/node.XXXXXX" 2>/dev/null || echo "${OC_CACHE_DIR}/node.$$")"
+
+	# 必须走 oc_fetch：只有它会读 main.http_proxy 并加 -x / 导出 http_proxy。
+	oc_fetch "$url" "$tmp" "$OC_FETCH_MT"
+	rc=$?
+	if [ "$rc" -eq 0 ] && [ -s "$tmp" ]; then
+		OC_V_TMP="$tmp"
+		OC_V_URL="$url"
+		OC_NODE_BASE_OK="$base"
+		return 0
+	fi
+	rm -f "$tmp"
+	if [ "$rc" -eq 0 ]; then
+		reason="下载失败：返回内容为空（$url）"
+	else
+		reason="$(fetch_fail_reason "$rc" "$url")"
+	fi
+	if [ "$slot" = "2" ]; then
+		OC_V_R2="$reason"
+	else
+		OC_V_R1="$reason"
+	fi
+	return 1
+}
+
 node_versions_json() {
 	# JSON array of {"version":"v26.11.1","num":"26.11.1","lts":"Jod"}
 	#
 	# 与 oc_versions_json 同一套约定：stdout 仍是 JSON 数组，失败原因写进
 	# OC_V_ERROR，由 status 子命令汇总。
-	local f rc url reason
+	local f base fb reason
 	OC_V_OK=0; OC_V_CACHED=0; OC_V_COUNT=0; OC_V_ERROR=""; OC_V_SOURCE=""
+	OC_V_TMP=""; OC_V_URL=""; OC_V_R1=""; OC_V_R2=""; OC_NODE_BASE_OK=""
 	mkdir -p "$OC_CACHE_DIR" 2>/dev/null || true
-	url="$(node_index_url)"
 
 	if [ "${1:-}" != "refresh" ] && [ -s "$OC_CACHE_DIR/node-versions.tsv" ]; then
 		OC_V_CACHED=1
+		OC_V_SOURCE="$(node_source_saved)"
 	else
 		reason=""
 		if [ "${1:-}" != "refresh" ]; then
@@ -471,15 +636,34 @@ node_versions_json() {
 			return 1
 		fi
 
-		f="$(mktemp "${OC_CACHE_DIR}/node.XXXXXX" 2>/dev/null || echo "${OC_CACHE_DIR}/node.$$")"
-		# Node.js 不做国内镜像回退，这是刻意的：
-		#   * OpenWrt 是 musl 平台，musl 版 Node 只由 unofficial-builds.nodejs.org
-		#     发布；npmmirror 镜像的是官方 nodejs.org 的 glibc 构建树。
-		#   * 把 glibc 版本号塞进 musl 机器的下拉框，用户选中后下载必然失败
-		#     （没有对应 tarball / 下载下来也起不来），比「拉不到列表」更糟。
-		# 所以这里保持原行为：给出清晰原因，用户仍可手动填写版本号。
-		oc_fetch "$url" "$f" "$OC_FETCH_MT"; rc=$?
-		if [ "$rc" -eq 0 ] && [ -s "$f" ]; then
+		# 先试当前基址（用户设置 > 上次成功的基址 > 内置默认），失败再兜底一次。
+		#
+		# 为什么兜底：真机上 unofficial-builds.nodejs.org 会 TLS 握手失败
+		# （curl 35），而 npmmirror 镜的是同一棵 unofficial-builds 树、带 musl
+		# 构建 —— 版本号与 tarball 都是同一批文件，不存在「版本对不上」的风险。
+		#
+		# 用户显式设置过 main.node_mirror 时不兜底：那是用户的决定，失败就如实
+		# 报错（错误里会提示可以换源）。
+		base="$(node_base_url)"
+		if ! node_try_fetch "$base" 1; then
+			fb=""
+			# 读全局而不是 $(node_mirror_user)：命令替换是子 shell，UCI 会被
+			# 重复读、glibc 告警会重复打印。
+			node_mirror_user_load
+			if [ -z "$OC_NODE_MIRROR_USER" ]; then
+				fb="$(node_base_fallback)"
+				# 上次成功的基址就是镜像时，兜底基址与它相同：改试内置默认，
+				# 否则会对着同一个 URL 白等两次，还永远试不到官方源。
+				if [ -n "$fb" ] && [ "$fb" = "$base" ]; then
+					fb="$(node_base_default)"
+				fi
+				[ "$fb" = "$base" ] && fb=""
+				[ -n "$fb" ] && node_try_fetch "$fb" 2
+			fi
+		fi
+
+		f="$OC_V_TMP"
+		if [ -n "$f" ] && [ -s "$f" ]; then
 			# 同 oc-versions：先写临时文件、确认非空再替换缓存。
 			node_parse_list <"$f" >"$OC_CACHE_DIR/node-versions.tsv.new" 2>/dev/null
 			if [ -s "$OC_CACHE_DIR/node-versions.tsv.new" ]; then
@@ -487,19 +671,30 @@ node_versions_json() {
 				node_lts_list <"$f" >"$OC_CACHE_DIR/node-lts.tsv" 2>/dev/null || true
 				rm -f "$f"
 				fail_clear "$OC_FAIL_NODE"
+				# 列表与下载必须共用基址：记下这次能用的那个，install.sh 的
+				# node_base_url() 会直接读到它。
+				node_base_save "$OC_NODE_BASE_OK"
+				OC_V_SOURCE="$(node_source_of "$OC_NODE_BASE_OK")"
+				node_source_save "$OC_V_SOURCE"
 			else
 				# 索引本身有版本条目、但没有本机架构的构建：不是解析失败，
 				# 而是这台设备装不了，两种原因要分开说。
 				if grep -q '"version"' "$f" 2>/dev/null; then
 					OC_V_ERROR="没有适用于本机架构（$(node_arch_suffix)）的 Node.js 构建"
 				else
-					OC_V_ERROR="解析失败：返回内容不是 Node.js 版本索引（$url）"
+					OC_V_ERROR="解析失败：返回内容不是 Node.js 版本索引（${OC_V_URL:-$base}）"
 				fi
 				rm -f "$f" "$OC_CACHE_DIR/node-versions.tsv.new"
 			fi
 		else
-			rm -f "$f"
-			OC_V_ERROR="$(fetch_fail_reason "$rc" "$url")"
+			# 两个源都失败时把两边的 URL 都带上（与 npm 侧同一口径）：
+			# 只报最后一个会让人以为官方源没试过，或者以为问题只出在镜像。
+			OC_V_ERROR="$(oc_fetch_err_text)"
+			# 用户显式设了源时我们刻意没兜底：说清楚这一点，否则失败信息
+			# 看起来和「镜像也没试过」一样，用户不知道还能换源。
+			if [ -n "$OC_NODE_MIRROR_USER" ]; then
+				OC_V_ERROR="$OC_V_ERROR（当前使用设置里指定的 Node 源，未自动切换；可在设置中换源后重试）"
+			fi
 		fi
 
 		if [ -n "$OC_V_ERROR" ]; then
@@ -589,7 +784,7 @@ versions_status_json() {
 	# 例如旧版本留下的缓存）。前端据此显示「已尝试国内镜像」提示。
 	# 不额外联网：两个列表函数自己决定要不要拉取（缓存命中时纯本地）。
 	# 本函数只往 stdout 写这一行，日志一律走 stderr —— 控制器只取 stdout。
-	local oc_ok oc_cnt oc_cached oc_err oc_src nd_ok nd_cnt nd_cached nd_err reason
+	local oc_ok oc_cnt oc_cached oc_err oc_src nd_ok nd_cnt nd_cached nd_err nd_src reason
 
 	oc_versions_json >/dev/null 2>&1
 	oc_ok="$OC_V_OK"; oc_cnt="$OC_V_COUNT"; oc_cached="$OC_V_CACHED"
@@ -597,6 +792,7 @@ versions_status_json() {
 
 	node_versions_json >/dev/null 2>&1
 	nd_ok="$OC_V_OK"; nd_cnt="$OC_V_COUNT"; nd_cached="$OC_V_CACHED"; nd_err="$OC_V_ERROR"
+	nd_src="$OC_V_SOURCE"
 
 	# 刷新失败后 60 秒内必须如实回报失败：控制器一次请求里先调 oc-versions
 	# （刷新失败时回退到旧缓存、ok=1），再调 status —— 不在这里覆盖，用户点
@@ -604,12 +800,13 @@ versions_status_json() {
 	reason="$(fail_recent "$OC_FAIL_OC")" && { oc_ok=0; oc_err="$reason"; }
 	reason="$(fail_recent "$OC_FAIL_NODE")" && { nd_ok=0; nd_err="$reason"; }
 
-	printf '{"oc":{"ok":%s,"count":%s,"cached":%s,"source":"%s","error":"%s"},"node":{"ok":%s,"count":%s,"cached":%s,"error":"%s"}}\n' \
+	printf '{"oc":{"ok":%s,"count":%s,"cached":%s,"source":"%s","error":"%s"},"node":{"ok":%s,"count":%s,"cached":%s,"source":"%s","error":"%s"}}\n' \
 		"$([ "$oc_ok" = "1" ] && printf true || printf false)" "$oc_cnt" \
 		"$([ "$oc_cached" = "1" ] && printf true || printf false)" "$(oc_json_str "$oc_src")" \
 		"$(oc_json_str "$oc_err")" \
 		"$([ "$nd_ok" = "1" ] && printf true || printf false)" "$nd_cnt" \
-		"$([ "$nd_cached" = "1" ] && printf true || printf false)" "$(oc_json_str "$nd_err")"
+		"$([ "$nd_cached" = "1" ] && printf true || printf false)" "$(oc_json_str "$nd_src")" \
+		"$(oc_json_str "$nd_err")"
 }
 
 # ---------------------------------------------------------------- cli

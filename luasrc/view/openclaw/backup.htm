@@ -123,6 +123,10 @@
 .oc-row-fixed>.oc-pill{justify-self:start;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .oc-row-fixed>button,.oc-row-fixed>.oc-btn{justify-self:end;min-width:76px;text-align:center}
 .oc-row-fixed>.oc-hint{grid-column:2 / -1;width:auto;margin:0}
+/* 版本选择器：外层容器当网格项，里面是下拉或手填框（二者互斥显示） */
+.oc-row-fixed>.oc-pick{min-width:0}
+.oc-pick{display:block;min-width:0}
+.oc-pick>select,.oc-pick>input[type=text]{width:100%;max-width:none;min-width:0}
 
 /* 行内横向组合（输入框 + 复制按钮等） */
 .oc-inline{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
@@ -680,6 +684,7 @@ var CL = {
   cliUpdateTo: '',     // cli-check 探测到的可更新版本（空 = 未知 / 已最新）
   cliLatest: '',       // 最近一次 cli-check 的 latest（只用于展示）
   cliWarn: '',         // 更新后要保留在第一步错误区的 warn（clStatus 会清空该区）
+  cliAutoChecked: false, // 进入页面时是否已自动检查过组件更新（只自动查一次）
   schBusy: false,      // 定时设置保存中（只影响定时区块）
   schNote: ''          // 保存成功后的一句说明
 };
@@ -885,6 +890,12 @@ function clStatus(){
     clRender();
     if (CL.installed && CL.logged) clLoadList();
     else clEmptyList(CL.installed ? '请先登录百度网盘' : '请先安装组件');
+    // 到达页面就自动查一次组件更新（只读探测，不下载）。
+    // 装好且可执行才查：文件缺失时"有没有新版本"没有意义。
+    if (CL.installed && CL.executable && !CL.cliAutoChecked && !CL.busy){
+      CL.cliAutoChecked = true;
+      clCliCheck(true);
+    }
   });
 }
 
@@ -1495,27 +1506,42 @@ function clInstall(){
 // ---------------------------------------------------------------- 第一步：检查更新 / 更新组件
 // cli-check 只探测官方 CDN 上的可用版本（不下载），cli-update 会重新下载
 // 并安装组件。登录态与加密口令在独立目录，更新器不写不删。
-function clCliCheck(){
+// quiet = true 时是"进入页面自动检查"：不改按钮状态、失败也不往错误区写红字，
+// 只在药丸位置留一句「无法检查更新」—— 自动检查不该在用户还没动手时就报错。
+function clCliCheck(quiet){
   var btn = $('btn-cl-cli-check');
   var old = btn.textContent;
-  CL.busy = true;
-  CL.cliWarn = '';
-  clErr('cl-err1', '');
-  btn.textContent = '检查中…';
-  clRender();
+  var pill = $('cl-step1-pill');
+  quiet = (quiet === true);
+  if (!quiet){
+    CL.busy = true;
+    CL.cliWarn = '';
+    clErr('cl-err1', '');
+    btn.textContent = '检查中…';
+    clRender();
+  } else if (pill){
+    pill.style.display = '';
+    pill.className = 'oc-pill';
+    pill.textContent = '检查中…';
+  }
 
   get(API.cloud_cli_check, function(r){
-    CL.busy = false;
-    btn.textContent = old;
-    clRender();
+    if (!quiet){
+      CL.busy = false;
+      btn.textContent = old;
+      clRender();
+    }
     if (!r || !r.ok){
+      if (quiet){
+        if (pill){ pill.style.display = ''; pill.className = 'oc-pill'; pill.textContent = '无法检查更新'; }
+        return;
+      }
       clErr('cl-err1', '检查更新失败：' + ((r && r.error) || '未知错误') + clNet(r));
       return;
     }
     var d = r.data || {};
     var latest = clVersion(d.latest);
     CL.cliLatest = latest;
-    var pill = $('cl-step1-pill');
     if (d.update === true && latest){
       // 有更新：提示可更新，并把「更新组件」按钮切到「更新到 vX」。
       CL.cliUpdateTo = latest;

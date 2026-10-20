@@ -123,6 +123,10 @@
 .oc-row-fixed>.oc-pill{justify-self:start;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .oc-row-fixed>button,.oc-row-fixed>.oc-btn{justify-self:end;min-width:76px;text-align:center}
 .oc-row-fixed>.oc-hint{grid-column:2 / -1;width:auto;margin:0}
+/* 版本选择器：外层容器当网格项，里面是下拉或手填框（二者互斥显示） */
+.oc-row-fixed>.oc-pick{min-width:0}
+.oc-pick{display:block;min-width:0}
+.oc-pick>select,.oc-pick>input[type=text]{width:100%;max-width:none;min-width:0}
 
 /* 行内横向组合（输入框 + 复制按钮等） */
 .oc-inline{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
@@ -257,14 +261,20 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   <div class="oc-row oc-row-fixed">
     <label>OpenClaw</label>
     <span class="oc-pill" id="up-oc-cur">-</span>
-    <input type="text" id="oc-ver-input" placeholder="latest 或 2026.10.4">
+    <span class="oc-pick">
+      <select id="oc-ver-select"></select>
+      <input type="text" id="oc-ver-input" placeholder="latest 或 2026.10.4" style="display:none">
+    </span>
     <button id="btn-oc-upgrade" class="oc-btn">升级</button>
     <span id="oc-ver-hint" class="oc-hint"></span>
   </div>
   <div class="oc-row oc-row-fixed">
     <label>Node.js</label>
     <span class="oc-pill" id="up-node-cur">-</span>
-    <input type="text" id="node-ver-input" placeholder="例如 v22.22.2，留空=自动">
+    <span class="oc-pick">
+      <select id="node-ver-select"></select>
+      <input type="text" id="node-ver-input" placeholder="例如 v22.22.2，留空=自动" style="display:none">
+    </span>
     <button id="btn-node-upgrade" class="oc-btn">升级</button>
     <span id="node-ver-hint" class="oc-hint"></span>
   </div>
@@ -699,24 +709,99 @@ function nodeUpdateCandidate(){
   return { latest: best, current: cur, engines: engines };
 }
 
-function renderNodeUpdate(){
-  var input = $('node-ver-input'), hint = $('node-ver-hint');
-  if (!input || !hint) return;
-  var c = nodeUpdateCandidate();
-  if (!c){
-    // 没有候选版本：只撤掉上一次自己预填的值，用户手填的内容原样保留。
-    if (state.nodePrefill && input.value === state.nodePrefill) input.value = '';
-    state.nodePrefill = '';
-    hint.textContent = '';
-    return;
+// ------------------------------------------------- 版本选择器
+// 列表能拉到就是下拉（点选），拉不到才退回手填 —— 手填只作为兜底，
+// 因为版本号写错只会在下载阶段报错，而下拉里都是真实存在的版本。
+function fillVerPicker(sel, opts){
+  if (!sel) return;
+  var keep = sel.value;
+  while (sel.firstChild) sel.removeChild(sel.firstChild);
+  for (var i = 0; i < opts.length; i++) sel.appendChild(new Option(opts[i].label, opts[i].value));
+  // 重绘（info 或列表晚到）时保留用户已经选过的值
+  var found = false;
+  for (var j = 0; j < sel.options.length; j++){
+    if (sel.options[j].value === keep){ found = true; break; }
   }
-  var v = 'v' + String(c.latest).replace(/^v/, '');
-  if (!input.value || input.value === state.nodePrefill) input.value = v;
-  state.nodePrefill = v;
+  if (!found && opts.length) sel.value = opts[0].value;
+}
+
+function ocVerOptions(){
+  var cur = String((state.info && state.info.openclaw) || '').replace(/^v/, '');
+  var out = [], seen = {};
+  (state.ocList || []).forEach(function(x){
+    var v = String((x && x.version) || '').replace(/^v/, '');
+    if (!ocSeg4(v) || seen[v]) return;
+    seen[v] = 1;
+    out.push({ value: v, label: v + (v === cur ? '（当前）' : '') });
+  });
+  out.sort(function(a, b){ return cmpVer4(b.value, a.value); });   // 新版本在前
+  return out;
+}
+
+function nodeVerOptions(){
+  var cur = String((state.info && state.info.node) || '').replace(/^v/, '');
+  var rest = [], seen = {};
+  (state.nodeList || []).forEach(function(n){
+    var v = String((n && (n.num || n.version)) || '').replace(/^v/, '');
+    if (!v || seen[v]) return;
+    seen[v] = 1;
+    rest.push({ value: 'v' + v, label: 'v' + v + (v === cur ? '（当前）' : '') });
+  });
+  rest.sort(function(a, b){ return cmpVer(b.value, a.value); });
+  return [{ value: 'auto', label: '自动（推荐：选满足 OpenClaw 要求的最高版本）' }].concat(rest);
+}
+
+// 当前生效的目标版本：下拉可见就取下拉，否则取手填框。
+function pickVer(which){
+  var sel = $(which + '-ver-select'), input = $(which + '-ver-input');
+  if (sel && sel.style.display !== 'none' && sel.options.length) return sel.value;
+  return input ? input.value : '';
+}
+
+// 有列表 → 下拉；没有 → 手填框。返回是否使用了下拉。
+function useVerPicker(which, opts){
+  var sel = $(which + '-ver-select'), input = $(which + '-ver-input');
+  var has = !!(opts && opts.length);
+  if (sel) sel.style.display = has ? '' : 'none';
+  if (input) input.style.display = has ? 'none' : '';
+  if (has) fillVerPicker(sel, opts);
+  return has;
+}
+
+function renderNodeUpdate(){
+  var hint = $('node-ver-hint'), input = $('node-ver-input'), sel = $('node-ver-select');
+  if (!hint) return;
+  var opts = nodeVerOptions();
+  var hasList = (state.nodeList || []).length > 0;
+  useVerPicker('node', hasList ? opts : []);
+  var c = nodeUpdateCandidate();
+
+  if (hasList && sel){
+    // 默认停在「自动」；检测到新版本且用户没手选过时，预选到那个版本。
+    if (c && !state.nodePicked){
+      var want = 'v' + String(c.latest).replace(/^v/, '');
+      for (var i = 0; i < sel.options.length; i++){
+        if (sel.options[i].value === want){ sel.value = want; break; }
+      }
+    }
+    sel.onchange = function(){ state.nodePicked = true; };
+  } else if (input){
+    // 拉不到列表才用手填：沿用原来的预填逻辑
+    if (!c){
+      if (state.nodePrefill && input.value === state.nodePrefill) input.value = '';
+      state.nodePrefill = '';
+    } else {
+      var v = 'v' + String(c.latest).replace(/^v/, '');
+      if (!input.value || input.value === state.nodePrefill) input.value = v;
+      state.nodePrefill = v;
+    }
+  }
   // 服务端数据只进 textContent，绝不拼 HTML
-  hint.textContent = '检测到新版本 v' + String(c.latest).replace(/^v/, '')
-    + '（当前 v' + String(c.current).replace(/^v/, '') + '）'
-    + (c.engines ? '，满足 OpenClaw 要求 ' + c.engines : '');
+  hint.textContent = c
+    ? ('检测到新版本 v' + String(c.latest).replace(/^v/, '')
+       + '（当前 v' + String(c.current).replace(/^v/, '') + '）'
+       + (c.engines ? '，满足 OpenClaw 要求 ' + c.engines : ''))
+    : '';
 }
 
 // ------------------------------------------------- OpenClaw 更新提示
@@ -756,19 +841,30 @@ function ocUpdateCandidate(){
 }
 
 function renderOcUpdate(){
-  var input = $('oc-ver-input'), hint = $('oc-ver-hint');
-  if (!input || !hint) return;
+  var hint = $('oc-ver-hint'), input = $('oc-ver-input'), sel = $('oc-ver-select');
+  if (!hint) return;
+  var opts = ocVerOptions();
+  useVerPicker('oc', opts);
   var c = ocUpdateCandidate();
-  if (!c){
-    if (state.ocPrefill && input.value === state.ocPrefill) input.value = '';
-    state.ocPrefill = '';
-    hint.textContent = '';
-    return;
+
+  if (opts.length && sel){
+    if (c && !state.ocPicked){
+      for (var i = 0; i < sel.options.length; i++){
+        if (sel.options[i].value === c.latest){ sel.value = c.latest; break; }
+      }
+    }
+    sel.onchange = function(){ state.ocPicked = true; };
+  } else if (input){
+    if (!c){
+      if (state.ocPrefill && input.value === state.ocPrefill) input.value = '';
+      state.ocPrefill = '';
+    } else {
+      if (!input.value || input.value === state.ocPrefill) input.value = c.latest;
+      state.ocPrefill = c.latest;
+    }
   }
-  if (!input.value || input.value === state.ocPrefill) input.value = c.latest;
-  state.ocPrefill = c.latest;
   // 服务端数据只进 textContent，绝不拼 HTML
-  hint.textContent = '检测到新版本 v' + c.latest + '（当前 v' + c.current + '）';
+  hint.textContent = c ? ('检测到新版本 v' + c.latest + '（当前 v' + c.current + '）') : '';
 }
 
 // 安装类操作的进度提示：安装日志已移到「设置」页，本页只显示一行状态。
@@ -819,7 +915,9 @@ function startNodeUpdate(){
   var ocdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
   if (!dir){ alert('未获取到安装目录，请到设置页刷新后重试'); return; }
 
-  var raw = verValue($('node-ver-input') ? $('node-ver-input').value : '');
+  var pick = pickVer('node');
+  // 下拉里的「自动」等价于留空（后端按 engines.node 自己挑）
+  var raw = (pick === 'auto') ? '' : verValue(pick);
   if (raw === null){
     stOpSay('Node.js 版本号格式不正确：只接受形如 v22.22.2 的版本号', true);
     return;
@@ -862,7 +960,7 @@ function startOcUpdate(){
   var ocdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
   if (!dir){ alert('未获取到安装目录，请到设置页刷新后重试'); return; }
 
-  var v = verValue($('oc-ver-input') ? $('oc-ver-input').value : '');
+  var v = verValue(pickVer('oc'));
   if (v === null){
     stOpSay('OpenClaw 版本号格式不正确：只接受 latest 或形如 2026.10.4 的版本号', true);
     return;
