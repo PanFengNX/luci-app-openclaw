@@ -609,23 +609,38 @@ function enc(pass) {
 	hdr[6] = VERSION;
 	salt.copy(hdr, 7);
 	iv.copy(hdr, 23);
+	// 先写 <dst>.tmp，回填 auth tag 之后再 rename 成最终名。
+	// 直接写最终名时，tag 区要等密文写完才能 seek 回去回填；这中间被
+	// SIGKILL / 断电，就会留下一个「名字完整、tag 全 0」的成品文件，
+	// 解密必然失败，而且调用方会把它当成功产物继续上传。
+	const tmp = dst + ".tmp";
+	// 目标已存在：沿用原来的 EEXIST 语义（exit 3），调用方据此避免误删别人的文件。
+	if (fs.existsSync(dst)) die("output exists: " + dst, 3);
+	// 上一次异常退出可能在同一私有目录留下 .tmp，先清掉它。
+	// 只动 .tmp，不碰最终名，因此不影响「不覆盖已有备份」的语义。
+	try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (e) {}
 	try {
-		fs.writeFileSync(dst, hdr, { mode: 0o600, flag: "wx" });
+		fs.writeFileSync(tmp, hdr, { mode: 0o600, flag: "wx" });
 	} catch (e) {
 		die("cannot create output: " + e.message, e.code === "EEXIST" ? 3 : 1);
 	}
 	const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
 	const rs = fs.createReadStream(src);
-	const ws = fs.createWriteStream(dst, { flags: "r+", start: HDR });
+	const ws = fs.createWriteStream(tmp, { flags: "r+", start: HDR });
 	pipeline(rs, cipher, ws, function (err) {
 		if (err) {
-			try { fs.unlinkSync(dst); } catch (e2) {}
+			try { fs.unlinkSync(tmp); } catch (e2) {}
 			die("encrypt failed: " + err.message);
 		}
 		let tag;
-		try { tag = cipher.getAuthTag(); } catch (e) { die("no auth tag: " + e.message); }
 		try {
-			const fd = fs.openSync(dst, "r+");
+			tag = cipher.getAuthTag();
+		} catch (e) {
+			try { fs.unlinkSync(tmp); } catch (e2) {}
+			die("no auth tag: " + e.message);
+		}
+		try {
+			const fd = fs.openSync(tmp, "r+");
 			try {
 				fs.writeSync(fd, tag, 0, tag.length, 35);
 				fs.fsyncSync(fd);
@@ -633,8 +648,19 @@ function enc(pass) {
 				fs.closeSync(fd);
 			}
 		} catch (e) {
-			try { fs.unlinkSync(dst); } catch (e2) {}
+			try { fs.unlinkSync(tmp); } catch (e2) {}
 			die("cannot write tag: " + e.message);
+		}
+		// rename 之前再确认一次：保留 flag:"wx" 的「不覆盖」语义。
+		if (fs.existsSync(dst)) {
+			try { fs.unlinkSync(tmp); } catch (e2) {}
+			die("output exists: " + dst, 3);
+		}
+		try {
+			fs.renameSync(tmp, dst);
+		} catch (e) {
+			try { fs.unlinkSync(tmp); } catch (e2) {}
+			die("cannot finalize output: " + e.message, e.code === "EEXIST" ? 3 : 1);
 		}
 	});
 }
@@ -796,11 +822,29 @@ cmd_set_pass() {
 	# 既保证 mv 是原子替换，也不会把口令临时落到安装器可覆盖的 bin/ 里。
 	# 下面这一处 printf 是口令唯一的落盘点：目标是 0600 私有文件，
 	# 绝不重定向到 stdout / stderr / 日志。
-	tmp="$OC_CLOUD_ROOT/.pass.$$"
-	rm -f "$tmp" 2>/dev/null
-	if ! ( umask 077; printf '%s' "$pass" > "$tmp" ) 2>/dev/null; then
+	# 临时文件名不用 PID：PID 可预测，同文件其它临时文件都已改用 mktemp。
+	# mktemp 会先以 0600 建好文件并占位；失败（老 busybox / 目录异常）时退回
+	# 原来的 PID 写法并记一行日志 —— 宁可可预测，也不要因为建不出临时文件
+	# 就让用户完全无法设置口令。
+	tmp="$(mktemp "$OC_CLOUD_ROOT/.pass.XXXXXX" 2>/dev/null)" || tmp=""
+	if [ -n "$tmp" ]; then
+		# 文件已由 mktemp 建好：直接写入，不再 rm -f 后重建（重建会重新
+		# 引入可预测窗口）。先把权限收到 0600 再写 —— busybox mktemp 本来就是
+		# 0600，但别把口令的安全性押在 applet 的实现细节上。umask 077 作为
+		# 写入期间的第二道保险。
+		chmod 600 "$tmp" 2>/dev/null
+		if ! ( umask 077; printf '%s' "$pass" > "$tmp" ) 2>/dev/null; then
+			rm -f "$tmp" 2>/dev/null
+			cloud_fail "无法写入口令文件"
+		fi
+	else
+		oc_warn "mktemp 不可用，口令临时文件退回 PID 命名"
+		tmp="$OC_CLOUD_ROOT/.pass.$$"
 		rm -f "$tmp" 2>/dev/null
-		cloud_fail "无法写入口令文件"
+		if ! ( umask 077; printf '%s' "$pass" > "$tmp" ) 2>/dev/null; then
+			rm -f "$tmp" 2>/dev/null
+			cloud_fail "无法写入口令文件"
+		fi
 	fi
 	chmod 600 "$tmp" 2>/dev/null
 	chown 0:0 "$tmp" 2>/dev/null || true
@@ -958,6 +1002,25 @@ cmd_status() {
 cloud_installer_url() {
 	# cloud_installer_url <ver> -> 官方安装器 URL
 	printf '%s/%s/bdpan-installer-linux-%s' "$OC_CLOUD_CDN" "$1" "$(cloud_arch)"
+}
+
+cloud_installer_sha() {
+	# cloud_installer_sha <ver> <arch> -> 期望的 sha256；未收录时输出空
+	#
+	# 安装器是下载后以 root 直接执行的二进制，只记录哈希没有任何防护作用：
+	# CDN 被劫持 / 发版被污染 / 企业出口做 TLS 替换，都会变成 root 代码执行。
+	# 官方没有公布校验清单，下面的值是对官方 URL 下载后实测得到的，按
+	# 「版本 + 架构」精确匹配；新版本未收录时退回「只记录」，日志会写明未校验。
+	# 这里刻意不做前缀 / 模糊匹配：宁可漏校验（日志可见），也不要把错误的哈希
+	# 当成通过。
+	case "${1:-}:${2:-}" in
+		3.7.3:arm64) printf '%s' '7692f828a1af10289274e6951225fcbe9ad3c0664ebee0b492c410855220c197' ;;
+		3.7.3:amd64) printf '%s' '1678837c5ce6978f6491e76b10e344fba2beef6f81eb067c7ecc5668cf38fedb' ;;
+		3.7.1:arm64) printf '%s' 'cbebb8d5b1fd1c880feedf4766067386aa8006112c18758fa43d3bb8195d4592' ;;
+		3.7.1:amd64) printf '%s' '41ef80f0372c0ca881df0a361564b78fc7070126060e0b00fedc6c9310565698' ;;
+		*) return 1 ;;
+	esac
+	return 0
 }
 
 cloud_install_home_cleanup() {
@@ -1203,7 +1266,7 @@ cloud_install_version() {
 	# 安装器的 HOME 指向 $OC_RUNDIR 下的一次性目录，而不是 $OC_CLOUD_HOME：
 	# 这是「更新只允许动 $OC_CLOUD_DIR」的强制手段 —— 即使安装器忽略
 	# -dir，也只能写进临时目录，碰不到登录态与口令。
-	local ver="$1" arch url dest size magic head4 mach sha out rc err bin vout
+	local ver="$1" arch url dest size magic head4 mach sha want out rc err bin vout
 	local hout usage dirflag yesflag
 	local ver_raw ver_out ihome
 
@@ -1235,6 +1298,20 @@ cloud_install_version() {
 	}
 
 	url="$(cloud_installer_url "$ver")"
+
+	# 安装器是可执行文件，必须走 https：oc_fetch 内部的 oc_safe_url 也接受
+	# http://，那是给普通下载用的宽松口径，不能作为这里的唯一防线。
+	case "$url" in
+		https://*) ;;
+		*)
+			OC_INSTALL_ERR="安装器 URL 不是 https，已拒绝下载：$url"
+			return 1 ;;
+	esac
+	case "$url" in
+		*' '*|*'	'*)
+			OC_INSTALL_ERR="安装器 URL 含空白字符，已拒绝下载：$url"
+			return 1 ;;
+	esac
 
 	# 后台安装会通过 OC_INSTALL_DEST 指定目标路径，进度循环据此读取文件大小；
 	# 同步安装沿用原来的 $$ 命名。OC_INSTALL_DEST 来自环境，必须先校验：
@@ -1294,9 +1371,38 @@ cloud_install_version() {
 		oc_warn "缺少 od，跳过 ELF 架构校验（架构不符时执行阶段会报 Exec format error）"
 	fi
 
-	if command -v sha256sum >/dev/null 2>&1; then
-		sha="$(sha256sum "$dest" 2>/dev/null | awk '{print $1}')"
-		[ -n "$sha" ] && oc_warn "安装器 sha256：$sha（官方未公布校验值，仅记录备查）"
+	# ---- 完整性校验：执行前最后一道闸 ----
+	# 命中白名单就必须一致，不一致直接删文件并失败；未收录的版本保持原行为
+	# （只记录 sha256），但日志必须写明「未校验」，事后能从安装日志判断
+	# 这一次到底有没有校验过。这里没有、也不应该有 UCI 开关：哈希不符就是
+	# 可疑，应该让人看到，而不是给一条绕过校验的路。
+	want="$(cloud_installer_sha "$ver" "$arch" 2>/dev/null)" || want=""
+	if [ -n "$want" ]; then
+		if ! command -v sha256sum >/dev/null 2>&1; then
+			# 有期望值却算不出实际值：继续执行等于回到「不校验就执行」。
+			rm -f "$dest" 2>/dev/null
+			OC_INSTALL_ERR="安装器需要校验 sha256，但系统缺少 sha256sum，已中止（版本 $ver/$arch）"
+			return 1
+		fi
+		sha="$(sha256sum "$dest" 2>/dev/null | awk '{print $1}' | tr 'A-F' 'a-f')"
+		if [ -z "$sha" ]; then
+			rm -f "$dest" 2>/dev/null
+			OC_INSTALL_ERR="无法计算安装器 sha256（版本 $ver/$arch），已中止"
+			return 1
+		fi
+		if [ "$sha" != "$want" ]; then
+			rm -f "$dest" 2>/dev/null
+			OC_INSTALL_ERR="安装器 sha256 校验失败（期望 $want，实际 $sha）。可能是官方重新发布了该版本，请更新本插件"
+			return 1
+		fi
+		cblog "安装器 sha256 校验通过（$ver/$arch）"
+	else
+		if command -v sha256sum >/dev/null 2>&1; then
+			sha="$(sha256sum "$dest" 2>/dev/null | awk '{print $1}')"
+			oc_warn "安装器 sha256：${sha:-无法计算}（版本 $ver/$arch 该版本未收录，未校验）"
+		else
+			oc_warn "安装器未校验：版本 $ver/$arch 该版本未收录，且系统缺少 sha256sum"
+		fi
 	fi
 	chmod 700 "$dest" 2>/dev/null || true
 
@@ -1959,6 +2065,9 @@ cloud_upload_file() {
 		OC_TMPDIR="$encdir"
 		enc_out="$encdir/$remote_name"
 		OC_TMPFILE="$enc_out"
+		# 加密先写 <name>.tmp 再 rename（见 OC_CRYPTO_JS 的 enc）：中断时可能
+		# 留下这个半成品，一并登记，让 trap / cloud_tmp_cleanup 能清掉。
+		OC_TMPFILE2="$enc_out.tmp"
 		cloud_tmp_trap
 
 		pass="$(cloud_pass_read)" || pass=""

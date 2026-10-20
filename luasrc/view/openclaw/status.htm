@@ -234,6 +234,7 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
 <script>
 var API = {
   info: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","info")%>',
+  token: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","token")%>',
   versions: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","versions")%>',
   check: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","check")%>',
   install: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","install")%>',
@@ -358,14 +359,36 @@ function renderOpen(){
   }
 }
 
-// 点击时才读取最新的 port / token；token 只拼进新标签页的 hash，
-// 不写入 href，也不会被当前页的 Referer / 历史带走。
+// 点击时才去取 token（api_token，POST）：info 里只有掩码，页面加载全程
+// 拿不到完整值。token 只拼进新标签页的 hash，不写入 href。
+// 先同步占位打开一个空白标签页 —— 在 XHR 回调里直接 window.open 会被浏览器
+// 当成非用户手势而拦截；拿到 token 后再让占位窗口导航。
+// 取不到 token 就提示，并照常打开不带 token 的地址（用户可手动登录）。
 function openControl(){
   var d = state.info || {};
   if (d.status !== 'running') return;
   var url = controlUrl(d.port);
   if (!url) return;                           // 端口无效时按钮本就置灰
-  window.open(url + '#token=' + String(d.token || ''), '_blank');
+  var w = null;
+  try { w = window.open('about:blank', '_blank'); } catch(e){ w = null; }
+  post(API.token, {}, function(r){
+    var tok = (r && r.ok && typeof r.token === 'string') ? r.token : '';
+    var target = tok ? (url + '#token=' + encodeURIComponent(tok)) : url;
+    var hint = $('open-hint');
+    if (!tok && hint){
+      hint.textContent = '未能获取网关 token，已打开不带 token 的地址，请手动登录';
+      hint.style.display = '';
+    }
+    // 占位窗口还在就让它导航（用户手势内打开的窗口不会被拦截）。
+    if (w && !w.closed){ try { w.location.replace(target); return; } catch(e){} }
+    // 占位窗口不可用（被拦截 / 已关闭）：再试一次，仍失败就提示用户手动打开。
+    var opened = null;
+    try { opened = window.open(target, '_blank'); } catch(e){ opened = null; }
+    if (!opened && hint){
+      hint.textContent = '浏览器拦截了新标签页，请允许弹窗后重试，或手动打开 ' + url;
+      hint.style.display = '';
+    }
+  });
 }
 
 function loadInfo(){

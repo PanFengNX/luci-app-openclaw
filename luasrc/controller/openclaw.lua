@@ -30,6 +30,8 @@ function index()
 
 	-- JSON API
 	entry({"admin", "services", "openclaw", "api", "info"},      call("api_info")).leaf = true
+	-- 完整网关 token 只走这个端点（POST）；info 里只有掩码。
+	entry({"admin", "services", "openclaw", "api", "token"},     call("api_token")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "versions"},  call("api_versions")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "check"},     call("api_check")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "install"},   call("api_install")).leaf = true
@@ -160,9 +162,35 @@ local function run_capture(args)
 	return rc == 0, txt
 end
 
+-- 网关 token 掩码：只留后 4 位；短于 8 位全掩码。空值仍给空串，
+-- 前端据此区分「没有 token」与「有 token 但被遮住」。
+local function mask_token(t)
+	t = tostring(t or "")
+	if t == "" then return "" end
+	if #t < 8 then return "****" end
+	return "****" .. t:sub(-4)
+end
+
 function api_info()
 	local r = sh(SH .. " info")
-	out({ ok = true, data = r })
+	-- info 的原始 JSON 里带完整网关 token。状态页每次加载都会拉一次，
+	-- 明文回传等于把 token 写进浏览器缓存 / 历史 / 任何抓包与代理日志。
+	-- 这里在服务端就把 token 摘掉，只回掩码；完整值只能走 api_token（POST）。
+	local j = jsonc.parse(r)
+	if type(j) ~= "table" then
+		-- 解析失败时绝不回退到原文：原文里就有 token。
+		out({ ok = false, error = "后端返回无法解析" })
+		return
+	end
+	local tok = j.token
+	j.token = nil
+	j.token_masked = mask_token(tok)
+	local s = jsonc.stringify(j)
+	if not s then
+		out({ ok = false, error = "后端返回无法序列化" })
+		return
+	end
+	out({ ok = true, data = s })
 end
 
 function api_versions()
@@ -992,6 +1020,25 @@ end
 
 local function cloud_exec(args)
 	return sh(CLOUD .. " " .. args)
+end
+
+-- 完整网关 token：只在这个 POST 端点回传，且响应禁止缓存。
+-- api_info 里只有掩码（token_masked），所以状态页加载不再把 token 送进
+-- 浏览器缓存；用户点「打开控制台」时才现取一次。
+function api_token()
+	-- 响应头必须在 out() 之前设置：out() 里的 prepare_content() 会立刻
+	-- 刷出响应头，之后再调 header() 是空操作。
+	http.header("Cache-Control", "no-store")
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	local tok = sh(SH .. " token")
+	if tok == "" then
+		out({ ok = false, error = "未找到网关 token（服务可能未安装或尚未启动）" })
+		return
+	end
+	out({ ok = true, token = tok })
 end
 
 -- 口令 / 授权码的 stdin 通道：0600 私有文件 + shell 重定向，调用方负责删除。
