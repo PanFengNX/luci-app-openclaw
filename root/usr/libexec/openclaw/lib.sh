@@ -10,6 +10,10 @@ OC_INSTALLLOG="$OC_LOGDIR/openclaw-install.log"
 OC_TASKLOG="$OC_LOGDIR/openclaw-task.log"
 OC_BKUPLOG="$OC_LOGDIR/openclaw-backup.log"
 
+# 单个日志文件的上限（256KB）。OpenWrt 的 /var 是 tmpfs：日志无限增长会吃内存，
+# 落盘设备上则耗 flash。所有写日志的路径都应在追加之前调用 oc_log_rotate()。
+OC_LOG_MAX_BYTES=262144
+
 OC_USER="openclaw"
 OC_GROUP="openclaw"
 
@@ -76,6 +80,24 @@ OC_LOCK_DIR="$OC_RUNDIR/lock"
 OC_DL="$OC_RUNDIR/dl"
 
 # ---------------------------------------------------------------- logging
+oc_log_rotate() {
+	# oc_log_rotate <file> [max_bytes]
+	#
+	# 超过上限就把 <file> 改名为 <file>.1（只保留一份历史，旧的 .1 被覆盖）。
+	# 用 mv 而不是 rm：rename 是原子的，正在被 tail -f 的读者最多丢一次内容；
+	# 也不碰文件权限（mv 保留原 mode/owner）。
+	# 任何一步拿不到可信结果都直接返回，绝不影响调用方的写入。
+	local f="${1:-}" max="${2:-$OC_LOG_MAX_BYTES}" size
+	[ -n "$f" ] || return 0
+	[ -f "$f" ] || return 0
+	case "$max" in ''|*[!0-9]*) max="$OC_LOG_MAX_BYTES" ;; esac
+	size="$(wc -c <"$f" 2>/dev/null | tr -d ' \r\n')"
+	case "$size" in ''|*[!0-9]*) return 0 ;; esac
+	[ "$size" -gt "$max" ] 2>/dev/null || return 0
+	mv -f "$f" "$f.1" 2>/dev/null || return 0
+	return 0
+}
+
 oc_log() {
 	# oc_log <level> <message>
 	local lvl="$1"; shift
@@ -84,6 +106,7 @@ oc_log() {
 	printf '%s\n' "$line"
 	# never let a read-only /var/log break the caller
 	if [ -d "$OC_LOGDIR" ] && [ -w "$OC_LOGDIR" ]; then
+		oc_log_rotate "$OC_LOGFILE"
 		printf '%s\n' "$line" >>"$OC_LOGFILE" 2>/dev/null || true
 	fi
 }
@@ -522,9 +545,23 @@ oc_fetch() {
 			curl -fsSL --connect-timeout 10 --max-time "$mt" -o "$dest" "$url"
 		fi
 	elif command -v wget >/dev/null 2>&1; then
-		wget -q -T "$mt" -O "$dest" "$url"
+		# busybox wget 没有 -x/--proxy 选项，只认 http_proxy / https_proxy 环境变量。
+		# 代理为空时**不要**导出这两个变量：空值会把调用方（或 busybox 默认值）
+		# 覆盖掉，等于强制直连。
+		if [ -n "$proxy" ]; then
+			http_proxy="$proxy" https_proxy="$proxy" \
+				wget -q -T "$mt" -O "$dest" "$url"
+		else
+			wget -q -T "$mt" -O "$dest" "$url"
+		fi
 	elif command -v uclient-fetch >/dev/null 2>&1; then
-		uclient-fetch -q -T "$mt" -O "$dest" "$url"
+		# uclient-fetch 同样只认环境变量（没有代理命令行选项）。
+		if [ -n "$proxy" ]; then
+			http_proxy="$proxy" https_proxy="$proxy" \
+				uclient-fetch -q -T "$mt" -O "$dest" "$url"
+		else
+			uclient-fetch -q -T "$mt" -O "$dest" "$url"
+		fi
 	else
 		return 127
 	fi

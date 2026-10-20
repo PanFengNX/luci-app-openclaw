@@ -1001,6 +1001,28 @@ CLOUD_INSTALL_PID="$OC_RUNDIR/cloud-install.pid"
 CLOUD_INSTALL_LOCK="$OC_RUNDIR/cloud-install.lock"
 CLOUD_INSTALL_STAGE="$OC_RUNDIR/cloud-install.stage"
 
+cloud_install_lock_clear() {
+	# cloud_install_lock_clear -> 0 锁目录已不存在 / 1 清理失败（OC_LOCK_ERR 说明原因）
+	#
+	# 陈旧锁目录里可能有残留文件，rmdir 会以 ENOTEMPTY 失败。以前这里直接报错，
+	# 用户只能手工 rm -rf 才能继续。自愈路径：先删**已知文件名**的残留，再试一次
+	# rmdir。绝不扫目录、绝不用通配符 —— 锁目录路径可预测，若被替换成符号链接，
+	# 扫目录就等于把「删除任意文件」的入口交出去。
+	local left
+	OC_LOCK_ERR=""
+	[ -d "$CLOUD_INSTALL_LOCK" ] || return 0
+
+	# 已知残留：pid 文件可能被写在锁目录里，也可能在 $OC_RUNDIR 下（旧版本）。
+	rm -f "$CLOUD_INSTALL_LOCK/pid" 2>/dev/null
+	rmdir "$CLOUD_INSTALL_LOCK" 2>/dev/null && return 0
+
+	# 仍失败：列出目录里还剩什么（只读，不删），交给调用方报错。
+	left="$(find "$CLOUD_INSTALL_LOCK" -mindepth 1 -maxdepth 1 2>/dev/null \
+		| head -n 5 | tr '\n' ' ')"
+	OC_LOCK_ERR="无法清理陈旧的安装锁：$CLOUD_INSTALL_LOCK（残留：${left:-未知}）"
+	return 1
+}
+
 cloud_install_mb() {
 	# cloud_install_mb <bytes> -> "X.X"（MB，一位小数）
 	local b="${1:-0}"
@@ -1028,8 +1050,17 @@ cloud_install_total() {
 				| awk 'tolower($1) == "content-length:" { v = $2 } END { print v }')"
 		fi
 	elif command -v wget >/dev/null 2>&1; then
-		len="$(oc_timeout 10 wget -q --spider -S -T 8 "$url" 2>&1 \
-			| awk 'tolower($1) == "content-length:" { v = $2 } END { print v }')"
+		# busybox wget 没有 -x/--proxy，只认 http_proxy / https_proxy 环境变量。
+		# 代理为空时不导出这两个变量，避免把调用方已有的代理覆盖成空串。
+		if [ -n "$proxy" ]; then
+			len="$(oc_timeout 10 sh -c \
+				'http_proxy="$1" https_proxy="$1" wget -q --spider -S -T 8 "$2" 2>&1' \
+				sh "$proxy" "$url" \
+				| awk 'tolower($1) == "content-length:" { v = $2 } END { print v }')"
+		else
+			len="$(oc_timeout 10 wget -q --spider -S -T 8 "$url" 2>&1 \
+				| awk 'tolower($1) == "content-length:" { v = $2 } END { print v }')"
+		fi
 	fi
 	len="$(printf '%s' "$len" | tr -d ' \r\n')"
 	case "$len" in ''|*[!0-9]*) return 0 ;; esac
@@ -1471,9 +1502,8 @@ cmd_install_cli_bg() {
 			return 0
 		fi
 		rm -f "$CLOUD_INSTALL_PID" 2>/dev/null
-		if ! rmdir "$CLOUD_INSTALL_LOCK" 2>/dev/null; then
-			printf '{"ok":false,"error":"%s"}\n' \
-				"$(jstr "无法清理旧的安装锁：$CLOUD_INSTALL_LOCK")"
+		if ! cloud_install_lock_clear; then
+			printf '{"ok":false,"error":"%s"}\n' "$(jstr "$OC_LOCK_ERR")"
 			return 1
 		fi
 	fi
@@ -2292,13 +2322,32 @@ cmd_rm() {
 #   * 我们的行整行带 `# openclaw-cloud` 标记；cron 把 `#` 之后当 shell 注释，
 #     所以标记既能被我们识别，也不影响命令本身。
 #   * 只删除带标记的行，其它行（别人的任务、注释、空行）原样保留、顺序不变。
-#   * 改 crontab 必须：同目录临时文件 -> 校验 -> 备份 root.openclaw.bak ->
+#   * 改 crontab 必须：同目录临时文件 -> 校验 -> 备份（插件私有目录） ->
 #     chmod 600 -> mv（同目录 rename 才是原子替换）。
-#   * 校验两条：新文件里标记行 <= 1；非标记行数量与原文完全一致。
+#   * 备份**不能**放在 /etc/crontabs/ 下：busybox crond 把该目录里的每个文件名
+#     当成用户名加载，root.openclaw.bak 会被当成一个用户，轻则刷 syslog，
+#     重则按备份再调度一遍。
+#   * 校验三条：标记行 <= 1；非标记行数量与原文完全一致；要写入的命令可执行。
 #   * 幂等：重复调用不会堆出多行。
 OC_CRONTAB="/etc/crontabs/root"
 OC_CRON_MARK="# openclaw-cloud"
-OC_CRON_CMD="/usr/libexec/openclaw/cloud.sh backup-run"
+
+# 定时任务要执行的脚本。与 OC_CLOUD_BACKUP 同一套兜底：标准安装位置优先，
+# 脚本被挪到别处（测试 / 非标准前缀）时退回脚本自己所在目录。
+# 写死绝对路径的后果是 cron 每天静默失败，用户以为备份在跑，实际一份都没有。
+OC_CRON_SCRIPT="/usr/libexec/openclaw/cloud.sh"
+if [ ! -x "$OC_CRON_SCRIPT" ]; then
+	OC_CRON_SCRIPT="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/cloud.sh"
+fi
+OC_CRON_CMD="$OC_CRON_SCRIPT backup-run"
+
+# crontab 备份的位置：插件私有目录，**不在** /etc/crontabs/ 下。
+# 备份只用于「写坏了能恢复」，不需要留在 crontab 目录里。
+OC_CRON_BAK="$OC_CLOUD_ROOT/crontab.bak"
+
+# 旧版本把备份写在 /etc/crontabs/root.openclaw.bak；升级后要主动清掉，
+# 否则老设备上的误调度会一直存在。只删这一个确切文件名。
+OC_CRON_BAK_LEGACY="$OC_CRONTAB.openclaw.bak"
 
 # 本地归档由 backup.sh 负责。标准安装位置优先；脚本与 backup.sh 同目录
 # （测试 / 非标准布局）时退回同目录，避免把路径写死后无法复用。
@@ -2408,15 +2457,84 @@ cloud_cron_render() {
 	fi
 }
 
+# cloud_cron_write() 的失败原因（供调用方拼进 JSON；避免只报“写入失败”）
+OC_CRON_ERR=""
+
+cloud_cron_backup() {
+	# -> 0 已备份 / 1 失败（原因放 OC_CRON_ERR）
+	#
+	# 备份写到插件私有目录，**绝不**写进 /etc/crontabs/：busybox crond 把该目录下
+	# 每个文件名当用户名加载，root.openclaw.bak 会被当成一个叫这个名字的用户，
+	# 轻则持续报错刷 syslog，重则按这份备份再调度一遍。
+	local dir bak
+	OC_CRON_ERR=""
+	[ -f "$OC_CRONTAB" ] || return 0
+	# 测试夹具只抽出本函数，不会定义这两个变量；此时跳过备份而不是往 "/" 下写。
+	[ -n "${OC_CRON_BAK:-}" ] || return 0
+
+	bak="$OC_CRON_BAK"
+	dir="$(dirname "$bak")"
+	if ! mkdir -p "$dir" 2>/dev/null; then
+		bak=""
+	fi
+	if [ -n "$bak" ]; then
+		chmod 700 "$dir" 2>/dev/null || true
+		cp -p "$OC_CRONTAB" "$bak" 2>/dev/null || bak=""
+	fi
+
+	if [ -z "$bak" ]; then
+		# 数据盘不可用（未挂载 / 只读）时退回私有临时目录：同样 0700、同样
+		# 不在 crontab 目录里，重启后丢失也无所谓 —— 它只是「写坏了能恢复」。
+		[ -n "${OC_RUNDIR:-}" ] || return 0
+		bak="$OC_RUNDIR/crontab.bak"
+		dir="$(dirname "$bak")"
+		if ! mkdir -p "$dir" 2>/dev/null || \
+			! cp -p "$OC_CRONTAB" "$bak" 2>/dev/null; then
+			OC_CRON_ERR="无法备份 crontab 到 $bak"
+			return 1
+		fi
+	fi
+	chmod 600 "$bak" 2>/dev/null || true
+	return 0
+}
+
+cloud_cron_legacy_cleanup() {
+	# 删除旧版本留在 /etc/crontabs/ 下的备份（确切的一个文件名）。
+	# 不删它，老设备上的误调度会一直存在。
+	[ -f "$OC_CRON_BAK_LEGACY" ] || return 0
+	if rm -f "$OC_CRON_BAK_LEGACY" 2>/dev/null; then
+		oc_warn "已删除旧版 crontab 备份（crond 会把它当成用户）：$OC_CRON_BAK_LEGACY"
+	fi
+	return 0
+}
+
 cloud_cron_write() {
-	# cloud_cron_write <line|""> -> 0 成功 / 1 失败（已 oc_warn）
+	# cloud_cron_write <line|""> -> 0 成功 / 1 失败（原因同时写进 OC_CRON_ERR）
 	#
 	# <line> 为空表示「只删除我们的行」。任何一步失败都不动原文件。
 	# n_other_* 是「不带标记的行数」（别人的任务 / 注释 / 空行）。
-	local line="$1" dir tmp new bak n_other_old n_other_new
+	local line="$1" dir tmp new n_other_old n_other_new
 
+	OC_CRON_ERR=""
 	dir="$(dirname "$OC_CRONTAB")"
-	[ -d "$dir" ] || { oc_warn "crontab 目录不存在：$dir"; return 1; }
+	[ -d "$dir" ] || {
+		OC_CRON_ERR="crontab 目录不存在：$dir"
+		oc_warn "$OC_CRON_ERR"
+		return 1
+	}
+
+	# 0) 要写入的命令必须真的可执行：写一条注定失败的 cron 比不写更糟 ——
+	#    用户看到「已启用」就再也不会去检查，而备份一份都不会产生。
+	#    （只校验新增行；删除我们的行不需要脚本存在。）
+	#    OC_CRON_SCRIPT 未定义时（测试夹具只抽出本函数）跳过校验。
+	if [ -n "$line" ] && [ -n "${OC_CRON_SCRIPT:-}" ]; then
+		if [ ! -f "$OC_CRON_SCRIPT" ] || [ ! -x "$OC_CRON_SCRIPT" ]; then
+			OC_CRON_ERR="定时任务脚本不可执行：$OC_CRON_SCRIPT"
+			oc_warn "$OC_CRON_ERR"
+			return 1
+		fi
+	fi
+
 	# 没有原文件、也没有要写的行：什么都不做（不凭空创建空 crontab）
 	if [ ! -f "$OC_CRONTAB" ] && [ -z "$line" ]; then
 		return 0
@@ -2430,13 +2548,15 @@ cloud_cron_write() {
 	if [ -f "$OC_CRONTAB" ]; then
 		if ! cat "$OC_CRONTAB" >"$tmp" 2>/dev/null; then
 			rm -f "$tmp" 2>/dev/null
-			oc_warn "无法读取 crontab：$OC_CRONTAB"
+			OC_CRON_ERR="无法读取 crontab：$OC_CRONTAB"
+			oc_warn "$OC_CRON_ERR"
 			return 1
 		fi
 	else
 		: >"$tmp" 2>/dev/null || {
 			rm -f "$tmp" 2>/dev/null
-			oc_warn "无法创建临时文件：$tmp"
+			OC_CRON_ERR="无法创建临时文件：$tmp"
+			oc_warn "$OC_CRON_ERR"
 			return 1
 		}
 	fi
@@ -2455,33 +2575,31 @@ cloud_cron_write() {
 		END { if (add != "") print add }
 	' "$tmp" >"$new" 2>/dev/null; then
 		rm -f "$tmp" "$new" 2>/dev/null
-		oc_warn "生成新 crontab 失败"
+		OC_CRON_ERR="生成新 crontab 失败（临时文件：$new）"
+		oc_warn "$OC_CRON_ERR"
 		return 1
 	fi
 
 	# 校验 1：我们的行最多一条
 	if [ "$(cloud_cron_count_mark "$new")" -gt 1 ]; then
 		rm -f "$tmp" "$new" 2>/dev/null
-		oc_warn "校验失败：新 crontab 里有多条 openclaw-cloud 行，已放弃写入"
+		OC_CRON_ERR="校验失败：新 crontab 里有多条 openclaw-cloud 行，已放弃写入"
+		oc_warn "$OC_CRON_ERR"
 		return 1
 	fi
 	# 校验 2：别人的行一条都不能少
 	n_other_new="$(cloud_cron_count_other "$new")"
 	if [ "$n_other_new" -ne "$n_other_old" ]; then
 		rm -f "$tmp" "$new" 2>/dev/null
-		oc_warn "校验失败：其它行数量发生变化（$n_other_old -> $n_other_new），已放弃写入"
+		OC_CRON_ERR="校验失败：其它行数量发生变化（$n_other_old -> $n_other_new），已放弃写入"
+		oc_warn "$OC_CRON_ERR"
 		return 1
 	fi
 
-	# 4) 备份原文件（存在才备份；备份失败就不动原文件）
+	# 4) 备份原文件（存在才备份）。备份只用于「写坏了能恢复」，失败不阻断写入：
+	#    写到 /etc/crontabs 之外，crond 就不会把它当成一个用户的 crontab。
 	if [ -f "$OC_CRONTAB" ]; then
-		bak="$OC_CRONTAB.openclaw.bak"
-		if ! cp -p "$OC_CRONTAB" "$bak" 2>/dev/null; then
-			rm -f "$tmp" "$new" 2>/dev/null
-			oc_warn "无法备份 crontab 到 $bak，已放弃写入"
-			return 1
-		fi
-		chmod 600 "$bak" 2>/dev/null || true
+		cloud_cron_backup || oc_warn "无法备份 crontab（继续写入）：$OC_CRON_ERR"
 	fi
 
 	# 5) 原子替换：chmod 600 + mv（同目录 rename）
@@ -2489,7 +2607,8 @@ cloud_cron_write() {
 	chown 0:0 "$new" 2>/dev/null || true
 	if ! mv -f "$new" "$OC_CRONTAB" 2>/dev/null; then
 		rm -f "$tmp" "$new" 2>/dev/null
-		oc_warn "无法替换 crontab：$OC_CRONTAB"
+		OC_CRON_ERR="无法替换 crontab：$OC_CRONTAB"
+		oc_warn "$OC_CRON_ERR"
 		return 1
 	fi
 	chmod 600 "$OC_CRONTAB" 2>/dev/null || true
@@ -2538,13 +2657,15 @@ cmd_schedule_apply() {
 		line="$(cloud_cron_render)"
 	fi
 
-	cloud_cron_write "$line" || cloud_fail "写入 crontab 失败：$OC_CRONTAB"
+	cloud_cron_legacy_cleanup
+	cloud_cron_write "$line" || cloud_fail "${OC_CRON_ERR:-写入 crontab 失败：$OC_CRONTAB}"
 	cloud_cron_reload || true
 
 	printf '{"ok":true,"enabled":%s,"line":"%s"}\n' "$enabled" "$(jstr "$line")"
 }
 
 cmd_schedule_clear() {
+	cloud_cron_legacy_cleanup
 	cloud_cron_write "" || cloud_fail "清理 crontab 失败：$OC_CRONTAB"
 	cloud_cron_reload || true
 	printf '{"ok":true,"cleared":true}\n'
@@ -2699,6 +2820,8 @@ br_log() {
 	# 只写 $OC_TASKLOG，不写 stderr：cron 可能把 stderr 当邮件内容。
 	# /var/log 在只读根文件系统上可能不可写，写失败绝不能影响主流程。
 	[ -n "${OC_TASKLOG:-}" ] || return 0
+	# 追加之前先轮转：/var 是 tmpfs，任务日志无限增长会吃内存。
+	oc_log_rotate "$OC_TASKLOG"
 	printf '%s [cloud-backup] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" \
 		>>"$OC_TASKLOG" 2>/dev/null || true
 	return 0
@@ -2885,20 +3008,64 @@ br_prune() {
 	#
 	# 只处理符合 openclaw-*.tar.gz / openclaw-*.tar.gz.enc 的普通文件；
 	# 目录、别人的文件、其它命名一律不碰。删除失败只告警、继续下一份。
-	local keep="$1" listing cand tab total excess n name
+	#
+	# 排序键统一归一化成「秒级 epoch 整数」再比较：远端 mtime 可能是 epoch 秒、
+	# 毫秒，也可能是 ISO 串，混在一起按「取出所有数字再补零」排序会得到与真实
+	# 时间无关的结果（001760000000 排在 20261020104630 前面），从而删掉最新的。
+	# 归一化失败的行标记为 U，**不参与删除**，只记一条日志 —— 宁可少删。
+	local keep="$1" listing all cand unparsed tab total excess n name drop
 
 	listing="$(cloud_remote_list_tsv)" || return 1
 	tab="$(printf '\t')"
-	# 排序键：mtime 里的数字（epoch 与 ISO 时间串都能归一），左补零后按字符串
-	# 比较即可；同值时按文件名（我们的名字自带时间戳）。输出为「最旧在前」。
-	cand="$(printf '%s\n' "$listing" | awk -F "$tab" '
+	all="$(printf '%s\n' "$listing" | awk -F "$tab" '
+		# Howard Hinnant 的 civil-from-days：不依赖 busybox date -d。
+		function days_from_civil(y, m, d,   era, yoe, doy, doe) {
+			if (m <= 2) y--
+			era = (y >= 0 ? int(y / 400) : int((y - 399) / 400))
+			yoe = y - era * 400
+			doy = int((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1
+			doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+			return era * 146097 + doe - 719468
+		}
+		# to_epoch(s) -> 秒级整数字符串；无法解析时返回 ""。
+		function to_epoch(s,   y, mo, da, hh, mi, ss) {
+			gsub(/^[ \t]+/, "", s)
+			gsub(/[ \t]+$/, "", s)
+			if (s == "") return ""
+			if (s ~ /^[0-9]+$/) {
+				if (length(s) >= 13) return substr(s, 1, length(s) - 3)
+				if (length(s) == 10 || length(s) == 9) return s
+				return ""
+			}
+			if (s !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/) return ""
+			y = substr(s, 1, 4) + 0
+			mo = substr(s, 6, 2) + 0
+			da = substr(s, 9, 2) + 0
+			hh = 0; mi = 0; ss = 0
+			if (length(s) >= 19) {
+				if (s !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][ T][0-9][0-9]:[0-9][0-9]:[0-9][0-9]/)
+					return ""
+				hh = substr(s, 12, 2) + 0
+				mi = substr(s, 15, 2) + 0
+				ss = substr(s, 18, 2) + 0
+			}
+			if (mo < 1 || mo > 12 || da < 1 || da > 31) return ""
+			if (hh > 23 || mi > 59 || ss > 60) return ""
+			return sprintf("%d", days_from_civil(y, mo, da) * 86400 + hh * 3600 + mi * 60 + ss)
+		}
 		$1 == "false" && ($3 ~ /^openclaw-.+\.tar\.gz$/ || $3 ~ /^openclaw-.+\.tar\.gz\.enc$/) {
-			mt = $2
-			gsub(/[^0-9]/, "", mt)
-			if (mt == "") mt = "0"
-			while (length(mt) < 12) mt = "0" mt
-			printf "%s\t%s\n", mt, $3
-		}' | sort -t "$tab" -k1,1 -k2,2)"
+			mt = to_epoch($2)
+			if (mt == "") printf "U\t%s\n", $3
+			else printf "%s\t%s\n", mt, $3
+		}')"
+
+	# 时间不可信的排除在外：既不参与排序，也不计入 total（等价于多保留）。
+	unparsed="$(printf '%s\n' "$all" | awk -F "$tab" '$1 == "U" { print $2 }')"
+	if [ -n "$unparsed" ]; then
+		br_log "警告：以下远端备份的修改时间无法解析，本次不参与清理：$(printf '%s\n' "$unparsed" | tr '\n' ' ')"
+	fi
+	cand="$(printf '%s\n' "$all" | awk -F "$tab" '$1 != "U"' \
+		| sort -t "$tab" -k1,1n -k2,2)"
 
 	total="$(printf '%s\n' "$cand" | awk 'NF { n++ } END { printf "%d", n + 0 }')"
 	case "$total" in ''|*[!0-9]*) total=0 ;; esac
@@ -2908,9 +3075,13 @@ br_prune() {
 		return 0
 	fi
 
+	drop="$(printf '%s\n' "$cand" | awk -F "$tab" -v n="$excess" 'NF && c < n { print $2; c++ }')"
+	# 删除前先把清单写进日志：事后能核对到底删了哪几份。
+	br_log "将删除 $excess 份旧备份（保留 $keep 份）：$(printf '%s\n' "$drop" | tr '\n' ' ')"
+
 	n=0
 	# 用 here-doc 而不是管道：管道里的 while 在子 shell 里跑，n 回传不出来。
-	while IFS="$tab" read -r _ name; do
+	while IFS= read -r name; do
 		[ -n "$name" ] || continue
 		[ "$n" -lt "$excess" ] || break
 		if cloud_rm_remote "$name"; then
@@ -2919,7 +3090,7 @@ br_prune() {
 			oc_warn "清理旧备份失败（$name）：${OC_RM_ERR:-未知错误}"
 		fi
 	done <<EOF
-$(printf '%s\n' "$cand" | awk -v n="$excess" 'NF && c < n { print; c++ }')
+$drop
 EOF
 	printf '%s' "$n"
 }
