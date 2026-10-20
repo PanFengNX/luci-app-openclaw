@@ -171,7 +171,11 @@ function api_versions()
 	local ocv = sh("/usr/libexec/openclaw/versions.sh oc-versions" .. arg)
 	local nv  = sh("/usr/libexec/openclaw/versions.sh node-versions" .. arg)
 	local urls = sh("/usr/libexec/openclaw/versions.sh urls")
-	out({ ok = true, openclaw = ocv, node = nv, sources = urls })
+	-- status 原样透传（一行 JSON）：前端靠它区分「确实没有新版本」与「根本
+	-- 没拉到列表」。以前后者只表现为一个空数组，升级入口整块静默消失。
+	-- status 只往 stdout 写这一行 JSON，日志一律走 stderr，所以这里不会被污染。
+	local st = sh("/usr/libexec/openclaw/versions.sh status")
+	out({ ok = true, openclaw = ocv, node = nv, sources = urls, status = st })
 end
 
 function api_check()

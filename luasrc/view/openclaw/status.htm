@@ -142,6 +142,26 @@ select,input[type=text],input[type=password]{min-height:30px}
     <div class="oc-kv"><b>剩余空间</b><span id="st-free">-</span></div>
   </div>
   <div id="st-node-existing" class="oc-hint" style="display:none;margin-top:10px"></div>
+  <div class="oc-sub">版本升级</div>
+  <div id="ver-err" class="oc-hint oc-err" style="display:none;margin-bottom:8px">
+    <div id="ver-err-lines"></div>
+    <button id="btn-ver-retry" class="oc-btn ghost" style="margin-top:6px">重试</button>
+  </div>
+  <div class="oc-row">
+    <label>OpenClaw</label>
+    <span class="oc-pill" id="up-oc-cur">-</span>
+    <input type="text" id="oc-ver-input" placeholder="latest 或 2026.10.4" style="min-width:180px;margin-left:8px">
+    <button id="btn-oc-upgrade" class="oc-btn" style="margin-left:6px">升级</button>
+    <span id="oc-ver-hint" class="oc-hint" style="margin-left:8px"></span>
+  </div>
+  <div class="oc-row">
+    <label>Node.js</label>
+    <span class="oc-pill" id="up-node-cur">-</span>
+    <input type="text" id="node-ver-input" placeholder="例如 v22.22.2，留空=自动" style="min-width:180px;margin-left:8px">
+    <button id="btn-node-upgrade" class="oc-btn" style="margin-left:6px">升级</button>
+    <span id="node-ver-hint" class="oc-hint" style="margin-left:8px"></span>
+  </div>
+  <div class="oc-hint">拉不到版本列表时仍可手动填写版本号升级；Node.js 留空表示自动选择满足要求的版本。</div>
   <div class="oc-sub">访问</div>
   <div class="oc-grid">
     <div class="oc-kv"><b>端口 / 绑定</b><span id="st-port">-</span></div>
@@ -184,14 +204,6 @@ select,input[type=text],input[type=password]{min-height:30px}
       <input type="text" id="open-current" class="oc-addr" readonly placeholder="-">
       <button class="oc-copy" data-copy="open-current" type="button" style="margin-left:6px">复制</button>
     </div>
-  </div>
-  <div id="node-update" class="oc-hint" style="display:none;margin-top:10px">
-    <span id="node-update-text"></span>
-    <button id="btn-node-update" class="oc-btn" style="margin-left:8px">更新 Node</button>
-  </div>
-  <div id="oc-update" class="oc-hint" style="display:none;margin-top:10px">
-    <span id="oc-update-text"></span>
-    <button id="btn-oc-update" class="oc-btn" style="margin-left:8px">更新 OpenClaw</button>
   </div>
   <div id="st-op-hint" class="oc-hint" style="display:none;margin-top:10px"></div>
   <div id="diag-box" style="display:none;margin-top:12px">
@@ -237,7 +249,13 @@ var API = {
   devices_pending: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","devices_pending")%>',
   devices_approve: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","devices_approve")%>'
 };
-var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, nodeExisting:[], nodeBusy:false };
+var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, nodeExisting:[], nodeBusy:false,
+  // versionsStatus：api_versions 透传的 versions.sh status（一行 JSON 字符串）。
+  // versionsNet：整个请求都没拿到（断网 / 超时），与"后端说没拉到列表"区分开。
+  versionsStatus:'', versionsNet:false, verLoading:false,
+  // ocPrefill / nodePrefill：上一次自动预填进输入框的版本号。只覆盖这个值，
+  // 绝不覆盖用户手填的内容。
+  ocPrefill:'', nodePrefill:'' };
 
 function $(id){ return document.getElementById(id); }
 // 回调只允许触发一次：readyState==4 与 onerror 在某些浏览器上会同时到达，
@@ -356,6 +374,9 @@ function loadInfo(){
     badge.appendChild(bspan);
     $('st-oc').textContent   = d.openclaw || '-';
     $('st-node').textContent = d.node || '-';
+    // 「版本升级」行里的当前版本药丸：与上面同源，只做冗余展示。
+    if ($('up-oc-cur'))   $('up-oc-cur').textContent   = d.openclaw || '-';
+    if ($('up-node-cur')) $('up-node-cur').textContent = d.node || '-';
     // 安装模式（private / global）由后端 info 的 node_mode 字段给出；
     // 老版本后端可能没有该字段，缺失时留空即可，不影响其它信息。
     var nmode = d.node_mode || '';
@@ -422,16 +443,56 @@ function cmpOne(v, c){
 
 // 状态页只保留版本列表，用于判断「是否有更新的 Node」与「本机 Node 是否满足要求」；
 // 版本下拉框与 engines 数据源提示在 openclaw/setup 页面。
-function loadVersions(refresh){
+//
+// status 是后端 versions.sh status 的原文：ok / count / cached / error。
+// 它是「这次到底有没有拉到列表」的唯一依据 —— 只看数组是否为空无法区分
+// 「确实没有新版本」与「网络/镜像不可用」。
+function loadVersions(refresh, done){
   get(API.versions + (refresh ? '?refresh=1' : ''), function(r){
+    // 整体失败（断网 / 超时 / 响应不是 JSON）：保留上一次的列表，只提示失败。
+    if (!r || r.ok === false){
+      state.versionsNet = true;
+      state.versionsStatus = '';
+      renderVersionStatus();
+      if (done) done();
+      return;
+    }
+    state.versionsNet = false;
+    state.versionsStatus = r.status || '';
     state.ocList = jp(r.openclaw||'[]', []);
     state.nodeList = jp(r.node||'[]', []);
     // 版本列表可能比 info 更晚返回；两处都调用，先到的那次不满足条件时安静不显示。
+    renderVersionStatus();
     renderNodeUpdate();
     renderOcUpdate();
     // engines 到位后，已有 Node 的提示要重新判定（可能从"可用"变成"版本不满足"）。
     renderNodeExisting();
+    if (done) done();
   });
+}
+
+// 版本列表失败提示：失败只影响"预填候选版本"，不影响升级入口本身。
+function versionErrors(){
+  var out = [];
+  if (state.versionsNet) return ['无法获取版本列表：服务无响应，请稍后重试'];
+  var st = jp(state.versionsStatus || '', {}) || {};
+  var oc = st.oc || {}, nd = st.node || {};
+  if (oc.ok === false) out.push('无法获取版本列表：' + (oc.error || '原因未知'));
+  if (nd.ok === false) out.push('无法获取 Node.js 版本列表：' + (nd.error || '原因未知'));
+  return out;
+}
+
+function renderVersionStatus(){
+  var box = $('ver-err'), lines = $('ver-err-lines');
+  if (!box || !lines) return;
+  lines.textContent = '';
+  var msgs = versionErrors();
+  msgs.forEach(function(t){
+    var d = document.createElement('div');
+    d.textContent = t;                     // 服务端数据只进 textContent
+    lines.appendChild(d);
+  });
+  box.style.display = msgs.length ? '' : 'none';
 }
 
 // 状态页没有版本下拉框，无法取「当前所选版本」；退回已安装版本的 engines。
@@ -481,15 +542,23 @@ function nodeUpdateCandidate(){
 }
 
 function renderNodeUpdate(){
-  var box = $('node-update');
-  if (!box) return;
+  var input = $('node-ver-input'), hint = $('node-ver-hint');
+  if (!input || !hint) return;
   var c = nodeUpdateCandidate();
-  if (!c){ box.style.display = 'none'; return; }
+  if (!c){
+    // 没有候选版本：只撤掉上一次自己预填的值，用户手填的内容原样保留。
+    if (state.nodePrefill && input.value === state.nodePrefill) input.value = '';
+    state.nodePrefill = '';
+    hint.textContent = '';
+    return;
+  }
+  var v = 'v' + String(c.latest).replace(/^v/, '');
+  if (!input.value || input.value === state.nodePrefill) input.value = v;
+  state.nodePrefill = v;
   // 服务端数据只进 textContent，绝不拼 HTML
-  $('node-update-text').textContent = '发现更新的 Node.js：v' + c.latest
-    + '（当前 v' + c.current + '）'
+  hint.textContent = '检测到新版本 v' + String(c.latest).replace(/^v/, '')
+    + '（当前 v' + String(c.current).replace(/^v/, '') + '）'
     + (c.engines ? '，满足 OpenClaw 要求 ' + c.engines : '');
-  box.style.display = '';
 }
 
 // ------------------------------------------------- OpenClaw 更新提示
@@ -529,14 +598,19 @@ function ocUpdateCandidate(){
 }
 
 function renderOcUpdate(){
-  var box = $('oc-update');
-  if (!box) return;
+  var input = $('oc-ver-input'), hint = $('oc-ver-hint');
+  if (!input || !hint) return;
   var c = ocUpdateCandidate();
-  if (!c){ box.style.display = 'none'; return; }
+  if (!c){
+    if (state.ocPrefill && input.value === state.ocPrefill) input.value = '';
+    state.ocPrefill = '';
+    hint.textContent = '';
+    return;
+  }
+  if (!input.value || input.value === state.ocPrefill) input.value = c.latest;
+  state.ocPrefill = c.latest;
   // 服务端数据只进 textContent，绝不拼 HTML
-  $('oc-update-text').textContent = '发现更新的 OpenClaw：v' + c.latest
-    + '（当前 v' + c.current + '）';
-  box.style.display = '';
+  hint.textContent = '检测到新版本 v' + c.latest + '（当前 v' + c.current + '）';
 }
 
 // 安装类操作的进度提示：安装日志已移到「设置」页，本页只显示一行状态。
@@ -556,10 +630,10 @@ function startInstallPoll(what, onDone){
       var d = jp(r.data||'{}', {});
       if (d.state === 'done' || d.state === 'failed'){
         clearInterval(state.logTimer); state.logTimer = null;
-        // 安装类操作共用这一轮流程：所有「更新」按钮都在这里统一恢复，
+        // 安装类操作共用这一轮流程：所有「升级」按钮都在这里统一恢复，
         // 否则只恢复其中一个，另一个会永久禁用。
-        if ($('btn-node-update')) $('btn-node-update').disabled = false;
-        if ($('btn-oc-update'))   $('btn-oc-update').disabled = false;
+        if ($('btn-node-upgrade')) $('btn-node-upgrade').disabled = false;
+        if ($('btn-oc-upgrade'))   $('btn-oc-upgrade').disabled = false;
         stOpSay(what + (d.state==='done' ? '完成。' : '失败，请到设置页查看安装日志。'),
                 d.state==='failed');
         loadInfo();
@@ -570,27 +644,51 @@ function startInstallPoll(what, onDone){
   }, 2000);
 }
 
-function startNodeUpdate(){
-  var c = nodeUpdateCandidate();
-  if (!c){ renderNodeUpdate(); return; }
-  if (!confirm('将把 Node.js 更新到 v' + c.latest + '（当前 v' + c.current + '），'
-             + '并重新安装 OpenClaw 程序。过程中网关会短暂停止。继续？')) return;
+// 版本号形状：latest 或 v?X.Y.Z（可带 -/+ 后缀）。不匹配就不发请求，
+// 避免把奇怪的字符串交给后端拼进下载地址。
+var VER_RE = /^(latest|v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?)$/;
 
-  // 复用现有安装端点：oc_version 传"当前已装版本"，避免顺带把 OpenClaw 升级。
+// 返回规范化后的版本号；空串 = 没填；null = 形状不合法。
+function verValue(raw){
+  var s = String(raw == null ? '' : raw).replace(/^\s+|\s+$/g, '');
+  if (!s) return '';
+  return VER_RE.test(s) ? s : null;
+}
+
+function startNodeUpdate(){
   var d = state.info || {};
   var dir   = d.base_dir || '';
   var ocdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
-  // 只有形如 1.2.3 的正式版本才回填；预发布/带后缀的版本（如 1.2.3-dev）不可靠，
-  // 传下去会变成 npm 的固定版本约束，宁可回退到 latest。
-  var oc    = /^v?\d+\.\d+\.\d+$/.test(String(d.openclaw || '')) ? d.openclaw : 'latest';
   if (!dir){ alert('未获取到安装目录，请到设置页刷新后重试'); return; }
 
-  $('btn-node-update').disabled = true;
-  stOpSay('正在更新 Node.js 到 v' + c.latest + ' …（完整日志见「设置」页）');
+  var raw = verValue($('node-ver-input') ? $('node-ver-input').value : '');
+  if (raw === null){
+    stOpSay('Node.js 版本号格式不正确：只接受形如 v22.22.2 的版本号', true);
+    return;
+  }
+  // 留空 = 自动：交给后端按 OpenClaw 的 engines.node 选一个可用运行时。
+  // Node 没有 latest 标签，输入 latest 等价于"自动选择满足要求的最新版"。
+  var nv = raw
+    ? (raw === 'latest' ? 'auto' : (raw.charAt(0) === 'v' ? raw : 'v' + raw))
+    : 'auto';
+  var cur = String(d.node || '');
+  if (!confirm('将把 Node.js '
+             + (nv === 'auto' ? '更新到自动选择的最新可用版本' : '更新到 ' + nv)
+             + (cur ? '（当前 ' + cur + '）' : '')
+             + '，并重新安装 OpenClaw 程序。过程中网关会短暂停止。继续？')) return;
+
+  // 复用现有安装端点：oc_version 传"当前已装版本"，避免顺带把 OpenClaw 升级。
+  // 只有形如 1.2.3 的正式版本才回填；预发布/带后缀的版本（如 1.2.3-dev）不可靠，
+  // 传下去会变成 npm 的固定版本约束，宁可回退到 latest。
+  var oc = /^v?\d+\.\d+\.\d+$/.test(String(d.openclaw || '')) ? d.openclaw : 'latest';
+
+  $('btn-node-upgrade').disabled = true;
+  stOpSay('正在更新 Node.js ' + (nv === 'auto' ? '（自动选择）' : '到 ' + nv)
+        + ' …（完整日志见「设置」页）');
   post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc,
-                      node_version: 'v' + c.latest }, function(r){
+                      node_version: nv }, function(r){
     if (!r || r.ok === false){
-      $('btn-node-update').disabled = false;
+      $('btn-node-upgrade').disabled = false;
       stOpSay('Node.js 更新启动失败：'
         + ((r && (r.data || r.error)) || '服务无响应，请重试'), true);
       return;
@@ -601,34 +699,46 @@ function startNodeUpdate(){
 }
 
 function startOcUpdate(){
-  var c = ocUpdateCandidate();
-  if (!c){ renderOcUpdate(); return; }
-  if (!confirm('将把 OpenClaw 更新到 v' + c.latest + '（当前 v' + c.current + '）。\n\n'
-             + '· 会重新安装 OpenClaw 程序，过程中网关会短暂停止；\n'
-             + '· 配置与会话保留，不会删除数据。\n\n继续？')) return;
-
-  // 复用现有安装端点：oc_version 传目标版本，node_version 保持当前运行时不变。
   var d = state.info || {};
   var dir   = d.base_dir || '';
   var ocdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
   if (!dir){ alert('未获取到安装目录，请到设置页刷新后重试'); return; }
+
+  var v = verValue($('oc-ver-input') ? $('oc-ver-input').value : '');
+  if (v === null){
+    stOpSay('OpenClaw 版本号格式不正确：只接受 latest 或形如 2026.10.4 的版本号', true);
+    return;
+  }
+  if (!v){
+    stOpSay('请填写要升级到的 OpenClaw 版本（latest 或 2026.10.4）', true);
+    return;
+  }
+  // OpenClaw 的版本号不带 v 前缀（npm 包版本是 2026.10.4），用户多打一个也照收。
+  if (v !== 'latest' && v.charAt(0) === 'v') v = v.slice(1);
+
+  var cur = String(d.openclaw || '').replace(/^\s+|\s+$/g, '');
+  if (!confirm('将把 OpenClaw 升级到 ' + v + (cur ? '（当前 ' + cur + '）' : '') + '。\n\n'
+             + '· 会重新安装 OpenClaw 程序，过程中网关会短暂停止；\n'
+             + '· 配置与会话保留，不会删除数据。\n\n继续？')) return;
+
+  // 复用现有安装端点：oc_version 传目标版本，node_version 保持当前运行时不变。
   // 与 startNodeUpdate 同一套判断：只有形如 v1.2.3 的正式版本才回填（后端 info 的
   // node 带 v 前缀，install.sh 拼下载地址时需要它）；否则交给后端按 engines 自动选择。
   // 传当前版本时 install.sh 发现运行时已是该版本会跳过下载，不会换掉现有 Node。
   var nd = /^v?\d+\.\d+\.\d+$/.test(String(d.node || '')) ? String(d.node) : 'auto';
 
-  $('btn-oc-update').disabled = true;
-  stOpSay('正在更新 OpenClaw 到 v' + c.latest + ' …（完整日志见「设置」页）');
-  post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: c.latest,
+  $('btn-oc-upgrade').disabled = true;
+  stOpSay('正在升级 OpenClaw 到 ' + v + ' …（完整日志见「设置」页）');
+  post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: v,
                       node_version: nd }, function(r){
     if (!r || r.ok === false){
-      $('btn-oc-update').disabled = false;
-      stOpSay('OpenClaw 更新启动失败：'
+      $('btn-oc-upgrade').disabled = false;
+      stOpSay('OpenClaw 升级启动失败：'
         + ((r && (r.data || r.error)) || '服务无响应，请重试'), true);
       return;
     }
-    stOpSay('OpenClaw 更新已启动，完成后本页会自动刷新。');
-    startInstallPoll('OpenClaw 更新');
+    stOpSay('OpenClaw 升级已启动，完成后本页会自动刷新。');
+    startInstallPoll('OpenClaw 升级');
   });
 }
 
@@ -944,8 +1054,17 @@ document.addEventListener('click', function(e){
     fail();
   }
 });
-$('btn-node-update').onclick = startNodeUpdate;
-$('btn-oc-update').onclick   = startOcUpdate;
+if ($('btn-node-upgrade')) $('btn-node-upgrade').onclick = startNodeUpdate;
+if ($('btn-oc-upgrade'))   $('btn-oc-upgrade').onclick   = startOcUpdate;
+// 「重试」只重新拉一次版本列表（refresh=1），失败也保持按钮可用 ——
+// 输入框与升级按钮不受影响，手填版本号随时可以升级。
+if ($('btn-ver-retry')) $('btn-ver-retry').onclick = function(){
+  var b = this;
+  if (state.verLoading) return;
+  state.verLoading = true;
+  b.disabled = true;
+  loadVersions(true, function(){ state.verLoading = false; b.disabled = false; });
+};
 // ---- asynchronous diagnostics -------------------------------------------
 // doctor / repair run detached on the router; we poll for partial output so a
 // slow run never hits the HTTP request timeout.

@@ -130,8 +130,26 @@ select,input[type=text],input[type=password]{min-height:30px}
     <div class="oc-kv"><b>Node.js 版本</b><span id="in-cur-node">-</span></div>
   </div>
   <div class="oc-hint">
-    目录与版本在「基本设置」页修改（目录需点「保存并应用」才生效）；本页按上面的值原样提交，不再提供编辑。
+    目录在「基本设置」页修改（需点「保存并应用」才生效），本页按上面的值原样提交；版本可在下方「版本」区块选择或手动填写。
   </div>
+</div>
+
+<div class="oc-card">
+  <h3>版本</h3>
+  <div id="in-ver-err" class="oc-hint oc-err" style="display:none;margin-bottom:8px"></div>
+  <div class="oc-row">
+    <label>OpenClaw 版本</label>
+    <select id="in-oc" style="min-width:260px"></select>
+    <input type="text" id="in-oc-manual" placeholder="手动输入版本，如 2026.10.4 或 latest"
+           style="display:none;min-width:260px;margin-left:6px">
+  </div>
+  <div class="oc-row">
+    <label>Node.js 版本</label>
+    <select id="in-node" style="min-width:260px"></select>
+    <input type="text" id="in-node-manual" placeholder="手动输入版本，如 v22.22.2"
+           style="display:none;min-width:260px;margin-left:6px">
+  </div>
+  <div class="oc-hint">版本列表在线获取；拉不到列表时可选「手动输入版本」，直接填写版本号继续安装。</div>
 </div>
 
 <div class="oc-card">
@@ -409,6 +427,158 @@ function renderCurrent(){
     + (d.node ? '（已安装 ' + d.node + '）' : '（未安装）');
 }
 
+// ------------------------------- 版本选择
+// 列表来自 api_versions（与状态页同一数据源）。拉不到列表时下拉里仍有
+// 「手动输入版本」，直接填版本号也能装 —— 否则离线设备永远装不了。
+// 服务端数据一律走 textContent / option.value，不拼 innerHTML。
+var VER_RE = /^(latest|v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?)$/;
+var VER_MANUAL = '__manual__';
+
+function verTrim(v){ return String(v == null ? '' : v).replace(/^\s+|\s+$/g, ''); }
+
+function clearSelect(sel){ while (sel.firstChild) sel.removeChild(sel.firstChild); }
+
+function addOption(sel, text, value){
+  var o = document.createElement('option');
+  o.value = value;
+  o.textContent = text;
+  sel.appendChild(o);
+  return o;
+}
+
+function fillVersionSelect(sel, manual, list, cur, isNode){
+  clearSelect(sel);
+  var seen = {}, i, v, it, label, n = 0;
+  if (isNode){ addOption(sel, '自动（按 OpenClaw 要求选择）', 'auto'); seen['auto'] = 1; }
+  if (cur && !seen[cur]){
+    addOption(sel, '沿用当前：' + cur, cur);
+    seen[cur] = 1;
+  }
+  for (i = 0; i < list.length; i++){
+    it = list[i] || {};
+    v = verTrim(it.version);
+    if (!v || seen[v]) continue;
+    seen[v] = 1; n++;
+    label = v;
+    if (it.tag) label += '（' + it.tag + '）';
+    else if (it.lts) label += '（LTS ' + it.lts + '）';
+    addOption(sel, label, v);
+  }
+  addOption(sel, '手动输入版本…', VER_MANUAL);
+  if (!n){
+    // 列表为空：直接展开手动输入并带上当前值（如 latest），少点一次
+    sel.value = VER_MANUAL;
+    manual.style.display = '';
+    if (!manual.value) manual.value = cur || '';
+  } else {
+    sel.value = cur || sel.options[0].value;
+    manual.style.display = 'none';
+  }
+}
+
+// 下拉 / 手填变化时同步到 state，让上方「当前安装位置」卡片显示的目标版本跟着变
+function syncVersionState(isNode){
+  var sel = $(isNode ? 'in-node' : 'in-oc');
+  var man = $(isNode ? 'in-node-manual' : 'in-oc-manual');
+  var v = sel.value === VER_MANUAL ? verTrim(man.value) : sel.value;
+  if (!v) return;
+  if (!(isNode && v === 'auto') && !VER_RE.test(v)) return;
+  if (isNode) state.nodeVersion = v; else state.ocVersion = v;
+  renderCurrent();
+}
+
+function bindVersionSelect(selId, manualId, isNode){
+  var sel = $(selId), man = $(manualId);
+  sel.onchange = function(){
+    if (sel.value === VER_MANUAL){
+      man.style.display = '';
+      man.focus();
+    } else {
+      man.style.display = 'none';
+      man.value = '';
+    }
+    syncVersionState(isNode);
+  };
+  man.oninput = function(){ syncVersionState(isNode); };
+}
+
+// 提交前取最终值：手填为空 / 形状不合法一律不提交（返回 null）。
+// Node.js 手动值统一补 v 前缀：install.sh 用 "$NODE_V" 直接拼下载 URL 与
+// tarball 名，缺 v 会拼出 node-22.22.2-linux-... 这种不存在的文件。
+function resolveVersion(selId, manualId, isNode, label){
+  var sel = $(selId), man = $(manualId), v;
+  if (sel.value === VER_MANUAL){
+    v = verTrim(man.value);
+    if (!v){
+      alert('请填写 ' + label + '版本号，或从列表中选择一个版本');
+      man.focus();
+      return null;
+    }
+    if (!(isNode && v === 'auto') && !VER_RE.test(v)){
+      alert(label + '版本号格式不正确：只接受 latest 或形如 2026.10.4 / v22.22.2 的版本号');
+      man.focus();
+      return null;
+    }
+  } else {
+    v = verTrim(sel.value);
+    if (!v) v = isNode ? 'auto' : 'latest';
+  }
+  if (isNode){
+    if (v === 'latest') v = 'auto';       // Node 没有 latest 标签，等同自动选择
+    if (v !== 'auto' && v !== 'system' && v.charAt(0) !== 'v') v = 'v' + v;
+  } else if (v !== 'latest' && v.charAt(0) === 'v'){
+    v = v.slice(1);                       // npm 版本号不带 v
+  }
+  return v;
+}
+
+function renderVerError(lines){
+  var box = $('in-ver-err'), i, d;
+  while (box.firstChild) box.removeChild(box.firstChild);
+  if (!lines || !lines.length){ box.style.display = 'none'; return; }
+  for (i = 0; i < lines.length; i++){
+    d = document.createElement('div');
+    d.textContent = lines[i];
+    box.appendChild(d);
+  }
+  box.style.display = '';
+}
+
+function listOf(v){
+  if (v instanceof Array) return v;
+  var a = jp(String(v == null ? '' : v), []);
+  return (a instanceof Array) ? a : [];
+}
+
+function versionErrorLines(r, st, ocl, ndl){
+  var out = [], oc, nd;
+  if (!r || r.net || r.ok === false){
+    out.push('无法获取版本列表：服务无响应，请稍后重试；仍可手动填写版本号安装');
+    return out;
+  }
+  if (!st){
+    if (!ocl.length && !ndl.length)
+      out.push('无法获取版本列表：服务未返回状态信息，可手动填写版本号安装');
+    return out;
+  }
+  oc = st.oc; nd = st.node;
+  if (oc && oc.ok === false) out.push('无法获取 OpenClaw 版本列表：' + (oc.error || '原因未知'));
+  if (nd && nd.ok === false) out.push('无法获取 Node.js 版本列表：' + (nd.error || '原因未知'));
+  return out;
+}
+
+function loadVersions(){
+  get(API.versions, function(r){
+    var st = null;
+    if (r && r.status) st = (typeof r.status === 'object') ? r.status : jp(String(r.status), null);
+    var ocl = (r && r.openclaw) ? listOf(r.openclaw) : [];
+    var ndl = (r && r.node) ? listOf(r.node) : [];
+    fillVersionSelect($('in-oc'), $('in-oc-manual'), ocl, state.ocVersion, false);
+    fillVersionSelect($('in-node'), $('in-node-manual'), ndl, state.nodeVersion, true);
+    renderVerError(versionErrorLines(r, st, ocl, ndl));
+  });
+}
+
 function loadInfo(){
   get(API.info, function(r){
     var d = jp(r.data||'{}', {});
@@ -423,15 +593,15 @@ function loadInfo(){
     // Node.js 源是服务端保存的状态（可能是 SSH 手填的），回填后下拉才与
     // 实际使用的源一致；保存逻辑见 nodeMirrorSave()。
     applyNodeMirror(d.node_mirror);
+    // 版本下拉依赖上面解析出的 ocVersion / nodeVersion，必须放在后面。
+    loadVersions();
   });
 }
 
-// 安装与「更新 Node」共用同一条后端安装流程（install-bg），按钮必须一起恢复，
-// 否则其中一个会永久停在 disabled。「更新 Node」在本页并不存在（在状态页），
-// 用存在性判断保持兼容。
+// 安装类操作共用同一条后端安装流程（install-bg），按钮必须恢复，否则会永久
+// 停在 disabled。本页只有「安装」按钮；状态页的升级按钮由状态页自己的轮询恢复。
 function setInstallButtons(disabled){
   $('btn-install').disabled = disabled;
-  if ($('btn-node-update')) $('btn-node-update').disabled = disabled;
 }
 
 function logSay(text){
@@ -540,6 +710,8 @@ function fmtTime(ts){
 }
 
 $('in-registry').onchange = function(){ state.registryTouched = true; };
+bindVersionSelect('in-oc', 'in-oc-manual', false);
+bindVersionSelect('in-node', 'in-node-manual', true);
 
 $('btn-install').onclick = function(){
   // 目录与版本都来自 info（本页不可编辑）。先做一次兜底检查：UCI 里的值可能
@@ -559,8 +731,11 @@ $('btn-install').onclick = function(){
   var ocdir = chk.dirs.ocdir;
   // 程序目录页面上不可编辑，但必须原样回传服务端当前值：save 对 openclaw_dir
   // 是"空值也显式写入"的语义，漏传或传空都会冲掉已有自定义目录。
-  var oc = state.ocVersion || 'latest';
-  var nd = state.nodeVersion || 'auto';
+  // 版本取下拉 / 手动输入框：手填为空或形状不合法时直接拦下，不提交。
+  var oc = resolveVersion('in-oc', 'in-oc-manual', false, 'OpenClaw ');
+  if (oc === null) return;
+  var nd = resolveVersion('in-node', 'in-node-manual', true, 'Node.js ');
+  if (nd === null) return;
 
   // 先保存设置：save 现在会返回真实结果。目录被安全校验拒绝时必须停下来提示，
   // 否则安装会在后面以难懂的方式失败。
