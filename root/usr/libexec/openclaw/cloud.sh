@@ -117,9 +117,91 @@ cloud_redact() {
 	'
 }
 
+oc_byte_val() {
+	# oc_byte_val <单个字节>：输出该字节的数值 0-255；判定不了时输出空。
+	# `printf '%d' "'<字符>"` 是 POSIX 语义；必须强制 C locale 才是按字节取值。
+	LC_ALL=C printf '%d' "'${1:-}" 2>/dev/null
+}
+
+oc_utf8_fix_tail() {
+	# oc_utf8_fix_tail <字符串>：删掉末尾「不完整」的 UTF-8 序列（最多 3 字节），
+	# 完整字符原样保留。只用于按字节截断之后的收尾。
+	#
+	# 判断方法：往回数末尾的 continuation 字节（0x80-0xBF），再看它们前面那个
+	# 字节是不是 lead（0xC0-0xF7）以及它声明的长度是否正好等于 1+continuation 数。
+	# 相等 = 完整字符，原样返回；否则把这段不完整的序列整段丢掉。
+	local orig="${1:-}" s="${1:-}" len n=0 v need=0
+	[ -n "$s" ] || return 0
+	len="$(printf '%s' "$s" | wc -c | tr -cd '0-9')"
+	[ -n "$len" ] || return 0
+	while [ "$n" -lt 3 ] && [ "$n" -lt "$len" ]; do
+		v="$(oc_byte_val "$(printf '%s' "$s" | tail -c 1)")"
+		case "$v" in ''|*[!0-9]*) break ;; esac
+		[ "$v" -ge 128 ] && [ "$v" -le 191 ] || break
+		n=$((n + 1))
+		len=$((len - 1))
+		s="$(printf '%s' "$s" | head -c "$len")"
+	done
+	v="$(oc_byte_val "$(printf '%s' "$s" | tail -c 1)")"
+	case "$v" in
+		''|*[!0-9]*) printf '%s' "$s"; return 0 ;;
+	esac
+	if [ "$v" -ge 192 ] && [ "$v" -le 223 ]; then need=2
+	elif [ "$v" -ge 224 ] && [ "$v" -le 239 ]; then need=3
+	elif [ "$v" -ge 240 ] && [ "$v" -le 247 ]; then need=4
+	fi
+	if [ "$need" -eq $((n + 1)) ]; then
+		printf '%s' "$orig"          # 完整字符：一个字节都不动
+	elif [ "$need" -eq 0 ]; then
+		printf '%s' "$s"             # 前面不是 lead：孤立的 continuation 已经丢掉
+	else
+		printf '%s' "$(printf '%s' "$s" | head -c $((len - 1)))"   # 丢掉残缺的 lead
+	fi
+}
+
+oc_cut_utf8() {
+	# oc_cut_utf8 <bytes>：stdin -> stdout，按字节上限截断但不切坏 UTF-8。
+	#
+	# `head -c N` 是按字节切的：中文报错很容易在边界上留下半个字符，拼进
+	# JSON 后前端 JSON.parse 直接失败，反而看不到原因。这里先按字节截断，
+	# 再丢掉最后一行（截断点所在的那行必然不完整），保证输出总是完整行。
+	# 如果丢掉后为空（原文只有一行且被切到），回退到「按字节截断但不丢行」：
+	# 宁可留半个字符，也不能把唯一的一行报错吞成空串。
+	local n="${1:-500}" raw out ended_nl=0
+	case "$n" in ''|*[!0-9]*) n=500 ;; esac
+	# 末尾追加一个标记字符再取命令替换：$(...) 会吃掉结尾的换行，不补标记
+	# 就分不清「原文正好结束在换行处」和「最后一行被切断」，前者会被误删一行。
+	raw="$(head -c "$n" 2>/dev/null; printf 'x')"
+	case "$raw" in
+		*x)
+			raw="${raw%x}"
+			# 标记前一个字节是换行 = 截断点正好落在行边界上，全部行都完整。
+			case "$raw" in
+				*"
+") ended_nl=1 ;;
+			esac
+			;;
+		*) raw="" ;;
+	esac
+	[ -n "$raw" ] || return 0
+	if [ "$ended_nl" -eq 1 ]; then
+		printf '%s' "$raw"
+		return 0
+	fi
+	# 截断点在行中间：最后一行可能只有半个字符，丢掉它。
+	out="$(printf '%s\n' "$raw" | sed '$d')"
+	if [ -z "$out" ]; then
+		# 原文只有一行且被切到：不能返回空串（报错就丢了），也不能留半个汉字
+		# （JSON 就坏了）。按 UTF-8 边界把末尾那段不完整的序列剪掉再返回。
+		oc_utf8_fix_tail "$raw"
+		return 0
+	fi
+	printf '%s\n' "$out"
+}
+
 cloud_tail_err() {
 	# cloud_tail_err <file> [lines] -> 脱敏后的最后几行（截断）
-	tail -n "${2:-5}" "$1" 2>/dev/null | cloud_redact | head -c 1500
+	tail -n "${2:-5}" "$1" 2>/dev/null | cloud_redact | oc_cut_utf8 1500
 }
 
 cloud_scrub_code() {
@@ -185,8 +267,19 @@ cloud_bin_ready() {
 # ---------------------------------------------------------------- version
 cloud_version_valid() {
 	# 版本号白名单：安装器 URL 与 UCI 值都会进 URL / 路径，必须严格。
+	# 必须数字开头（可带 v 前缀），之后只允许字母、数字与 . _ -。
+	# 只做「字符白名单」不够：`-rf`、`..`、`../..` 都只由白名单字符组成，
+	# 却能改变拼出来的 URL 路径段。所以首字符必须是数字，且显式拒绝
+	# `.` / `..` / 任何含 `..` 的值。
 	case "${1:-}" in
-		''|*[!0-9A-Za-z._-]*) return 1 ;;
+		''|.|..) return 1 ;;
+		*..*) return 1 ;;
+		v[0-9]*) ;;
+		[0-9]*) ;;
+		*) return 1 ;;
+	esac
+	case "${1:-}" in
+		*[!0-9A-Za-z._-]*) return 1 ;;
 	esac
 	[ "${#1}" -le 32 ] || return 1
 	return 0
@@ -776,25 +869,31 @@ cmd_set_encrypt() {
 
 # ---------------------------------------------------------------- status
 cmd_status() {
-	local arch bin installed=false path="" ver="" logged=false user="" expires="" raw=""
+	local arch bin installed=false executable=false path="" ver="" logged=false user="" expires="" raw=""
 	local uncertain=false tmp rc k
 
 	arch="$(cloud_arch)"
 
 	bin="$(cloud_bin)" || bin=""
 	if [ -n "$bin" ]; then
+		# installed 的语义是「文件存在」，保持不变；能不能跑单独用 executable
+		# 报出去。否则前端只能看到 installed=true，把「二进制损坏 / 架构不符」
+		# 也引导成「去登录」。
 		installed=true
 		path="$bin"
+		if [ -x "$bin" ]; then
+			executable=true
+		fi
 	fi
 
-	if [ "$installed" = "true" ] && [ ! -x "$bin" ]; then
+	if [ "$installed" = "true" ] && [ "$executable" != "true" ]; then
 		oc_warn "找到 bdpan（$bin）但不可执行，请重新安装组件"
 	fi
 	# 版本优先取 `bdpan version`；取不到（二进制损坏 / 架构不匹配 / 临时
 	# 不可执行）时退回安装时写下的 .installed-version，两者都没有才留空。
 	ver="$(cloud_current_version)"
 
-	if [ "$installed" = "true" ] && [ -x "$bin" ]; then
+	if [ "$executable" = "true" ]; then
 		tmp="$OC_RUNDIR/cloud-whoami.$$"
 		rm -f "$tmp" 2>/dev/null
 		cloud_run 25 "$bin" whoami --json >"$tmp" 2>&1
@@ -804,7 +903,7 @@ cmd_status() {
 			cloud_run 25 "$bin" whoami >"$tmp" 2>&1
 		fi
 		# raw 只放 whoami 的输出，且先脱敏、截断；绝不包含 config.json。
-		raw="$(cloud_redact <"$tmp" 2>/dev/null | head -c 500)"
+		raw="$(cloud_redact <"$tmp" 2>/dev/null | oc_cut_utf8 500)"
 
 		# 登录判定只有 cloud_is_logged_in 一处口径（默认未登录、无法确认也算
 		# 未登录）。把刚取到的 whoami 输出交给它复用，避免重复执行 bdpan。
@@ -848,8 +947,8 @@ cmd_status() {
 		rm -f "$tmp" 2>/dev/null
 	fi
 
-	printf '{"ok":true,"arch":"%s","cli":{"installed":%s,"path":"%s","version":"%s"},"auth":{"logged_in":%s,"uncertain":%s,"user":"%s","expires":"%s","raw":"%s"},"remote_dir":"%s","root":"%s","dir":"%s","home":"%s"}\n' \
-		"$arch" "$installed" "$(jstr "$path")" "$(jstr "$ver")" \
+	printf '{"ok":true,"arch":"%s","cli":{"installed":%s,"executable":%s,"path":"%s","version":"%s"},"auth":{"logged_in":%s,"uncertain":%s,"user":"%s","expires":"%s","raw":"%s"},"remote_dir":"%s","root":"%s","dir":"%s","home":"%s"}\n' \
+		"$arch" "$installed" "$executable" "$(jstr "$path")" "$(jstr "$ver")" \
 		"$logged" "$uncertain" "$(jstr "$user")" "$(jstr "$expires")" "$(jstr "$raw")" \
 		"$(jstr "$OC_CLOUD_REMOTE")" "$(jstr "$OC_CLOUD_ROOT")" \
 		"$(jstr "$OC_CLOUD_DIR")" "$(jstr "$OC_CLOUD_HOME")"
@@ -949,8 +1048,14 @@ cloud_install_alive() {
 	# cloud_install_alive <pid> -> 0 when the pid is a live (non-zombie) worker.
 	# 不用 oc_pid_alive：它要求 cmdline 里出现 "openclaw/cloud.sh"，而命令行
 	# 用相对路径启动时（例如 ./cloud.sh install-cli-bg）就匹配不上，会把活着
-	# 的 worker 误判成已退出。这里放宽成「cmdline 里含 cloud.sh」，既能认出
-	# 相对路径启动的 worker，又不会被 pid 回收后的无关进程骗到。
+	# 的 worker 误判成已退出。
+	#
+	# 但只看 `*cloud.sh*` 又太宽：编辑器、`grep cloud.sh`、另一个实例的命令行
+	# 里都含这几个字符，pid 回收后撞上它们就会把「worker 已死」误判成「仍在
+	# 运行」，于是永远返回 busy。所以要求 cmdline 同时含 cloud.sh 与后台安装
+	# 入口（install-cli-bg 或 cloud_install_bg_worker）才认。
+	# 不比对 /proc/<pid>/exe：worker 是子 shell，exe 指向 /bin/sh（或 busybox），
+	# 与脚本路径无关，比对它在这里区分不出是不是本脚本。
 	local pid="${1:-}" statline state cmd
 	case "$pid" in ''|*[!0-9]*) return 1 ;; esac
 	[ -d "/proc/$pid" ] || return 1
@@ -961,7 +1066,11 @@ cloud_install_alive() {
 	[ "$state" = "Z" ] && return 1
 	cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
 	case "$cmd" in
-		*cloud.sh*) return 0 ;;
+		*cloud.sh*) ;;
+		*) return 1 ;;
+	esac
+	case "$cmd" in
+		*install-cli-bg*|*cloud_install_bg_worker*) return 0 ;;
 	esac
 	return 1
 }
@@ -1004,17 +1113,51 @@ cloud_install_progress_loop() {
 
 cloud_install_log_tail() {
 	# cloud_install_log_tail <log> -> 尾部（最多 8KB，按行对齐后脱敏）
-	local log="$1" size out
+	local log="$1" size out prev
 	[ -f "$log" ] || return 0
 	size="$(wc -c <"$log" 2>/dev/null | tr -d ' \r\n')"
 	case "$size" in ''|*[!0-9]*) size=0 ;; esac
 	if [ "$size" -gt 8192 ]; then
 		# 从中间截断时丢掉第一行，避免把 UTF-8 字符切成两半。
-		out="$(tail -c 8192 "$log" 2>/dev/null | sed '1d')"
+		# 但边界正好落在换行之后时，首行是**完整**的一行（常常正是阶段切换
+		# 那行），无条件删会把它吞掉。所以先看 8192 字节窗口的**前一个字节**
+		# 是不是换行：是则窗口从行首开始，一行都不用删。
+		# 多取 1 字节再看首字节即可，不依赖 od / xxd：命令替换会吃掉结尾
+		# 换行，因此「首字节是换行」在这里表现为空串。
+		prev="$(tail -c 8193 "$log" 2>/dev/null | head -c 1)"
+		if [ -z "$prev" ]; then
+			out="$(tail -c 8192 "$log" 2>/dev/null)"
+		else
+			out="$(tail -c 8192 "$log" 2>/dev/null | sed '1d')"
+		fi
 	else
 		out="$(cat "$log" 2>/dev/null)"
 	fi
 	printf '%s' "$out" | cloud_redact
+}
+
+cloud_install_dest() {
+	# cloud_install_dest <arch> -> 安装器下载目标路径（stdout）
+	#
+	# 后台 worker 用 OC_INSTALL_DEST 把目标路径传给 cloud_install_version，
+	# 让进度循环能读到文件大小。这个变量来自环境，而调用方拿到路径后第一件事
+	# 就是 `rm -f`，脚本又以 root 运行 —— 不校验就等于「删除任意文件」。
+	# 只接受 $OC_RUNDIR/ 下、basename 以 bdpan-installer- 开头、且不含 ..
+	# 的路径；不满足就忽略它并记一行日志，回退到默认路径。
+	local arch="$1" d="$OC_RUNDIR/bdpan-installer-$arch.$$"
+	local want="${OC_INSTALL_DEST:-}"
+
+	[ -n "$want" ] || { printf '%s' "$d"; return 0; }
+
+	case "$want" in
+		*..*) ;;
+		"$OC_RUNDIR"/*)
+			case "${want##*/}" in
+				bdpan-installer-*) printf '%s' "$want"; return 0 ;;
+			esac ;;
+	esac
+	cblog "忽略不可信的 OC_INSTALL_DEST（必须是 $OC_RUNDIR/bdpan-installer-* 且不含 ..）：$want"
+	printf '%s' "$d"
 }
 
 cloud_install_version() {
@@ -1063,8 +1206,9 @@ cloud_install_version() {
 	url="$(cloud_installer_url "$ver")"
 
 	# 后台安装会通过 OC_INSTALL_DEST 指定目标路径，进度循环据此读取文件大小；
-	# 同步安装沿用原来的 $$ 命名。
-	dest="${OC_INSTALL_DEST:-$OC_RUNDIR/bdpan-installer-$arch.$$}"
+	# 同步安装沿用原来的 $$ 命名。OC_INSTALL_DEST 来自环境，必须先校验：
+	# 它下面马上就会被 rm -f，而本脚本以 root 运行。
+	dest="$(cloud_install_dest "$arch")"
 	rm -f "$dest" 2>/dev/null
 	cloud_install_stage_set download
 	cblog "下载百度网盘组件安装器：$url"
@@ -1159,7 +1303,8 @@ cloud_install_version() {
 		yesflag="-y"
 	fi
 	# 折成一行：usage 要进 JSON 错误信息，换行会破坏 JSON。
-	usage="$(head -c 4000 "$hout" 2>/dev/null | tr '\n\r\t' '   ')"
+	# 先按行对齐截断再压行，避免把中文切成半个字符。
+	usage="$(oc_cut_utf8 4000 <"$hout" 2>/dev/null | tr '\n\r\t' '   ')"
 	rm -f "$hout" 2>/dev/null
 	[ -n "$usage" ] || usage="（安装器 -h 无输出）"
 
@@ -1168,7 +1313,7 @@ cloud_install_version() {
 		# 破坏「只动 $OC_CLOUD_DIR」的约定。
 		rm -f "$dest" 2>/dev/null
 		cloud_install_home_cleanup "$ihome"
-		OC_INSTALL_ERR="安装器不支持指定安装目录（尝试过 -dir / -install-dir），已中止以免装到错误位置：$(printf '%s' "$usage" | head -c 300)"
+		OC_INSTALL_ERR="安装器不支持指定安装目录（尝试过 -dir / -install-dir），已中止以免装到错误位置：$(printf '%s\n' "$usage" | oc_cut_utf8 300)"
 		return 1
 	fi
 
@@ -1191,7 +1336,7 @@ cloud_install_version() {
 	# 不再退化成裸调用：裸调用没有 -dir，安装器可能写进 HOME
 	# 或默认路径，破坏「只动 $OC_CLOUD_DIR」的约定。
 	if [ "$rc" -ne 0 ]; then
-		err="$(tail -n 20 "$out" 2>/dev/null | cloud_redact | head -c 2000)"
+		err="$(tail -n 20 "$out" 2>/dev/null | cloud_redact | oc_cut_utf8 2000)"
 		[ -n "$err" ] || err="无输出"
 		rm -f "$dest" "$out" 2>/dev/null
 		cloud_install_home_cleanup "$ihome"
@@ -1321,7 +1466,8 @@ cmd_install_cli_bg() {
 	if [ -d "$CLOUD_INSTALL_LOCK" ]; then
 		pid="$(cat "$CLOUD_INSTALL_PID" 2>/dev/null | head -n1 | tr -d ' \r\n')"
 		if [ -n "$pid" ] && { oc_pid_alive "$pid" || cloud_install_alive "$pid"; }; then
-			printf '{"busy":true}\n'
+			printf '{"ok":false,"busy":true,"error":"%s"}\n' \
+				"$(jstr "已有安装任务在运行，请等它结束")"
 			return 0
 		fi
 		rm -f "$CLOUD_INSTALL_PID" 2>/dev/null
@@ -1334,7 +1480,8 @@ cmd_install_cli_bg() {
 	if ! mkdir "$CLOUD_INSTALL_LOCK" 2>/dev/null; then
 		# 目录已经存在 = 别人抢先一步；否则是真的建不出来（权限 / 只读）。
 		if [ -d "$CLOUD_INSTALL_LOCK" ]; then
-			printf '{"busy":true}\n'
+			printf '{"ok":false,"busy":true,"error":"%s"}\n' \
+				"$(jstr "已有安装任务在运行，请等它结束")"
 			return 0
 		fi
 		printf '{"ok":false,"error":"%s"}\n' \
@@ -1631,7 +1778,7 @@ cmd_login_url() {
 	rm -f "$tmp" 2>/dev/null
 
 	if [ -z "$url" ]; then
-		out="$(printf '%s' "$out" | cloud_redact | head -c 500)"
+		out="$(printf '%s\n' "$out" | cloud_redact | oc_cut_utf8 500)"
 		cloud_fail "无法获取授权链接（rc=$rc）：${out:-无输出}"
 	fi
 	oc_safe_url "$url" || cloud_fail "授权链接格式异常：$url"
@@ -1680,7 +1827,7 @@ cmd_login_code() {
 	cloud_run 60 "$bin" login --set-code "$code" >"$tmp" 2>&1
 	rc=$?
 	# 输出里若回显了授权码，一并抹掉；日志里也绝不写 code。
-	out="$(cloud_scrub_code "$tmp" "$code" | cloud_redact | tail -n 5 | head -c 800)"
+	out="$(cloud_scrub_code "$tmp" "$code" | cloud_redact | tail -n 5 | oc_cut_utf8 800)"
 	rm -f "$tmp" 2>/dev/null
 
 	[ "$rc" -eq 0 ] || cloud_fail "授权失败（rc=$rc）：${out:-无输出}"
@@ -1696,7 +1843,7 @@ cmd_logout() {
 	rm -f "$tmp" 2>/dev/null
 	cloud_run 60 "$bin" logout >"$tmp" 2>&1
 	rc=$?
-	out="$(cloud_tail_err "$tmp" 5 | head -c 800)"
+	out="$(cloud_tail_err "$tmp" 5 | oc_cut_utf8 800)"
 	rm -f "$tmp" 2>/dev/null
 	[ "$rc" -eq 0 ] || cloud_fail "退出登录失败（rc=$rc）：${out:-无输出}"
 	printf '{"ok":true}\n'
@@ -2111,7 +2258,7 @@ cloud_rm_remote() {
 				OC_RM_ERR="当前 CLI 不支持删除，请在网盘 App 里删除"
 				return 1 ;;
 		esac
-		err="$(printf '%s' "$out" | cloud_redact | tail -n 5 | head -c 800)"
+		err="$(printf '%s\n' "$out" | cloud_redact | tail -n 5 | oc_cut_utf8 800)"
 		OC_RM_ERR="删除失败（rc=$rc）：${err:-无输出}"
 		return 1
 	fi
@@ -2572,6 +2719,19 @@ br_cleanup() {
 	return 0
 }
 
+cloud_json_known_key() {
+	# cloud_json_known_key <file> -> 0 when any key we understand has a value.
+	# 用于区分「这是结构化输出，只是没给出登录证据」与「这是自由文本」：
+	# 前者绝不能交给文本兜底去猜。
+	local k v
+	for k in logged_in loggedIn is_login isLogin login ok \
+		user_name username uname uid account display_name; do
+		v="$(cloud_json_scalar "$1" "$k")"
+		[ -n "$v" ] && return 0
+	done
+	return 1
+}
+
 cloud_auth_state() {
 	# cloud_auth_state <file> -> true / false / unknown
 	#
@@ -2579,9 +2739,10 @@ cloud_auth_state() {
 	# 登录是「必须有正面证据」的判断，判定顺序：
 	#   1) JSON 布尔字段（logged_in / loggedIn / is_login / isLogin / login）
 	#   2) JSON 账号类字段有非空值
-	#   3) 文本：先判未登录，再判已登录
-	#   4) 其余一律 unknown（调用方按未登录处理）
-	local f="$1" k v acct low
+	#   3) 结构化 JSON 输出到此为止：不再跑文本兜底，一律 unknown
+	#   4) 非 JSON 文本：先判未登录，再判已登录
+	#   5) 其余一律 unknown（调用方按未登录处理）
+	local f="$1" k v acct low first
 
 	acct=""
 	for k in user_name username uname uid account display_name; do
@@ -2617,15 +2778,33 @@ cloud_auth_state() {
 		return 0
 	fi
 
+	# 结构化输出不跑文本兜底。
+	# 文本兜底的正则只剥「键名 + 冒号」，值里的单词原样保留，于是
+	# {"error":"invalid username or password"} 会被剥成
+	# {"invalid username or password"} 并命中 username —— 未登录被判成已登录。
+	# 所以：只要输出看起来是 JSON 且我们能认出任意一个已知键，就直接 unknown，
+	# 把「这条 JSON 里没有登录证据」如实报出来，而不是去猜它的文本。
+	first="$(sed -n 's/^[[:space:]]*\(.\).*/\1/p' "$f" 2>/dev/null | head -n1)"
+	case "$first" in
+		'{'|'[')
+			if cloud_json_known_key "$f"; then
+				printf 'unknown'
+				return 0
+			fi
+			;;
+	esac
+
 	# 文本兜底：先把 JSON 的键名剥掉（只保留值），避免 {"username":""} 的
 	# 键名被当成登录证据；统一转小写，省掉逐个大写变体。
 	# 顺序必须是「先未登录、再已登录」：输出里同时出现「未登录，请登录」
 	# 这种话时，必须命中前者。
+	# 已登录词表里不再有 *username*：键名已经剥掉了，值里再出现这个词基本
+	# 都是 "invalid username" 一类的报错，留着只会造成误判。
 	low="$(sed 's/"[^"]*"[[:space:]]*:[[:space:]]*//g' "$f" 2>/dev/null | tr 'A-Z' 'a-z')"
 	case "$low" in
-		*未登录*|*没有登录*|*请先登录*|*请登录*|*"not logged in"*|*"not login"*|*"login required"*|*"please login"*|*unauthorized*|*未授权*|*expired*|*过期*|*"invalid token"*|*无效*)
+		*未登录*|*没有登录*|*请先登录*|*请登录*|*"not logged in"*|*"not login"*|*"login required"*|*"please login"*|*unauthorized*|*未授权*|*expired*|*过期*|*"invalid token"*|*无效*|*"invalid username"*|*"incorrect password"*|*"authentication failed"*|*"login failed"*|*"failed to login"*|*密码错误*|*账号或密码*)
 			printf 'false' ;;
-		*已登录*|*"logged in"*|*"login as"*|*用户名*|*username*|*"uid:"*)
+		*已登录*|*"logged in"*|*"login as"*|*用户名*|*"uid:"*)
 			printf 'true' ;;
 		*)
 			printf 'unknown' ;;
@@ -2667,8 +2846,8 @@ cloud_is_logged_in() {
 	CLOUD_AUTH_STATE="$state"
 	snip=""
 	if [ "$state" != "true" ] && [ "$state" != "false" ]; then
-		# 脱敏 + 压成一行 + 截断；只进日志，绝不进 stdout 的 JSON。
-		snip="$(cloud_redact <"$tmp" 2>/dev/null | tr '\n\r\t' '   ' | head -c 120)"
+		# 脱敏 + 按行截断 + 压成一行；只进日志，绝不进 stdout 的 JSON。
+		snip="$(cloud_redact <"$tmp" 2>/dev/null | oc_cut_utf8 120 | tr '\n\r\t' '   ')"
 	fi
 	if [ "$own" -eq 1 ]; then
 		rm -f "$tmp" 2>/dev/null
@@ -2746,7 +2925,7 @@ EOF
 }
 
 cmd_backup_run() {
-	local enabled bin out errf file dir local_path remote pruned rc
+	local enabled out errf file dir local_path remote pruned rc
 	local local_removed drop_reason dir_phys par_phys
 
 	# ---- 前置：启用 / 组件 / 登录；任一不满足都只记日志 + JSON + exit 0 ----
@@ -2757,14 +2936,25 @@ cmd_backup_run() {
 		printf '{"ok":false,"error":"定时备份未启用"}\n'
 		exit 0
 	fi
-	bin="$(cloud_bin_ready)" || {
+	# 这里只需要知道「组件能不能跑」，返回值本身后面用不到，不存变量。
+	cloud_bin_ready >/dev/null || {
 		br_log "跳过：网盘组件未安装"
 		printf '{"ok":false,"error":"网盘组件未安装"}\n'
 		exit 0
 	}
 	if ! cloud_is_logged_in; then
-		br_log "跳过：尚未登录百度网盘"
-		printf '{"ok":false,"error":"尚未登录百度网盘"}\n'
+		# cloud_is_logged_in 把判定结果留在 CLOUD_AUTH_STATE：
+		# false = 明确未登录，unknown = 输出无法判定。两者对定时任务的
+		# 结论相同（都跳过），但日志与 JSON 必须分开说，否则用户看到
+		# 「尚未登录」会以为重新登录就好，实际可能是组件输出异常。
+		if [ "$CLOUD_AUTH_STATE" = "unknown" ]; then
+			br_log "跳过：登录状态无法确认（whoami 输出无法判定）"
+			printf '{"ok":false,"error":"%s"}\n' \
+				"$(jstr "登录状态无法确认，请在云备份页面重新登录")"
+		else
+			br_log "跳过：尚未登录百度网盘"
+			printf '{"ok":false,"error":"尚未登录百度网盘"}\n'
+		fi
 		exit 0
 	fi
 	[ -f "$OC_CLOUD_BACKUP" ] || {

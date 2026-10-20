@@ -564,6 +564,7 @@ var CL = {
   statusKnown: false,
   statusTried: false,
   installed: false,
+  executable: false,   // 组件文件存在且可执行；installed 只表示文件存在
   logged: false,
   authUncertain: false, // 组件在，但 whoami 的输出无法判定登录态
   passSet: false,
@@ -625,6 +626,9 @@ function clVersion(v){
 // ---------------------------------------------------------------- 状态渲染
 function clRender(){
   var inst   = CL.installed;
+  // broken：文件在但不可执行（二进制损坏 / 架构不符 / 权限被改）。
+  // 这种状态不能引导用户去登录 —— 登录按钮点下去也只会失败。
+  var broken = inst && !CL.executable;
   var logged = CL.logged;
 
   // 第一步
@@ -634,6 +638,11 @@ function clRender(){
   if (!CL.statusKnown){
     st.textContent = CL.statusTried ? '读取失败' : '读取中…';
     pill.style.display = 'none';
+  } else if (broken){
+    st.textContent = '组件文件存在但无法执行，可能已损坏' + arch;
+    pill.style.display = '';
+    pill.className = 'oc-pill warn';
+    pill.textContent = '需重新安装';
   } else if (inst){
     st.textContent = '已安装' + (CL.verText ? (' ' + CL.verText) : '') + arch;
     // 有 cli-check 结论时保留结论药丸；否则只显示一个「已安装」对勾。
@@ -647,11 +656,15 @@ function clRender(){
     pill.style.display = 'none';
   }
   var btnInstall = $('btn-cl-install');
-  btnInstall.style.display = (CL.statusKnown && inst) ? 'none' : '';
-  btnInstall.disabled = !CL.statusKnown || inst || CL.busy;
+  btnInstall.style.display = (CL.statusKnown && inst && !broken) ? 'none' : '';
+  // 损坏时按钮必须可点：重装是唯一的修复路径。
+  btnInstall.disabled = !CL.statusKnown || (inst && !broken) || CL.busy;
+  if (!CL.busy){
+    btnInstall.textContent = broken ? '重新安装网盘组件（约 14 MB）' : '安装网盘组件（约 14 MB）';
+  }
 
-  // 检查更新 / 更新组件：只在已安装时出现。
-  var showCli = CL.statusKnown && inst;
+  // 检查更新 / 更新组件：只在已安装且可执行时出现。
+  var showCli = CL.statusKnown && inst && !broken;
   var btnCheck  = $('btn-cl-cli-check');
   var btnUpdate = $('btn-cl-cli-update');
   btnCheck.style.display  = showCli ? '' : 'none';
@@ -672,20 +685,24 @@ function clRender(){
 
   // 第二步：未登录时始终显示登录区；第一步未完成时整体禁用并给出提示。
   $('cl-login-box').style.display   = logged ? 'none' : '';
-  $('cl-logged').style.display      = (inst && logged) ? '' : 'none';
+  $('cl-logged').style.display      = (inst && !broken && logged) ? '' : 'none';
   $('cl-step2-lock').style.display  = (CL.statusKnown && !inst) ? '' : 'none';
-  $('btn-cl-loginurl').disabled     = !inst || CL.busy;
-  $('btn-cl-logincode').disabled    = !inst || CL.busy;
-  $('cl-code').disabled             = !inst || CL.busy;
+  $('btn-cl-loginurl').disabled     = !inst || broken || CL.busy;
+  $('btn-cl-logincode').disabled    = !inst || broken || CL.busy;
+  $('cl-code').disabled             = !inst || broken || CL.busy;
   $('btn-cl-logout').disabled       = CL.busy;
 
-  // 登录提示文案：未登录 / 登录态无法确认要分开说，避免「看着像已登录」。
+  // 登录提示文案：未登录 / 登录态无法确认 / 组件损坏要分开说，
+  // 避免「看着像已登录」，也避免把损坏的组件引导到登录。
   var loginHint = $('cl-login-hint');
   if (loginHint){
     if (!CL.statusKnown){
       loginHint.textContent = CL.statusTried
         ? '登录状态读取失败，请刷新页面后重试。'
         : '正在读取登录状态…';
+    } else if (broken){
+      loginHint.textContent = '组件文件存在但无法执行，可能已损坏，请重新安装。'
+        + '重新安装后再获取授权链接；登录状态与加密口令不会被覆盖。';
     } else if (CL.authUncertain){
       loginHint.textContent = '无法确认登录状态，请重新登录。点击下面的按钮获取授权链接，'
         + '在浏览器里登录百度账号并授权，然后把页面上的授权码粘贴回这里。';
@@ -698,7 +715,7 @@ function clRender(){
   }
 
   // 第三步
-  var ready = inst && logged;
+  var ready = inst && !broken && logged;
   $('btn-cl-backup').disabled     = !ready || CL.busy;
   $('btn-cl-refresh').disabled    = !ready || CL.busy;
   $('btn-cl-pass-save').disabled  = !inst || CL.busy;
@@ -732,6 +749,7 @@ function clStatus(){
     if (!r || !r.ok){
       CL.statusKnown = false;
       CL.installed = false;
+      CL.executable = false;
       CL.logged = false;
       CL.authUncertain = false;
       clErr('cl-err1', ((r && r.error) || '读取网盘组件状态失败') + clNet(r));
@@ -744,6 +762,10 @@ function clStatus(){
     var auth = d.auth || {};
     CL.statusKnown = true;
     CL.installed   = (cli.installed === true);
+    // executable 是新增字段：老后端不返回时按 installed 兜底，避免把
+    // 「字段缺失」误判成「损坏」而把正常用户赶去重装。
+    CL.executable  = (cli.executable === undefined || cli.executable === null)
+      ? CL.installed : (cli.executable === true);
     CL.logged      = (auth.logged_in === true);
     CL.authUncertain = (auth.uncertain === true);
     CL.arch        = d.arch || '';
