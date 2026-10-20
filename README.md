@@ -268,7 +268,7 @@ openclaw.sh restore <文件名> [--no-safety]
 iStoreOS 25.12.x 基于 OpenWrt 25.12，包管理器是 **apk-tools v3**，请安装：
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.8.3-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.8.4-r1.apk
 ```
 
 **不要**装 `...-v2.apk` —— 那是 apk-tools 2.x / Alpine 的格式，不是 OpenWrt 25.12 的
@@ -370,13 +370,13 @@ python3 scripts/build_apk.py
 ### apk（OpenWrt 25.12+ / apk-tools 3.x）
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.8.3-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.8.4-r1.apk
 ```
 
 ### ipk（opkg）—— **OpenWrt 24.10 及更早、iStoreOS 等 opkg 系统**
 
 ```sh
-opkg install luci-app-openclaw_1.8.3_all.ipk
+opkg install luci-app-openclaw_1.8.4_all.ipk
 ```
 
 在 LuCI / iStore 界面里也可以直接「手动上传安装」这个 ipk。
@@ -400,7 +400,7 @@ opkg install luci-app-openclaw_1.8.3_all.ipk
 ### .run 自解压（无需包管理器）
 
 ```sh
-sh luci-app-openclaw-1.8.3.run
+sh luci-app-openclaw-1.8.4.run
 ```
 
 ### 集成到固件 / SDK 编译
@@ -415,7 +415,7 @@ make package/luci-app-openclaw/compile V=s
 ### 自行生成安装包（无需 SDK）
 
 ```sh
-python3 scripts/build_apk.py --version 1.8.3 --release 1 --sign
+python3 scripts/build_apk.py --version 1.8.4 --release 1 --sign
 python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 / ipk）
 ```
 
@@ -523,6 +523,22 @@ tools/verify-project.sh
 安全闸门会直接拦截：越界路径、危险路径（`.ssh`、`/etc/passwd`、`.bashrc`）、
 新增二进制、`rm -rf`、`curl | sh`、`eval`、写系统账户文件、反弹 shell、
 fork 炸弹、明文密钥、删除关键文件。
+
+## 升级与向后兼容（设计规范）
+
+**改动数据目录、文件名、配置键、cron 行、进程布局之前，先读
+[`docs/UPGRADE-COMPAT.md`](docs/UPGRADE-COMPAT.md)。**
+
+核心约束（完整规则与实现配方见该文件）：
+
+1. 数据目录与文件名是**公开契约**，改名/移动属于破坏性变更，必须同时提供迁移；
+2. 迁移必须**幂等**（断电重跑结果一致），靠状态判断而不是"这次是升级"；
+3. 迁移一律**先复制 → 再验证 → 最后切换**，失败保留原数据；
+4. 新配置项必须在**代码侧有默认值**，让老配置不迁移也能跑；
+5. 清理旧版本遗留物要**列确切路径**，不许通配符扫目录；
+6. 配置变更用 `main.config_version` 排序执行，每步只做一件事；
+7. 改动了上述任意一项时，除 `verify-project.sh` 外还要手工做一次
+   **"上一版数据目录 + 新版本"** 的启动验证 —— 干净安装的回归发现不了升级问题。
 
 ## 说明与已知限制
 

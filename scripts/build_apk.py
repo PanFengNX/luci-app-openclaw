@@ -69,6 +69,20 @@ chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null
 chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null
 chmod +x /usr/bin/openclaw 2>/dev/null
 rm -f /tmp/luci-indexcache /tmp/luci-modulecache
+# 上面的 chmod 都带 2>/dev/null：只读 /usr、overlay 写满时它们会静默失败，
+# 用户看到的是"命令不存在"而不是安装失败。这里统一复核一次可执行位，
+# 缺了就报错退出，让包管理器把这次安装标成失败。
+missing=""
+for f in /usr/bin/openclaw /etc/init.d/openclaw /usr/libexec/istorec/openclaw.sh; do
+	[ -x "$f" ] || missing="$missing $f"
+done
+for f in /usr/libexec/openclaw/*.sh; do
+	[ -x "$f" ] || missing="$missing $f"
+done
+if [ -n "$missing" ]; then
+	echo "openclaw: 以下文件缺少可执行权限，安装不完整：$missing" >&2
+	exit 1
+fi
 exit 0
 """
 
