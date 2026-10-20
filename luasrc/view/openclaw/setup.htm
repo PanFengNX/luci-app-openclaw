@@ -1,13 +1,21 @@
 <%+header%>
 <style>
 /* ===== OpenClaw 统一视图样式（10 个视图共用，逐字节一致） =====
- * 中性色统一使用半透明 rgba(127,127,127,α)：同一个值在浅色底上呈浅灰、
- * 在深色底上呈深灰，自动跟随 LuCI 主题，不依赖系统配色方案媒体查询。
+ * 分隔线/底纹等中性色仍用半透明 rgba(127,127,127,α)，随底色自动明暗。
+ * 前景弱化色（dim/mute）改为相对 currentColor 的混色：深色主题下自动变浅、
+ * 浅色主题下自动变深，避免固定灰度在白底上到不了 WCAG AA；不支持 color-mix
+ * 的浏览器回退到按浅色主题标定的十六进制值。
  * 强调色（蓝/绿/橙/红）保持固定十六进制，明暗底上均有足够对比度。 */
-:root{--oc-fg-dim:rgba(127,127,127,.95);--oc-fg-mute:rgba(127,127,127,.72);
+:root{
+  /* 兜底：不支持 color-mix 的浏览器按浅色主题取可读值 */
+  --oc-fg-dim:#4a4f57;
+  --oc-fg-mute:#5f6670;
+  /* 支持时跟随主题文字色 */
+  --oc-fg-dim:color-mix(in srgb, currentColor 82%, transparent);
+  --oc-fg-mute:color-mix(in srgb, currentColor 72%, transparent);
   --oc-line:rgba(127,127,127,.26);--oc-line-soft:rgba(127,127,127,.14);
   --oc-surface:rgba(127,127,127,.06);--oc-surface-2:rgba(127,127,127,.11);
-  --oc-accent:#0b74d8;--oc-ok:#2f8f3f;--oc-warn:#c05621;--oc-err:#cc2222;}
+  --oc-accent:#0a63bb;--oc-ok:#1f6b2c;--oc-warn:#c05621;--oc-err:#cc2222;}
 
 /* 卡片 */
 .oc-card{border:1px solid var(--oc-line-soft);border-radius:12px;background:var(--oc-surface);padding:20px 22px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.04),0 6px 20px rgba(0,0,0,.05)}
