@@ -777,7 +777,7 @@ cmd_set_encrypt() {
 # ---------------------------------------------------------------- status
 cmd_status() {
 	local arch bin installed=false path="" ver="" logged=false user="" expires="" raw=""
-	local tmp rc out jlog k
+	local uncertain=false tmp rc k
 
 	arch="$(cloud_arch)"
 
@@ -802,29 +802,22 @@ cmd_status() {
 		if [ "$rc" -ne 0 ]; then
 			# 老版本 CLI 可能没有 --json
 			cloud_run 25 "$bin" whoami >"$tmp" 2>&1
-			rc=$?
 		fi
-		out="$(cat "$tmp" 2>/dev/null)"
 		# raw 只放 whoami 的输出，且先脱敏、截断；绝不包含 config.json。
 		raw="$(cloud_redact <"$tmp" 2>/dev/null | head -c 500)"
 
-		jlog="$(cloud_json_scalar "$tmp" logged_in)"
-		[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" loggedIn)"
-		[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" is_login)"
-		[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" isLogin)"
-		case "$jlog" in
-			true|TRUE|True|1|yes|Yes)    logged=true ;;
-			false|FALSE|False|0|no|No)   logged=false ;;
-			*)
-				case "$out" in
-					*未登录*|*"not logged in"*|*"Not logged in"*|*"not login"*|*"no login"*|*"login required"*|*"please login"*|*请先登录*|*未授权*)
-						logged=false ;;
-					*已登录*|*"logged in"*|*"Logged in"*|*"login as"*|*用户名*|*[Uu]sername*)
-						logged=true ;;
-					*)
-						[ "$rc" -eq 0 ] && logged=true || logged=false ;;
-				esac ;;
-		esac
+		# 登录判定只有 cloud_is_logged_in 一处口径（默认未登录、无法确认也算
+		# 未登录）。把刚取到的 whoami 输出交给它复用，避免重复执行 bdpan。
+		# uncertain 只用于前端区分「明确未登录」与「组件在但登录态无法确认」。
+		CLOUD_AUTH_SNAPSHOT="$tmp"
+		if cloud_is_logged_in; then
+			logged=true
+		else
+			logged=false
+			if [ "$CLOUD_AUTH_STATE" = "unknown" ]; then
+				uncertain=true
+			fi
+		fi
 
 		if [ "$logged" = "true" ]; then
 			for k in user_name userName display_name displayName nickname nick_name username user name; do
@@ -855,9 +848,9 @@ cmd_status() {
 		rm -f "$tmp" 2>/dev/null
 	fi
 
-	printf '{"ok":true,"arch":"%s","cli":{"installed":%s,"path":"%s","version":"%s"},"auth":{"logged_in":%s,"user":"%s","expires":"%s","raw":"%s"},"remote_dir":"%s","root":"%s","dir":"%s","home":"%s"}\n' \
+	printf '{"ok":true,"arch":"%s","cli":{"installed":%s,"path":"%s","version":"%s"},"auth":{"logged_in":%s,"uncertain":%s,"user":"%s","expires":"%s","raw":"%s"},"remote_dir":"%s","root":"%s","dir":"%s","home":"%s"}\n' \
 		"$arch" "$installed" "$(jstr "$path")" "$(jstr "$ver")" \
-		"$logged" "$(jstr "$user")" "$(jstr "$expires")" "$(jstr "$raw")" \
+		"$logged" "$uncertain" "$(jstr "$user")" "$(jstr "$expires")" "$(jstr "$raw")" \
 		"$(jstr "$OC_CLOUD_REMOTE")" "$(jstr "$OC_CLOUD_ROOT")" \
 		"$(jstr "$OC_CLOUD_DIR")" "$(jstr "$OC_CLOUD_HOME")"
 }
@@ -2579,41 +2572,114 @@ br_cleanup() {
 	return 0
 }
 
-cloud_is_logged_in() {
-	# 0 = 已登录；1 = 未登录 / 无法确认。判定口径与 cmd_status 保持一致。
-	local bin tmp rc out jlog logged
+cloud_auth_state() {
+	# cloud_auth_state <file> -> true / false / unknown
+	#
+	# 只看输出内容，不看退出码：退出码 0 只说明命令跑完了，不说明已登录。
+	# 登录是「必须有正面证据」的判断，判定顺序：
+	#   1) JSON 布尔字段（logged_in / loggedIn / is_login / isLogin / login）
+	#   2) JSON 账号类字段有非空值
+	#   3) 文本：先判未登录，再判已登录
+	#   4) 其余一律 unknown（调用方按未登录处理）
+	local f="$1" k v acct low
 
-	bin="$(cloud_bin_ready)" || return 1
-	tmp="$OC_RUNDIR/cloud-auth.$$"
-	rm -f "$tmp" 2>/dev/null
-	cloud_run 25 "$bin" whoami --json >"$tmp" 2>&1
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		# 老版本 CLI 可能没有 --json
-		cloud_run 25 "$bin" whoami >"$tmp" 2>&1
-		rc=$?
+	acct=""
+	for k in user_name username uname uid account display_name; do
+		v="$(cloud_json_scalar "$f" "$k")"
+		case "$v" in
+			''|null|NULL|undefined) ;;
+			*) acct="$v"; break ;;
+		esac
+	done
+
+	# JSON 布尔字段优先。ok 只表示「请求成功」，单独出现不算证据：必须
+	# 同时存在非空账号类字段才采信；ok:false 也不作为「未登录」的证据。
+	for k in logged_in loggedIn is_login isLogin login ok; do
+		v="$(cloud_json_scalar "$f" "$k")"
+		case "$v" in
+			''|null|NULL) continue ;;
+			true|TRUE|True|1|yes|Yes|YES)
+				if [ "$k" != "ok" ] || [ -n "$acct" ]; then
+					printf 'true'
+					return 0
+				fi ;;
+			false|FALSE|False|0|no|No|NO)
+				if [ "$k" != "ok" ]; then
+					printf 'false'
+					return 0
+				fi ;;
+		esac
+	done
+
+	# 账号类字段有值 -> 已登录
+	if [ -n "$acct" ]; then
+		printf 'true'
+		return 0
 	fi
-	out="$(cat "$tmp" 2>/dev/null)"
-	jlog="$(cloud_json_scalar "$tmp" logged_in)"
-	[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" loggedIn)"
-	[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" is_login)"
-	[ -n "$jlog" ] || jlog="$(cloud_json_scalar "$tmp" isLogin)"
-	rm -f "$tmp" 2>/dev/null
 
-	case "$jlog" in
-		true|TRUE|True|1|yes|Yes)  logged=true ;;
-		false|FALSE|False|0|no|No) logged=false ;;
+	# 文本兜底：先把 JSON 的键名剥掉（只保留值），避免 {"username":""} 的
+	# 键名被当成登录证据；统一转小写，省掉逐个大写变体。
+	# 顺序必须是「先未登录、再已登录」：输出里同时出现「未登录，请登录」
+	# 这种话时，必须命中前者。
+	low="$(sed 's/"[^"]*"[[:space:]]*:[[:space:]]*//g' "$f" 2>/dev/null | tr 'A-Z' 'a-z')"
+	case "$low" in
+		*未登录*|*没有登录*|*请先登录*|*请登录*|*"not logged in"*|*"not login"*|*"login required"*|*"please login"*|*unauthorized*|*未授权*|*expired*|*过期*|*"invalid token"*|*无效*)
+			printf 'false' ;;
+		*已登录*|*"logged in"*|*"login as"*|*用户名*|*username*|*"uid:"*)
+			printf 'true' ;;
 		*)
-			case "$out" in
-				*未登录*|*"not logged in"*|*"Not logged in"*|*"not login"*|*"no login"*|*"login required"*|*"please login"*|*请先登录*|*未授权*)
-					logged=false ;;
-				*已登录*|*"logged in"*|*"Logged in"*|*"login as"*|*用户名*|*[Uu]sername*)
-					logged=true ;;
-				*)
-					[ "$rc" -eq 0 ] && logged=true || logged=false ;;
-			esac ;;
+			printf 'unknown' ;;
 	esac
-	[ "$logged" = "true" ]
+}
+
+# cmd_status 已经执行过一次 whoami 时，把输出文件路径放在这里复用，避免为了
+# 判定登录态再跑一次 bdpan。cloud_is_logged_in 读取后立即清空。
+CLOUD_AUTH_SNAPSHOT=""
+# cloud_is_logged_in 最近一次的判定结果：true / false / unknown（给 status 用）
+CLOUD_AUTH_STATE=""
+
+cloud_is_logged_in() {
+	# 0 = 已登录；1 = 未登录 / 无法确认。判定口径只有 cloud_auth_state 一处。
+	# 默认未登录：无法确认时也返回 1，并留一行可排查的日志（stderr）。
+	local bin tmp rc state snip own snap
+
+	snap="$CLOUD_AUTH_SNAPSHOT"
+	CLOUD_AUTH_SNAPSHOT=""
+	CLOUD_AUTH_STATE=""
+	tmp=""
+	own=0
+	if [ -n "$snap" ] && [ -f "$snap" ]; then
+		tmp="$snap"
+	else
+		bin="$(cloud_bin_ready)" || return 1
+		tmp="$OC_RUNDIR/cloud-auth.$$"
+		own=1
+		rm -f "$tmp" 2>/dev/null
+		cloud_run 25 "$bin" whoami --json >"$tmp" 2>&1
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			# 老版本 CLI 可能没有 --json
+			cloud_run 25 "$bin" whoami >"$tmp" 2>&1
+		fi
+	fi
+
+	state="$(cloud_auth_state "$tmp")"
+	CLOUD_AUTH_STATE="$state"
+	snip=""
+	if [ "$state" != "true" ] && [ "$state" != "false" ]; then
+		# 脱敏 + 压成一行 + 截断；只进日志，绝不进 stdout 的 JSON。
+		snip="$(cloud_redact <"$tmp" 2>/dev/null | tr '\n\r\t' '   ' | head -c 120)"
+	fi
+	if [ "$own" -eq 1 ]; then
+		rm -f "$tmp" 2>/dev/null
+	fi
+
+	case "$state" in
+		true)  return 0 ;;
+		false) return 1 ;;
+	esac
+	cblog "登录状态无法确认，按未登录处理：${snip:-无输出}"
+	return 1
 }
 
 cloud_remote_list_tsv() {

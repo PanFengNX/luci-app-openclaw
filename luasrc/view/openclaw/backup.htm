@@ -178,11 +178,11 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
   <!-- ── 第二步：登录 ───────────────────────────────────────────── -->
   <div class="oc-sub">第二步：登录百度网盘</div>
   <div id="cl-login-box">
-    <div class="oc-hint">
+    <div class="oc-hint" id="cl-login-hint">
       点击下面的按钮获取授权链接，在浏览器里登录百度账号并授权，然后把页面上的授权码粘贴回这里。
     </div>
     <div class="oc-actions">
-      <button id="btn-cl-loginurl" disabled>① 获取授权链接</button>
+      <button id="btn-cl-loginurl" class="oc-btn green" disabled>① 获取授权链接</button>
     </div>
     <div id="cl-url-wrap" style="display:none;margin-top:8px">
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
@@ -557,6 +557,7 @@ var CL = {
   statusTried: false,
   installed: false,
   logged: false,
+  authUncertain: false, // 组件在，但 whoami 的输出无法判定登录态
   passSet: false,
   encOn: false,        // main.cloud_encrypt：上传前加密开关（默认关闭）
   encKnown: false,     // encrypt-status 是否已成功读取
@@ -670,6 +671,24 @@ function clRender(){
   $('cl-code').disabled             = !inst || CL.busy;
   $('btn-cl-logout').disabled       = CL.busy;
 
+  // 登录提示文案：未登录 / 登录态无法确认要分开说，避免「看着像已登录」。
+  var loginHint = $('cl-login-hint');
+  if (loginHint){
+    if (!CL.statusKnown){
+      loginHint.textContent = CL.statusTried
+        ? '登录状态读取失败，请刷新页面后重试。'
+        : '正在读取登录状态…';
+    } else if (CL.authUncertain){
+      loginHint.textContent = '无法确认登录状态，请重新登录。点击下面的按钮获取授权链接，'
+        + '在浏览器里登录百度账号并授权，然后把页面上的授权码粘贴回这里。';
+    } else if (!inst){
+      loginHint.textContent = '尚未登录百度账号。请先安装网盘组件，再获取授权链接。';
+    } else {
+      loginHint.textContent = '尚未登录百度账号。点击下面的按钮获取授权链接，'
+        + '在浏览器里登录百度账号并授权，然后把页面上的授权码粘贴回这里。';
+    }
+  }
+
   // 第三步
   var ready = inst && logged;
   $('btn-cl-backup').disabled     = !ready || CL.busy;
@@ -706,6 +725,7 @@ function clStatus(){
       CL.statusKnown = false;
       CL.installed = false;
       CL.logged = false;
+      CL.authUncertain = false;
       clErr('cl-err1', ((r && r.error) || '读取网盘组件状态失败') + clNet(r));
       clRender();
       clEmptyList('组件状态未知，请刷新页面重试');
@@ -717,6 +737,7 @@ function clStatus(){
     CL.statusKnown = true;
     CL.installed   = (cli.installed === true);
     CL.logged      = (auth.logged_in === true);
+    CL.authUncertain = (auth.uncertain === true);
     CL.arch        = d.arch || '';
     CL.verText     = clVersion(cli.version);
     $('cl-user').textContent = auth.user || '（后端未返回用户名）';
