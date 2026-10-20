@@ -1,11 +1,13 @@
 <%+header%>
 <style>
 /* ===== OpenClaw 统一视图样式（10 个视图共用，逐字节一致） =====
- * 分隔线/底纹等中性色仍用半透明 rgba(127,127,127,α)，随底色自动明暗。
- * 前景弱化色（dim/mute）改为相对 currentColor 的混色：深色主题下自动变浅、
- * 浅色主题下自动变深，避免固定灰度在白底上到不了 WCAG AA；不支持 color-mix
- * 的浏览器回退到按浅色主题标定的十六进制值。
- * 强调色（蓝/绿/橙/红）保持固定十六进制，明暗底上均有足够对比度。 */
+ * 中性色用半透明 rgba(127,127,127,α)，随底色自动明暗；前景弱化色用相对
+ * currentColor 的混色（深色主题自动变浅、浅色主题自动变深），保证 WCAG AA；
+ * 不支持 color-mix 的浏览器回退到按浅色主题标定的十六进制值。
+ * 强调色（蓝/绿/橙/红）用固定十六进制，明暗底上都有足够对比度。
+ *
+ * 版式：卡片最大宽度 940px，标签列固定 116px，控件最大宽度受限（不再拉满整行），
+ * 行内动作按钮一律降为次要样式 —— 一屏里不该出现五六个同等权重的实心蓝按钮。 */
 :root{
   /* 兜底：不支持 color-mix 的浏览器按浅色主题取可读值 */
   --oc-fg-dim:#4a4f57;
@@ -13,118 +15,193 @@
   /* 支持时跟随主题文字色 */
   --oc-fg-dim:color-mix(in srgb, currentColor 82%, transparent);
   --oc-fg-mute:color-mix(in srgb, currentColor 72%, transparent);
-  --oc-line:rgba(127,127,127,.26);--oc-line-soft:rgba(127,127,127,.14);
-  --oc-surface:rgba(127,127,127,.06);--oc-surface-2:rgba(127,127,127,.11);
-  --oc-accent:#0a63bb;--oc-ok:#1f6b2c;--oc-warn:#c05621;--oc-err:#cc2222;}
+  --oc-line:rgba(127,127,127,.26);--oc-line-soft:rgba(127,127,127,.13);
+  --oc-surface:rgba(127,127,127,.055);--oc-surface-2:rgba(127,127,127,.10);
+  --oc-accent:#0a63bb;--oc-ok:#1f6b2c;--oc-warn:#c05621;--oc-err:#cc2222;
+  --oc-r:12px;--oc-r-sm:8px;--oc-label:116px;}
 
-/* 卡片 */
-.oc-card{border:1px solid var(--oc-line-soft);border-radius:12px;background:var(--oc-surface);padding:20px 22px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.04),0 6px 20px rgba(0,0,0,.05)}
-.oc-card h3{margin:0 0 16px;padding-bottom:10px;border-bottom:1px solid var(--oc-line-soft);font-size:15px;font-weight:600;letter-spacing:.01em;line-height:1.4}
+/* ── 卡片 ───────────────────────────────────────────────────────── */
+.oc-card{max-width:940px;box-sizing:border-box;border:1px solid var(--oc-line-soft);
+  border-radius:var(--oc-r);background:var(--oc-surface);padding:18px 20px 20px;
+  margin:0 0 14px;box-shadow:0 1px 2px rgba(0,0,0,.03),0 10px 28px -18px rgba(0,0,0,.16)}
+.oc-card h3{margin:0 0 14px;padding:0 0 10px;border-bottom:1px solid var(--oc-line-soft);
+  font-size:14px;font-weight:600;letter-spacing:.02em;line-height:1.45}
+.oc-card>h3:last-child{margin-bottom:0;padding-bottom:0;border-bottom:0}
 
-/* 多列容器：宽屏两列，窄屏自动单列；行间距交给 .oc-card 的 margin-bottom */
-.oc-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:0 16px;align-items:start}
-
-/* 渠道卡片头 */
-.oc-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
-.oc-head h3{margin:0;padding-bottom:0;border-bottom:0;font-size:15px}
+/* 卡片头：标题 + 右侧标签/按钮 */
+.oc-head{display:flex;align-items:center;gap:10px;margin:0 0 14px;
+  padding:0 0 10px;border-bottom:1px solid var(--oc-line-soft)}
+.oc-head h3{flex:1 1 auto;margin:0;padding:0;border:0;min-width:0}
 .oc-head .oc-tag:first-of-type{margin-left:auto}
 
-/* 键值区 */
-.oc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
-.oc-sub{margin:20px 0 8px;font-size:13px;font-weight:600;letter-spacing:.02em;color:var(--oc-fg-mute);text-transform:none}
-.oc-card>.oc-sub:first-of-type{margin-top:0}
-.oc-kv{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px dashed var(--oc-line-soft);font-size:13px;line-height:1.5;font-variant-numeric:tabular-nums}
-.oc-kv:last-child{border-bottom:none}
-.oc-kv b{font-size:12.5px;font-weight:400;color:var(--oc-fg-mute);white-space:nowrap;margin:0}
-.oc-kv>span{text-align:right;word-break:break-all}
+/* ── 分组标题：短竖条 + 小字，和字段标签明确区分开 ──────────────── */
+.oc-sub{display:flex;align-items:center;gap:8px;margin:20px 0 8px;font-size:12px;
+  font-weight:600;letter-spacing:.06em;color:var(--oc-fg-mute)}
+.oc-sub::before{content:"";flex:0 0 3px;width:3px;height:12px;border-radius:2px;
+  background:var(--oc-accent);opacity:.8}
+.oc-card>.oc-sub:first-of-type,.oc-card>.oc-hint:first-of-type{margin-top:0}
 
-/* 概览数字块 */
-.oc-kpi{display:flex;flex-direction:column;align-items:flex-start;gap:2px;font-size:20px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums}
-.oc-kpi .oc-kpi-label{font-size:12px;font-weight:400;color:var(--oc-fg-mute)}
-.oc-kpi-label{margin-top:2px;letter-spacing:.02em}
-.oc-kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;padding:14px 0 4px;margin-bottom:6px;border-bottom:1px solid var(--oc-line-soft)}
+/* ── 多列容器 ───────────────────────────────────────────────────── */
+.oc-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));
+  gap:0 16px;align-items:start;max-width:940px}
 
-/* 状态徽章 */
-.oc-badge{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:500;white-space:nowrap;vertical-align:middle}
-.oc-badge::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 6px}
-.oc-run{background:rgba(47,143,63,.12);color:var(--oc-ok)}
+/* ── 键值区：标签定宽 + 值紧跟其后（不再把值甩到行尾） ──────────── */
+.oc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:0 28px}
+.oc-kv{display:grid;grid-template-columns:104px minmax(0,1fr);gap:10px;align-items:baseline;
+  padding:8px 0;border-bottom:1px solid var(--oc-line-soft);font-size:13px;line-height:1.5;
+  font-variant-numeric:tabular-nums}
+.oc-kv>b{min-width:0;margin:0;font-size:12.5px;font-weight:400;color:var(--oc-fg-mute);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.oc-kv>span{justify-self:start;text-align:left;word-break:break-word;min-width:0}
+
+/* ── 概览数字条：标签在上、数值在下，列间竖线分隔 ───────────────── */
+.oc-kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0;
+  padding:2px 0 16px;margin:0 0 4px;border-bottom:1px solid var(--oc-line-soft)}
+.oc-kpi{display:flex;flex-direction:column-reverse;gap:7px;align-items:flex-start;min-width:0;
+  padding:0 18px;border-left:1px solid var(--oc-line-soft);font-size:17px;font-weight:600;
+  line-height:1.25;font-variant-numeric:tabular-nums}
+.oc-kpi:first-child{padding-left:0;border-left:0}
+.oc-kpi-label,.oc-kpi .oc-kpi-label{margin:0;font-size:11.5px;font-weight:400;
+  letter-spacing:.06em;color:var(--oc-fg-mute)}
+
+/* ── 徽章 / 药丸 ────────────────────────────────────────────────── */
+.oc-badge{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:1px 9px;
+  font-size:12px;font-weight:500;white-space:nowrap;vertical-align:middle}
+.oc-badge::before{content:"";flex:0 0 6px;width:6px;height:6px;border-radius:50%;background:currentColor}
+.oc-run{background:rgba(31,107,44,.12);color:var(--oc-ok)}
 .oc-stop{background:rgba(127,127,127,.14);color:var(--oc-fg-dim)}
 .oc-none{background:rgba(192,86,33,.12);color:var(--oc-warn)}
-
-/* 日志（深色控制台） */
-.oc-log{background:#1b1b1b;color:#e6e6e6;border-radius:8px;padding:12px;height:280px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap}
-.oc-log::-webkit-scrollbar{width:10px;height:10px}
-.oc-log::-webkit-scrollbar-thumb{background:rgba(127,127,127,.55);border-radius:6px}
-.oc-log::-webkit-scrollbar-track{background:transparent}
-
-/* 执行输出 */
-.oc-out{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;background:var(--oc-surface-2);border-radius:8px;padding:10px;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-variant-numeric:tabular-nums}
-
-/* 表单行：标签固定宽度，控件占满剩余空间；窄屏自动堆叠 */
-.oc-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;margin-bottom:12px}
-.oc-row label{flex:0 0 150px;width:150px;font-size:13px;color:var(--oc-fg-dim);line-height:1.5}
-.oc-row input[type=text],.oc-row input[type=password],.oc-row select{flex:1 1 220px}
-.oc-row .oc-hint{flex:0 1 auto;min-width:0;margin-top:0}
-@media (max-width:600px){.oc-row label{display:block;flex:0 0 100%;width:auto;margin-bottom:0}
-  .oc-row input[type=text],.oc-row input[type=password],.oc-row select{flex:1 1 100%}}
-
-/* 提示与语义文字 */
-.oc-hint{font-size:12px;color:var(--oc-fg-mute);margin-top:4px;line-height:1.6}
-.oc-note{border-left:3px solid var(--oc-accent);background:var(--oc-surface-2);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--oc-fg-dim);margin-top:8px;line-height:1.6}
-.oc-warn{color:var(--oc-warn)}
-.oc-ok{color:var(--oc-ok)}
-.oc-err{color:var(--oc-err);font-size:12px;line-height:1.6}
-
-/* 小标签 */
-.oc-tag{display:inline-block;border-radius:999px;padding:2px 8px;font-size:12px;background:var(--oc-surface-2);color:var(--oc-fg-dim);white-space:nowrap;vertical-align:middle}
+.oc-pill{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:600;
+  font-variant-numeric:tabular-nums;background:rgba(10,99,187,.10);color:var(--oc-accent);
+  border:1px solid rgba(10,99,187,.18);line-height:1.6;vertical-align:middle;white-space:nowrap}
+.oc-pill.ok{background:rgba(31,107,44,.12);color:var(--oc-ok);border-color:rgba(31,107,44,.28)}
+.oc-pill.warn{background:rgba(192,86,33,.12);color:var(--oc-warn);border-color:rgba(192,86,33,.28)}
+.oc-pill.accent{background:rgba(10,99,187,.12);color:var(--oc-accent);border-color:rgba(10,99,187,.26)}
+.oc-tag{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11.5px;
+  background:var(--oc-surface-2);color:var(--oc-fg-dim);white-space:nowrap;vertical-align:middle}
 .oc-tag.ok{color:var(--oc-ok)}
 .oc-tag.warn{color:var(--oc-warn)}
 .oc-tag.off{color:var(--oc-fg-mute)}
 
-/* 按钮 */
-button,.oc-btn{border:0;border-radius:8px;padding:7px 16px;font-size:13px;background:var(--oc-accent);color:#fff;cursor:pointer;margin-right:6px;min-height:34px;line-height:1.35;box-sizing:border-box;transition:filter .12s,background .12s,color .12s}
+/* ── 控制台 / 输出 ─────────────────────────────────────────────── */
+.oc-log{background:#1b1b1b;color:#e6e6e6;border-radius:var(--oc-r-sm);padding:12px 14px;
+  height:280px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
+  line-height:1.6;white-space:pre-wrap}
+.oc-log::-webkit-scrollbar{width:10px;height:10px}
+.oc-log::-webkit-scrollbar-thumb{background:rgba(127,127,127,.55);border-radius:6px}
+.oc-log::-webkit-scrollbar-track{background:transparent}
+.oc-out{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;
+  background:var(--oc-surface-2);border-radius:var(--oc-r-sm);padding:10px 12px;
+  max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+  font-variant-numeric:tabular-nums}
+
+/* ── 表单行：标签定宽，控件限宽，提示独占一行 ───────────────────── */
+.oc-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0 0 12px}
+.oc-row>label{flex:0 0 var(--oc-label);width:var(--oc-label);font-size:12.5px;
+  color:var(--oc-fg-dim);line-height:1.5}
+.oc-row>input[type=text],.oc-row>input[type=password]{flex:1 1 220px;min-width:0;max-width:440px}
+.oc-row>input[type=number]{flex:0 0 96px;max-width:96px}
+.oc-row>input[type=time]{flex:0 0 132px;max-width:132px}
+.oc-row>input[type=file]{flex:0 1 320px;min-width:0}
+.oc-row>select{flex:1 1 180px;min-width:0;max-width:320px}
+.oc-row>select+select{flex:0 1 150px;max-width:150px}
+.oc-row>input[type=checkbox],.oc-row>input[type=radio]{flex:0 0 auto;margin:0}
+/* 提示换行到控件下方，与控件左边缘对齐：否则它会和按钮抢同一行，
+   把「上传并恢复」这类按钮挤到下一行单独成行。 */
+.oc-row>.oc-hint{flex:0 0 auto;box-sizing:border-box;margin:0 0 0 calc(var(--oc-label) + 12px);
+  width:calc(100% - var(--oc-label) - 12px)}
+/* 行内横向组合（输入框 + 复制按钮等） */
+.oc-inline{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+.oc-inline>input[type=text],.oc-inline>input[type=password],.oc-inline>.oc-addr{flex:1 1 220px;min-width:0}
+
+/* ── 非卡片内的地址 / 路径行 ───────────────────────────────────── */
+.oc-rowline{display:grid;grid-template-columns:var(--oc-label) minmax(0,1fr);gap:12px;
+  align-items:center;padding:8px 0;border-bottom:1px solid var(--oc-line-soft);min-height:38px}
+.oc-rowline:last-child{border-bottom:0}
+.oc-rowline>span:first-child{color:var(--oc-fg-mute);font-size:12.5px;white-space:nowrap}
+.oc-rowline>span:last-child{text-align:left;min-width:0;word-break:break-word}
+
+/* ── 提示与语义文字 ────────────────────────────────────────────── */
+.oc-hint{font-size:12px;line-height:1.75;color:var(--oc-fg-mute);margin:6px 0;max-width:940px}
+.oc-note{border-left:2px solid var(--oc-accent);background:var(--oc-surface-2);
+  border-radius:0 var(--oc-r-sm) var(--oc-r-sm) 0;padding:10px 14px;font-size:12px;
+  line-height:1.75;color:var(--oc-fg-dim);margin:8px 0 0}
+.oc-note p{margin:0 0 6px}
+.oc-note p:last-child{margin:0}
+.oc-warn{color:var(--oc-warn)}
+.oc-ok{color:var(--oc-ok)}
+.oc-err{color:var(--oc-err);font-size:12px;line-height:1.7}
+
+/* ── 按钮 ─────────────────────────────────────────────────────── */
+button,.oc-btn{border:1px solid transparent;border-radius:var(--oc-r-sm);padding:6px 14px;
+  font-size:13px;font-weight:500;font-family:inherit;background:var(--oc-accent);color:#fff;
+  cursor:pointer;min-height:32px;line-height:1.35;box-sizing:border-box;
+  transition:filter .12s,background .12s,color .12s}
 button:hover,.oc-btn:hover{filter:brightness(.94)}
 button:focus-visible,.oc-btn:focus-visible{outline:2px solid var(--oc-accent);outline-offset:2px}
 .oc-btn.gray{background:#6c757d}
 .oc-btn.green{background:var(--oc-ok)}
 .oc-btn.danger{background:var(--oc-err)}
-.oc-btn.ghost{background:transparent;border:1px solid var(--oc-line);color:inherit}
+.oc-btn.ghost{background:transparent;border-color:var(--oc-line);color:inherit}
 .oc-btn.ghost:hover{background:var(--oc-surface-2);filter:none}
-button:disabled,.oc-btn:disabled{opacity:.55;cursor:not-allowed}
+button:disabled,.oc-btn:disabled{opacity:.5;cursor:not-allowed;filter:none}
 button:disabled:hover,.oc-btn:disabled:hover{filter:none}
-.oc-btn.ghost:disabled{background:transparent;border-color:var(--oc-line-soft);color:var(--oc-fg-mute);opacity:.55}
+.oc-btn.ghost:disabled{background:transparent;border-color:var(--oc-line-soft);
+  color:var(--oc-fg-mute);opacity:.55}
 .oc-btn.ghost:disabled:hover{filter:none}
 #btn-open:disabled{background:var(--oc-line);color:var(--oc-fg-mute)}
+/* 紧贴输入框的行内按钮、以及操作条里第二个之后的按钮，一律降为次要样式 */
+.oc-row button,.oc-row .oc-btn,.oc-rowline button,.oc-rowline .oc-btn,
+.oc-actions button+button:not(.ghost):not(.green):not(.danger):not(.gray){
+  background:var(--oc-surface-2);border-color:var(--oc-line);color:inherit}
+.oc-row button:hover,.oc-row .oc-btn:hover,.oc-rowline button:hover,.oc-rowline .oc-btn:hover,
+.oc-actions button+button:not(.ghost):not(.green):not(.danger):not(.gray):hover{
+  background:var(--oc-line-soft);filter:none}
+.oc-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 0}
+.oc-actions button,.oc-actions .oc-btn,.oc-actions label{margin:0}
+.oc-actions>.oc-hint{margin:0;flex:0 1 auto;max-width:none}
 
-/* 操作条 */
-.oc-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}
-.oc-actions button,.oc-actions .oc-btn{margin-right:0}
+/* ── 表单控件 ─────────────────────────────────────────────────── */
+select,input[type=text],input[type=password],input[type=number],input[type=time],
+input[type=file],textarea{border:1px solid var(--oc-line);border-radius:var(--oc-r-sm);
+  background:var(--oc-surface);padding:0 10px;font-size:13px;font-family:inherit;
+  height:32px;min-height:32px;line-height:1.4;color:inherit;box-sizing:border-box;max-width:100%}
+textarea{height:auto;padding:8px 10px;line-height:1.6}
+input[type=file]{height:auto;min-height:32px;padding:4px 8px;font-size:12px;line-height:1.6}
+input[type=checkbox]{width:15px;height:15px;min-height:0;padding:0;margin:0;
+  accent-color:var(--oc-accent);vertical-align:-2px;border-radius:3px}
+select:focus,input[type=text]:focus,input[type=password]:focus,input[type=number]:focus,
+input[type=time]:focus,textarea:focus{border-color:var(--oc-accent);outline:none;
+  box-shadow:0 0 0 3px rgba(10,99,187,.14)}
+input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
+  background:var(--oc-surface-2);min-width:0}
 
-/* 表单控件 */
-select,input[type=text],input[type=password]{border:1px solid var(--oc-line);border-radius:8px;background:var(--oc-surface);padding:6px 10px;font-size:13px;min-width:260px;min-height:34px;height:34px;line-height:1.4;color:inherit;box-sizing:border-box}
-select:focus,input[type=text]:focus,input[type=password]:focus{border-color:var(--oc-accent);outline:none;box-shadow:0 0 0 3px rgba(11,116,216,.15)}
-input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;background:var(--oc-surface-2);min-width:320px}
+/* ── 空状态 / 复制按钮 ────────────────────────────────────────── */
+.oc-empty{padding:22px 16px;text-align:center;border:1px dashed var(--oc-line);
+  border-radius:var(--oc-r);color:var(--oc-fg-mute);font-size:12.5px;background:transparent}
+.oc-copy{padding:3px 10px;font-size:12px;border-radius:var(--oc-r-sm);background:transparent;
+  color:var(--oc-accent);border:1px solid var(--oc-line);cursor:pointer;margin:0;min-height:28px}
+.oc-copy:hover{background:var(--oc-surface-2);filter:none}
 
-/* 非卡片内的地址 / 路径行 */
-.oc-rowline{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0}
-.oc-rowline>span{color:var(--oc-fg-mute);font-size:12.5px;white-space:nowrap}
+/* ── 说明列表 ─────────────────────────────────────────────────── */
+.oc-list{margin:0;padding:0;list-style:none;font-size:12px;line-height:1.75;color:var(--oc-fg-mute)}
+.oc-list>li{position:relative;padding-left:14px;margin:0 0 7px}
+.oc-list>li:last-child{margin-bottom:0}
+.oc-list>li::before{content:"";position:absolute;left:2px;top:.72em;width:4px;height:4px;
+  border-radius:50%;background:var(--oc-accent);opacity:.55}
 
-/* 版本号 / 数值药丸 */
-.oc-pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;background:rgba(11,116,216,.10);color:var(--oc-accent);border:1px solid rgba(11,116,216,.20);line-height:1.6;vertical-align:middle}
-.oc-pill.ok{background:rgba(47,143,63,.14);color:var(--oc-ok);border-color:rgba(47,143,63,.3)}
-.oc-pill.warn{background:rgba(192,86,33,.14);color:var(--oc-warn);border-color:rgba(192,86,33,.3)}
-.oc-pill.accent{background:rgba(11,116,216,.14);color:var(--oc-accent);border-color:rgba(11,116,216,.3)}
-
-/* 空状态 */
-.oc-empty{padding:24px 16px;text-align:center;border:1px dashed var(--oc-line);border-radius:12px;color:var(--oc-fg-mute);font-size:12.5px;background:transparent}
-
-/* 地址旁的复制按钮 */
-.oc-copy{padding:4px 10px;font-size:12px;border-radius:8px;background:transparent;color:var(--oc-accent);border:1px solid var(--oc-line);cursor:pointer;margin:0}
-.oc-copy:hover{background:var(--oc-surface-2)}
-
-/* 窄屏适配 */
-@media (max-width:600px){.oc-cols{grid-template-columns:1fr}
-  .oc-kv{flex-wrap:wrap}.oc-kv>span{text-align:left}}
+/* ── 窄屏 ─────────────────────────────────────────────────────── */
+@media (max-width:640px){
+  .oc-card{padding:16px 14px}
+  .oc-row>label{flex:0 0 100%;width:auto}
+  .oc-row>input[type=text],.oc-row>input[type=password],.oc-row>select{flex:1 1 100%;max-width:none}
+  .oc-row>.oc-hint{margin-left:0;width:100%}
+  .oc-cols{grid-template-columns:1fr}
+  .oc-kv{grid-template-columns:92px minmax(0,1fr)}
+  .oc-kpi{padding:0 12px}
+  .oc-rowline{flex-wrap:wrap}
+  .oc-rowline>span:last-child{text-align:left}
+}
 </style>
 
 <h2><a id="content" name="content">日志</a></h2>
@@ -136,7 +213,7 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;b
     <button id="btn-auto" class="oc-btn ghost">自动刷新：关</button>
     <button id="btn-doctor" class="oc-btn ghost">运行 doctor 体检</button>
     <button id="btn-export" class="oc-btn ghost">导出诊断包</button>
-    <span id="export-hint" style="font-size:12px;color:#888;margin-left:8px"></span>
+    <span id="export-hint" style="font-size:12px;color:#888"></span>
   </div>
   <div style="margin-top:10px" class="oc-out" id="out">加载中…</div>
   <div class="oc-hint">日志来源于 /var/log/openclaw.log（管理脚本）与 procd 标准输出（可用 logread 查看）。</div>
