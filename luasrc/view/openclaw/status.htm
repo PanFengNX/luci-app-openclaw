@@ -387,9 +387,13 @@ function post(url, data, cb){
   x.timeout = 900000;
   x.send(body.join('&'));
 }
-function get(url, cb){
+function get(url, cb, timeoutMs){
   var x = new XMLHttpRequest();
   x.open('GET', url, true);
+  // 必须有超时：没有的话请求一挂住回调就永远不来，界面停在"正在…"。
+  // 版本列表是唯一会串行跑两次网络下载的接口（后端最坏 60 秒），
+  // 所以它按调用传更长的超时，其余（状态、轮询）用默认 20 秒。
+  x.timeout = timeoutMs || 20000;
   var fin = once(cb);
   x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
   x.onerror   = function(){ fin({ok:false, net:true}); };
@@ -576,7 +580,12 @@ function cmpOne(v, c){
 // 它是「这次到底有没有拉到列表」的唯一依据 —— 只看数组是否为空无法区分
 // 「确实没有新版本」与「网络/镜像不可用」。
 function loadVersions(refresh, done){
+  // 后端一次要串行跑「npm 官方源 → 国内镜像 → Node 索引」，每步上限 20 秒，
+  // 所以给它 90 秒；状态与轮询类接口仍是默认 20 秒。
+  var VERSIONS_TIMEOUT = 90000;
+  setVerChecking(true);
   get(API.versions + (refresh ? '?refresh=1' : ''), function(r){
+    setVerChecking(false);
     // 整体失败（断网 / 超时 / 响应不是 JSON）：保留上一次的列表，只提示失败。
     if (!r || r.ok === false){
       state.versionsNet = true;
@@ -596,16 +605,37 @@ function loadVersions(refresh, done){
     // engines 到位后，已有 Node 的提示要重新判定（可能从"可用"变成"版本不满足"）。
     renderNodeExisting();
     if (done) done();
-  });
+  }, VERSIONS_TIMEOUT);
+}
+
+// 检查中：显示一行灰色提示并禁用「重试」。自动检查发生在进入页面时，
+// 没有反馈的话用户会以为这个区块坏了 —— 这正是他报的问题。
+function setVerChecking(on){
+  var box = $('ver-err'), lines = $('ver-err-lines'), btn = $('btn-ver-retry');
+  state.verLoading = !!on;
+  if (btn) btn.disabled = !!on;
+  if (!box || !lines) return;
+  if (on){
+    lines.textContent = '';
+    var d = document.createElement('div');
+    d.textContent = '正在检查更新…（网络慢时可能需要几十秒）';
+    lines.appendChild(d);
+    box.className = 'oc-hint';
+    box.style.display = '';
+  } else {
+    box.className = 'oc-hint oc-err';
+    renderVersionStatus();
+  }
 }
 
 // 版本列表失败提示：失败只影响"预填候选版本"，不影响升级入口本身。
 function versionErrors(){
   var out = [];
-  if (state.versionsNet) return ['无法获取版本列表：服务无响应，请稍后重试'];
+  if (state.versionsNet) return ['无法获取版本列表：请求超时或被中断（网络 / 镜像不可达），请点「重试」'];
   var st = jp(state.versionsStatus || '', {}) || {};
   var oc = st.oc || {}, nd = st.node || {};
   if (oc.ok === false) out.push('无法获取版本列表：' + (oc.error || '原因未知'));
+  else if (oc.source === 'mirror') out.push('版本列表来自国内镜像（registry.npmmirror.com），官方源不可达');
   if (nd.ok === false) out.push('无法获取 Node.js 版本列表：' + (nd.error || '原因未知'));
   return out;
 }
@@ -1253,7 +1283,9 @@ $('btn-repair').onclick = function(){
 };
 
 loadInfo();
-loadVersions(false);
+// 进入页面就检查一次更新：带 refresh=1 绕过后端 60 秒的失败缓存，
+// 否则刚失败过的设备要等一分钟才可能看到新结果。
+loadVersions(true);
 // node-existing 要逐个候选跑 node -v，放到首屏之后发起，
 // 慢探测不会阻塞主信息渲染。
 setTimeout(loadNodeExisting, 900);

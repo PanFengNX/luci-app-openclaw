@@ -524,8 +524,10 @@ oc_node_link() {
 
 # ---------------------------------------------------------------- http
 oc_fetch() {
-	# oc_fetch <url> <dest> [max-time]
-	local url="$1" dest="$2" mt="${3:-60}"
+	# oc_fetch <url> <dest> [max-time] [accept]
+	# accept 仅在 curl 可用时生效（curl 是唯一能可靠设置请求头的下载工具）；
+	# wget / uclient-fetch 本来就不发 Accept，忽略该参数即可，行为与不带时一致。
+	local url="$1" dest="$2" mt="${3:-60}" accept="${4:-}"
 	local proxy
 
 	# The URL may come from UCI (npm_registry / node_mirror) which the user
@@ -539,11 +541,15 @@ oc_fetch() {
 	fi
 
 	if command -v curl >/dev/null 2>&1; then
-		if [ -n "$proxy" ]; then
-			curl -fsSL --connect-timeout 10 --max-time "$mt" -x "$proxy" -o "$dest" "$url"
-		else
-			curl -fsSL --connect-timeout 10 --max-time "$mt" -o "$dest" "$url"
+		# 用 set -- 拼参数：可选头/代理都不需要 eval（URL 来自 UCI，不能进 shell 代码）。
+		set -- -fsSL --connect-timeout 10 --max-time "$mt"
+		if [ -n "$accept" ]; then
+			set -- "$@" -H "Accept: $accept"
 		fi
+		if [ -n "$proxy" ]; then
+			set -- "$@" -x "$proxy"
+		fi
+		curl "$@" -o "$dest" "$url"
 	elif command -v wget >/dev/null 2>&1; then
 		# busybox wget 没有 -x/--proxy 选项，只认 http_proxy / https_proxy 环境变量。
 		# 代理为空时**不要**导出这两个变量：空值会把调用方（或 busybox 默认值）

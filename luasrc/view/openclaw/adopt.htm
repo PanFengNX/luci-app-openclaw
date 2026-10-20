@@ -711,7 +711,7 @@ function browserMsg(text, bad){
   el.className = bad ? 'oc-hint oc-err' : 'oc-hint';
 }
 
-// 列表整块重建：每行 = 📁 + 名字（+ kind 药丸）。
+// 列表整块重建：每行 = ▸ + 名字（+ kind 药丸）。▸ 由 CSS 的 ::before 画，不用 emoji。
 // 名字与 kind 全部来自服务端，只走 createElement / textContent。
 function renderBrowseList(entries){
   var host = $('mig-list');

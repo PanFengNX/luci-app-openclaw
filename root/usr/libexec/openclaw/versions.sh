@@ -17,6 +17,21 @@ OC_LIB="$(dirname "$0")/lib.sh"
 OC_CACHE_DIR="${OC_RUNDIR:-/tmp/.openclaw}/cache"
 OC_CACHE_TTL=300
 
+# 单次下载上限。控制器一次 api_versions 请求会串行跑 oc-versions + node-versions，
+# 前端最多等 90 秒（status.htm 传的 per-call timeout）。所以后端整条链必须远小于
+# 90 秒：npm 20s + 镜像 20s + Node 20s = 60s 最坏，留 30s 余量。
+# 旧值是 60s + 90s = 150s，比前端 20s 的超时还长，自动检查必然报「服务无响应」。
+OC_FETCH_MT=20
+
+# npm 精简文档（abbreviated metadata）：带 engines 字段，体积比完整文档小一个
+# 数量级 —— 路由器内存有限，这个 Accept 头是必要的。wget/uclient-fetch 不发头，
+# 只是拿到完整文档，解析逻辑两者都兼容。
+NPM_ACCEPT='application/vnd.npm.install-v1+json'
+
+# 国内镜像：官方 registry 拉不到时回退一次（仅此一次）。只用于本次请求，
+# 绝不写回 main.npm_registry —— 那是用户在 LuCI 里的设置。
+OC_MIRROR_REGISTRY="https://registry.npmmirror.com"
+
 npm_registry() {
 	local r
 	r="$(uci_get main.npm_registry '')"
@@ -93,6 +108,9 @@ OC_V_OK=0
 OC_V_CACHED=0
 OC_V_COUNT=0
 OC_V_ERROR=""
+# 本次列表数据来自哪里：official（用户配置的 npm_registry）/ mirror（国内镜像）/
+# cache（直接读本地缓存，本次没有联网）。前端据此提示「（已尝试国内镜像）」。
+OC_V_SOURCE=""
 
 # 失败后短时间内不重复重试：状态页一次刷新会依次调用 oc-versions /
 # node-versions / status，离线设备上不缓存失败就要白等三个网络超时。
@@ -146,21 +164,99 @@ count_versions() {
 }
 
 # ---------------------------------------------------------------- OpenClaw
+OC_V_TMP=""		# fetch_oc_metadata 落盘的临时文件（成功时）
+OC_V_URL=""		# 实际成功下载用的 URL（官方或镜像）
+OC_V_R1=""		# 官方源失败原因
+OC_V_R2=""		# 国内镜像失败原因
+OC_V_FETCH_ERR=""	# 两个源都失败时的完整原因（含两个 URL）
+
+oc_source_save() {
+	# oc_source_save <official|mirror> —— 记下缓存里的数据来自哪个源。
+	# 下次命中缓存（不联网）时仍能如实告诉用户来源。
+	case "${1:-}" in
+		official|mirror) printf '%s\n' "$1" >"$OC_CACHE_DIR/oc-source.tsv" 2>/dev/null || true ;;
+	esac
+}
+
+oc_source_saved() {
+	local s
+	s="$(cat "$OC_CACHE_DIR/oc-source.tsv" 2>/dev/null)"
+	case "$s" in
+		official|mirror) printf '%s' "$s" ;;
+	esac
+}
+
+oc_fetch_err_text() {
+	# 两个源的原因都要带上：只报最后一个会让用户以为官方源没试过，
+	# 或者以为问题只出在镜像。
+	if [ -n "$OC_V_R1" ] && [ -n "$OC_V_R2" ]; then
+		printf '%s；国内镜像同样失败：%s' "$OC_V_R1" "$OC_V_R2"
+	else
+		printf '%s%s' "$OC_V_R1" "$OC_V_R2"
+	fi
+}
+
+oc_try_fetch() {
+	# oc_try_fetch <url> <slot>  slot = 1|2
+	# 成功：OC_V_TMP / OC_V_URL / OC_V_SOURCE 就位，返回 0
+	# 失败：对应 OC_V_R<slot> 记下原因，返回 1
+	local url="$1" slot="$2" tmp rc reason
+	tmp="$(mktemp "${OC_CACHE_DIR}/npm.XXXXXX" 2>/dev/null || echo "${OC_CACHE_DIR}/npm.$$")"
+
+	# 必须走 oc_fetch：只有它会读 main.http_proxy 并加 -x / 导出 http_proxy。
+	# 旧实现这里直接调 curl，代理设置被完全绕过 —— 只能通过代理上网的设备
+	# 永远拉不到版本列表（真机 curl 返回 1 即为此类）。
+	oc_fetch "$url" "$tmp" "$OC_FETCH_MT" "$NPM_ACCEPT"
+	rc=$?
+	if [ "$rc" -eq 0 ] && [ -s "$tmp" ]; then
+		OC_V_TMP="$tmp"
+		OC_V_URL="$url"
+		return 0
+	fi
+	rm -f "$tmp"
+	if [ "$rc" -eq 0 ]; then
+		reason="下载失败：返回内容为空（$url）"
+	else
+		reason="$(fetch_fail_reason "$rc" "$url")"
+	fi
+	if [ "$slot" = "2" ]; then
+		OC_V_R2="$reason"
+	else
+		OC_V_R1="$reason"
+	fi
+	return 1
+}
+
 fetch_oc_metadata() {
 	# npm abbreviated document (includes engines for every version)
-	local reg url tmp
-	reg="$(npm_registry)"
-	url="$reg/openclaw"
+	#
+	# 先试官方源（用户配置的 npm_registry），失败再回退国内镜像，各一次。
+	#
+	# 结果通过全局变量回传，**不要**用 $(fetch_oc_metadata)：命令替换是子 shell，
+	# 里面设置的 OC_V_TMP / OC_V_SOURCE 传不回来，而 stdout 必须留给调用方的
+	# JSON 数组契约。
+	#   成功: 返回 0，OC_V_TMP=临时文件，OC_V_URL=实际 URL，OC_V_SOURCE=official|mirror
+	#   失败: 返回非 0，OC_V_TMP=""，OC_V_FETCH_ERR=两个源各自的原因
+	local url
 	mkdir -p "$OC_CACHE_DIR" 2>/dev/null || true
-	tmp="$(mktemp "${OC_CACHE_DIR}/npm.XXXXXX" 2>/dev/null || echo "${OC_CACHE_DIR}/npm.$$")"
-	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL --connect-timeout 10 --max-time 60 \
-			-H 'Accept: application/vnd.npm.install-v1+json' -o "$tmp" "$url" || {
-			rm -f "$tmp"; return 1; }
-	else
-		oc_fetch "$url" "$tmp" 60 || { rm -f "$tmp"; return 1; }
+	OC_V_TMP=""; OC_V_SOURCE=""; OC_V_URL=""
+	OC_V_R1=""; OC_V_R2=""; OC_V_FETCH_ERR=""
+
+	url="$(npm_registry)/openclaw"
+	if oc_try_fetch "$url" 1; then
+		OC_V_SOURCE="official"
+		return 0
 	fi
-	printf '%s' "$tmp"
+
+	# 官方源失败 → 回退到国内镜像，且只回退一次（不重试官方、不链式换源）。
+	# 注意：这里只影响本次请求的取数地址，绝不写回 main.npm_registry。
+	if oc_try_fetch "$OC_MIRROR_REGISTRY/openclaw" 2; then
+		OC_V_SOURCE="mirror"
+		return 0
+	fi
+
+	OC_V_FETCH_ERR="$(oc_fetch_err_text)"
+	return 1
 }
 
 oc_parse_versions() {
@@ -215,12 +311,14 @@ oc_versions_json() {
 	# 失败时仍然输出 []（stdout 契约不变），但原因写进 OC_V_ERROR，供 status
 	# 子命令与前端展示 —— 旧实现把原因直接丢掉，前端只看到一个空数组。
 	local f rc url reason
-	OC_V_OK=0; OC_V_CACHED=0; OC_V_COUNT=0; OC_V_ERROR=""
+	OC_V_OK=0; OC_V_CACHED=0; OC_V_COUNT=0; OC_V_ERROR=""; OC_V_SOURCE=""
 	mkdir -p "$OC_CACHE_DIR" 2>/dev/null || true
 	url="$(npm_registry)/openclaw"
 
 	if [ "${1:-}" != "refresh" ] && [ -s "$OC_CACHE_DIR/oc-versions.tsv" ]; then
 		OC_V_CACHED=1
+		# 缓存里没有来源记录（旧版本写下的缓存）时留空，前端按普通情况处理。
+		OC_V_SOURCE="$(oc_source_saved)"
 	else
 		reason=""
 		# 未显式刷新时先看最近一次失败记录：刚失败过且没有缓存就不再联网。
@@ -233,7 +331,8 @@ oc_versions_json() {
 			return 1
 		fi
 
-		f="$(fetch_oc_metadata)"; rc=$?
+		fetch_oc_metadata; rc=$?
+		f="$OC_V_TMP"
 		if [ "$rc" -eq 0 ] && [ -n "$f" ] && [ -s "$f" ]; then
 			# 先解析到临时文件、确认非空再替换：镜像返回 HTML 错误页时
 			# 解析结果为空，直接覆盖会把上一份好缓存冲成空文件。
@@ -243,13 +342,21 @@ oc_versions_json() {
 				oc_dist_tags <"$f" >"$OC_CACHE_DIR/oc-tags.tsv" 2>/dev/null || true
 				rm -f "$f"
 				fail_clear "$OC_FAIL_OC"
+				# 只有解析成功才记来源：解析失败时这份数据并没有进缓存。
+				oc_source_save "$OC_V_SOURCE"
 			else
 				rm -f "$f" "$OC_CACHE_DIR/oc-versions.tsv.new"
-				OC_V_ERROR="解析失败：返回内容不是 npm 包文档（$url）"
+				OC_V_ERROR="解析失败：返回内容不是 npm 包文档（${OC_V_URL:-$url}）"
 			fi
 		else
 			[ -n "$f" ] && rm -f "$f"
-			OC_V_ERROR="$(fetch_fail_reason "$rc" "$url")"
+			# 下载失败：fetch_oc_metadata 已经把「官方源 + 国内镜像」两个原因
+			# 都拼好了，直接用；兜底再走一次单 URL 的原因。
+			if [ -n "$OC_V_FETCH_ERR" ]; then
+				OC_V_ERROR="$OC_V_FETCH_ERR"
+			else
+				OC_V_ERROR="$(fetch_fail_reason "$rc" "$url")"
+			fi
 		fi
 
 		if [ -n "$OC_V_ERROR" ]; then
@@ -347,7 +454,7 @@ node_versions_json() {
 	# 与 oc_versions_json 同一套约定：stdout 仍是 JSON 数组，失败原因写进
 	# OC_V_ERROR，由 status 子命令汇总。
 	local f rc url reason
-	OC_V_OK=0; OC_V_CACHED=0; OC_V_COUNT=0; OC_V_ERROR=""
+	OC_V_OK=0; OC_V_CACHED=0; OC_V_COUNT=0; OC_V_ERROR=""; OC_V_SOURCE=""
 	mkdir -p "$OC_CACHE_DIR" 2>/dev/null || true
 	url="$(node_index_url)"
 
@@ -365,7 +472,13 @@ node_versions_json() {
 		fi
 
 		f="$(mktemp "${OC_CACHE_DIR}/node.XXXXXX" 2>/dev/null || echo "${OC_CACHE_DIR}/node.$$")"
-		oc_fetch "$url" "$f" 90; rc=$?
+		# Node.js 不做国内镜像回退，这是刻意的：
+		#   * OpenWrt 是 musl 平台，musl 版 Node 只由 unofficial-builds.nodejs.org
+		#     发布；npmmirror 镜像的是官方 nodejs.org 的 glibc 构建树。
+		#   * 把 glibc 版本号塞进 musl 机器的下拉框，用户选中后下载必然失败
+		#     （没有对应 tarball / 下载下来也起不来），比「拉不到列表」更糟。
+		# 所以这里保持原行为：给出清晰原因，用户仍可手动填写版本号。
+		oc_fetch "$url" "$f" "$OC_FETCH_MT"; rc=$?
 		if [ "$rc" -eq 0 ] && [ -s "$f" ]; then
 			# 同 oc-versions：先写临时文件、确认非空再替换缓存。
 			node_parse_list <"$f" >"$OC_CACHE_DIR/node-versions.tsv.new" 2>/dev/null
@@ -471,13 +584,16 @@ oc_latest_version() {
 
 versions_status_json() {
 	# 一行 JSON，供控制器原样透传给前端：
-	#   {"oc":{"ok":true,"count":42,"cached":true,"error":""},"node":{...}}
+	#   {"oc":{"ok":true,"count":42,"cached":true,"source":"mirror","error":""},"node":{...}}
+	# source: official（用户配置的 npm_registry）/ mirror（国内镜像）/ ""（未知，
+	# 例如旧版本留下的缓存）。前端据此显示「已尝试国内镜像」提示。
 	# 不额外联网：两个列表函数自己决定要不要拉取（缓存命中时纯本地）。
 	# 本函数只往 stdout 写这一行，日志一律走 stderr —— 控制器只取 stdout。
-	local oc_ok oc_cnt oc_cached oc_err nd_ok nd_cnt nd_cached nd_err reason
+	local oc_ok oc_cnt oc_cached oc_err oc_src nd_ok nd_cnt nd_cached nd_err reason
 
 	oc_versions_json >/dev/null 2>&1
-	oc_ok="$OC_V_OK"; oc_cnt="$OC_V_COUNT"; oc_cached="$OC_V_CACHED"; oc_err="$OC_V_ERROR"
+	oc_ok="$OC_V_OK"; oc_cnt="$OC_V_COUNT"; oc_cached="$OC_V_CACHED"
+	oc_err="$OC_V_ERROR"; oc_src="$OC_V_SOURCE"
 
 	node_versions_json >/dev/null 2>&1
 	nd_ok="$OC_V_OK"; nd_cnt="$OC_V_COUNT"; nd_cached="$OC_V_CACHED"; nd_err="$OC_V_ERROR"
@@ -488,9 +604,10 @@ versions_status_json() {
 	reason="$(fail_recent "$OC_FAIL_OC")" && { oc_ok=0; oc_err="$reason"; }
 	reason="$(fail_recent "$OC_FAIL_NODE")" && { nd_ok=0; nd_err="$reason"; }
 
-	printf '{"oc":{"ok":%s,"count":%s,"cached":%s,"error":"%s"},"node":{"ok":%s,"count":%s,"cached":%s,"error":"%s"}}\n' \
+	printf '{"oc":{"ok":%s,"count":%s,"cached":%s,"source":"%s","error":"%s"},"node":{"ok":%s,"count":%s,"cached":%s,"error":"%s"}}\n' \
 		"$([ "$oc_ok" = "1" ] && printf true || printf false)" "$oc_cnt" \
-		"$([ "$oc_cached" = "1" ] && printf true || printf false)" "$(oc_json_str "$oc_err")" \
+		"$([ "$oc_cached" = "1" ] && printf true || printf false)" "$(oc_json_str "$oc_src")" \
+		"$(oc_json_str "$oc_err")" \
 		"$([ "$nd_ok" = "1" ] && printf true || printf false)" "$nd_cnt" \
 		"$([ "$nd_cached" = "1" ] && printf true || printf false)" "$(oc_json_str "$nd_err")"
 }

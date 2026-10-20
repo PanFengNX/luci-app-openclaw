@@ -363,9 +363,12 @@ function post(url, data, cb){
   x.timeout = 900000;
   x.send(body.join('&'));
 }
-function get(url, cb){
+function get(url, cb, timeoutMs){
   var x = new XMLHttpRequest();
   x.open('GET', url, true);
+  // 有超时，且能按调用指定：版本列表要串行跑两次网络下载（后端最坏 60 秒），
+  // 固定 20 秒会让它在这台设备上永远失败。
+  x.timeout = timeoutMs || 20000;
   var fin = once(cb);
   x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
   x.onerror   = function(){ fin({ok:false, net:true}); };
@@ -678,7 +681,7 @@ function loadVersions(){
     fillVersionSelect($('in-oc'), $('in-oc-manual'), ocl, state.ocVersion, false);
     fillVersionSelect($('in-node'), $('in-node-manual'), ndl, state.nodeVersion, true);
     renderVerError(versionErrorLines(r, st, ocl, ndl));
-  });
+  }, 90000);   // 后端要串行跑两次网络下载，20 秒不够
 }
 
 function loadInfo(){
