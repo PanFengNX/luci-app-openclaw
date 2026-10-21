@@ -243,6 +243,8 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
 .oc-pick-manual{margin:2px 0 0}
 .oc-pick-manual .oc-row{margin:0 0 10px}
 .oc-pick-manual .oc-actions{margin-top:2px}
+/* 进度日志：比设置页的完整日志矮一截，够看滚动进度即可 */
+.oc-log-sm{height:160px;font-size:11.5px}
 /* 行内按钮默认被共享块降为次要样式；这一行只有升级一个动作，
    启用时给回主按钮外观，禁用时保持灰色轮廓（一眼能看出"没有可升的"）。 */
 #ver-up .oc-row-fixed>button:not(:disabled){background:var(--oc-accent);
@@ -314,6 +316,15 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
     </div>
   </div>
   <div class="oc-hint">拉不到版本列表时用「手动指定版本…」填写版本号升级；Node.js 留空表示自动选择满足要求的版本。</div>
+  <!-- 升级进度日志：默认收起、不占版面；升级开始后自动展开并滚动。
+       完整日志仍可到「设置 · 安装」页看，这里给的是同一份的尾部。 -->
+  <div class="oc-actions" style="margin-top:10px">
+    <button id="btn-ver-log" class="oc-btn ghost" type="button">查看升级日志</button>
+    <span id="ver-log-state" class="oc-hint" style="margin:0"></span>
+  </div>
+  <div id="ver-log-wrap" style="display:none;margin-top:8px">
+    <div class="oc-log oc-log-sm" id="ver-log">（尚未开始）</div>
+  </div>
   <div class="oc-sub">访问</div>
   <div class="oc-grid">
     <div class="oc-kv"><b>端口 / 绑定</b><span id="st-port">-</span></div>
@@ -399,6 +410,8 @@ var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer
   // versionsStatus：api_versions 透传的 versions.sh status（一行 JSON 字符串）。
   // versionsNet：整个请求都没拿到（断网 / 超时），与"后端说没拉到列表"区分开。
   versionsStatus:'', versionsNet:false, verLoading:false,
+  // verLogClosed：用户手动收起过进度日志吗？收起后轮询不再自动展开。
+  verLogClosed:false,
   // upgrading：安装类动作（升级 OpenClaw / Node、复用本机 Node）进行中。
   // 它是按钮可用性的唯一真相：升级期间两个行内按钮都保持禁用，
   // 而轮询完成时会走 loadInfo → renderOcUpdate/renderNodeUpdate，
@@ -927,14 +940,53 @@ function setUpgrading(on){
   });
 }
 
-// 只轮询安装状态（不读安装日志）：日志元素在设置页，本页不依赖它。
+// 升级进度日志：升级期间自动展开并贴着尾部滚动。
+// 只在用户没手动收起过的情况下自动展开（verLogClosed），
+// 否则用户刚收起来、下一次轮询又弹开。
+var VER_LOG_LINES = 200;   // 只渲染尾部：安装日志上限 256KB，整份塞进 DOM 会卡
+
+function setVerLog(text, scroll){
+  var box = $('ver-log');
+  if (!box) return;
+  var s = String(text == null ? '' : text).replace(/\r/g, '');
+  if (!s){ box.textContent = '（尚未开始）'; return; }
+  var lines = s.split('\n');
+  if (lines.length > VER_LOG_LINES){
+    lines = lines.slice(lines.length - VER_LOG_LINES);
+    lines.unshift('…（仅显示最后 ' + VER_LOG_LINES + ' 行，完整日志见「设置 · 安装」页）');
+  }
+  box.textContent = lines.join('\n');
+  if (scroll) box.scrollTop = box.scrollHeight;
+}
+
+function openVerLog(open){
+  var w = $('ver-log-wrap'), b = $('btn-ver-log');
+  if (!w) return;
+  w.style.display = open ? '' : 'none';
+  if (b) b.textContent = open ? '收起升级日志' : '查看升级日志';
+}
+
+function tickVerLog(){
+  get(API.ilog, function(r){
+    var log = (r && r.log) ? String(r.log) : '';
+    setVerLog(log, true);
+    var st = $('ver-log-state');
+    if (st) st.textContent = log ? ('共 ' + log.split('\n').length + ' 行') : '（日志为空）';
+  });
+}
+
+// 轮询安装状态，并把进度日志一起刷到本页的小日志框里。
+// 完整日志在「设置 · 安装」页；这里给同一份的尾部，省得来回跳。
 function startInstallPoll(what, onDone){
   if (state.logTimer) clearInterval(state.logTimer);
+  if (!state.verLogClosed) openVerLog(true);      // 开跑就展开
   state.logTimer = setInterval(function(){
+    tickVerLog();
     get(API.istatus, function(r){
       var d = jp(r.data||'{}', {});
       if (d.state === 'done' || d.state === 'failed'){
         clearInterval(state.logTimer); state.logTimer = null;
+        tickVerLog();                              // 收尾再刷一次，拿到最后几行
         stOpSay(what + (d.state==='done' ? '完成。' : '失败，请到设置页查看安装日志。'),
                 d.state==='failed');
         // 先清掉候选再关 upgrading：此刻 info 与版本列表都还是旧的，
@@ -1395,7 +1447,14 @@ function toggleManual(force){
   box.style.display = open ? '' : 'none';
   if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
-if ($('btn-ver-manual')) $('btn-ver-manual').onclick = function(){ toggleManual(); };
+if ($('btn-ver-manual')) $('btn-ver-log').onclick = function(){
+  var w = $('ver-log-wrap');
+  var open = !w || w.style.display === 'none';
+  state.verLogClosed = !open;
+  openVerLog(open);
+  if (open) tickVerLog();
+};
+$('btn-ver-manual').onclick = function(){ toggleManual(); };
 if ($('btn-oc-manual')) $('btn-oc-manual').onclick = function(){
   var el = $('oc-ver-input');
   startOcUpdate(el ? el.value : '');
@@ -1472,6 +1531,26 @@ $('btn-repair').onclick = function(){
   diagRun('repair', '一键修复');
 };
 
+// 进入页面时若已有升级在后台跑（从安装页发起、或用户切走又切回），
+// 自动展开日志并接着轮询，不然用户完全看不到进度。
+function resumeInstallIfRunning(){
+  get(API.istatus, function(r){
+    var d = jp(r.data||'{}', {});
+    if (d.state === 'running'){
+      state.upgrading = true;
+      setUpgrading(true);
+      if (!state.verLogClosed) openVerLog(true);
+      stOpSay('正在升级，进度见下方日志…');
+      startInstallPoll('升级');
+    } else if (d.state === 'lost'){
+      // 后台进程没了但没留完成标记：说清楚，别让界面像卡住
+      if (!state.verLogClosed) openVerLog(true);
+      tickVerLog();
+      stOpSay('上一次升级异常中断（后台进程已退出）。可查看下方日志后重试。', true);
+    }
+  });
+}
+
 loadInfo();
 // 进入页面就检查一次更新：带 refresh=1 绕过后端 60 秒的失败缓存，
 // 否则刚失败过的设备要等一分钟才可能看到新结果。
@@ -1479,5 +1558,6 @@ loadVersions(true);
 // node-existing 要逐个候选跑 node -v，放到首屏之后发起，
 // 慢探测不会阻塞主信息渲染。
 setTimeout(loadNodeExisting, 900);
+resumeInstallIfRunning();
 </script>
 <%+footer%>
