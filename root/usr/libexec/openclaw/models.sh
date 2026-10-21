@@ -505,9 +505,12 @@ merge_models() {
 	# configured wins over live, live wins over presets; duplicates are dropped
 	# so a model the user configured is never overwritten by a preset entry.
 	local p="$1"
+	# **不合并 live 层**：live_models_of 会触发 `openclaw models list --all`，
+	# 一次 20 秒上限，而 catalog 要为每个 provider 调一次 —— 页面 20 秒就超时，
+	# 下拉框于是长期空着（实机就是这个现象）。实时清单由「刷新上游模型」
+	# 单独请求（models_url），不在首屏渲染路径上。
 	{
 		configured_models "$p" | awk -v s=configured 'NF { print $0 "\t" s }'
-		live_models_of "$p" | awk -v s=live 'NF { print $0 "\t" s }'
 		models_of "$p" | awk -v s=preset 'NF { print $0 "\t" s }'
 	} | awk 'BEGIN { FS = "\t" } NF && !seen[$1]++ { print $1 "\t" $2 }'
 }
@@ -517,9 +520,12 @@ catalog() {
 	# (openclaw.json) first, then live discovery, then shipped presets.
 	local all id first=1 name plugin defm base keyurl m msrc mfirst src tab
 	tab="$(printf '\t')"
+	# 只从「已配置」+「内置预设」建表，**不启动 CLI**：
+	# live_list 要跑两次 openclaw（models list --all / providers list），
+	# 每次 20 秒上限，最坏 40 秒；而页面 20 秒就超时 —— 下拉框于是长时间空着，
+	# 看起来就是「读不出服务商」。实时清单只在用户点「刷新上游模型」时才用。
 	all="$({
 		configured_list
-		live_list
 		preset_ids
 	} | grep -v '^$' | awk '!seen[$0]++')"
 	printf '['
@@ -537,8 +543,6 @@ catalog() {
 		src="preset"
 		if configured_has "$id"; then
 			src="configured"
-		elif live_has "$id"; then
-			src="live"
 		fi
 		[ "$first" = "1" ] || printf ','
 		first=0

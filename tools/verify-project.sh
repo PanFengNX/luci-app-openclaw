@@ -295,6 +295,19 @@ else
 fi
 
 # --------------------------------------------------------------------------
+head_ "7h. 命令超时兜底（没有 timeout applet 时不能无限等）"
+if [ -f tools/tests/oc-timeout.sh ]; then
+	if out="$(sh tools/tests/oc-timeout.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "oc-timeout.sh 全部断言通过"
+	else
+		bad "oc-timeout.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/oc-timeout.sh"
+fi
+
 head_ "8. 打包与三种包格式校验"
 if [ "$DO_BUILD" -eq 0 ]; then
 	skip "--no-build 指定，跳过"

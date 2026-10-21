@@ -238,6 +238,32 @@ oc_archive_inspect() {
 	return 0
 }
 
+oc_archive_summary() {
+	# oc_archive_summary <archive> -> 一行 JSON 片段（不含外层大括号）
+	#
+	# 「校验」原来只回答"安全吗"，用户看不到里面有什么 —— 150 KB 的包会让人
+	# 怀疑是不是没备份全。这里把条目数、解压后体积、以及关键区域的条目数
+	# 一并报出来：配置 / 数据根 / 会话 / 工作区 / 密钥文件。
+	local f="$1" tmp="$OC_RUNDIR/bk-sum.$$" n_cfg n_data n_sess n_ws n_env total
+	rm -f "$tmp" 2>/dev/null
+	tar -tzf "$f" >"$tmp" 2>/dev/null || { rm -f "$tmp"; printf '"entries":0'; return 1; }
+	total="$(wc -l <"$tmp" 2>/dev/null | tr -d ' ')"
+	n_cfg="$(grep -c '^\./etc/config/openclaw$' "$tmp" 2>/dev/null)"
+	n_env="$(grep -c '^\./home/\.openclaw/\.env$' "$tmp" 2>/dev/null)"
+	n_sess="$(grep -c '^\./home/\.openclaw/agents/.*/sessions/' "$tmp" 2>/dev/null)"
+	n_ws="$(grep -c '^\./home/\.openclaw/workspace/' "$tmp" 2>/dev/null)"
+	n_data="$(grep -c '^\./home/\.openclaw/' "$tmp" 2>/dev/null)"
+	rm -f "$tmp" 2>/dev/null
+	for v in total n_cfg n_env n_sess n_ws n_data; do
+		eval "x=\$$v"
+		case "$x" in ''|*[!0-9]*) eval "$v=0" ;; esac
+	done
+	printf '"entries":%s,"has_config":%s,"has_env":%s,"sessions":%s,"workspace":%s,"data_files":%s' \
+		"$total" "$([ "$n_cfg" -gt 0 ] && echo true || echo false)" \
+		"$([ "$n_env" -gt 0 ] && echo true || echo false)" "$n_sess" "$n_ws" "$n_data"
+	return 0
+}
+
 oc_archive_ok_size() {
 	# 体积上限检查：解压后不得超过 MAX_RESTORE_MB（防 zip bomb / 塞满磁盘）
 	local f="$1" bytes
@@ -432,8 +458,10 @@ cmd_verify() {
 	vsize="$(wc -c <"$p" 2>/dev/null | tr -d ' ')"
 	case "$vsize" in ''|*[!0-9]*) vsize=0 ;; esac
 	bk_detail "$(basename "$p") $(bk_size_h "$vsize")"
+	local sum
+	sum="$(oc_archive_summary "$p")"
 	bk_finish_ok
-	printf '{"ok":true,"file":"%s","size":%s}\n' "$(jstr "$(basename "$p")")" "$vsize"
+	printf '{"ok":true,"file":"%s","size":%s,%s}\n' "$(jstr "$(basename "$p")")" "$vsize" "$sum"
 }
 
 # ---------------------------------------------------------------- restore

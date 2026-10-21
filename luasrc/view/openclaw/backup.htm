@@ -225,6 +225,27 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
 }
 </style>
 
+<!-- 只作用于本页：上面那块共享样式是 10 个视图共用、逐字节一致的，
+     往里加选择器会和其它改动冲突，所以本地备份列表的布局单独放这里。 -->
+<style id="oc-backup-style">
+/* 本地备份列表：一行 = 文件名（占满剩余宽度）+ 体积/时间 + 操作按钮。
+   共享块的 .oc-rowline 是「标签 | 值」两列网格，文件名放进 116px 那列会被
+   折成三四行（openclaw-backup-2026…tar.gz），所以这里改用 flex 重排。 */
+.oc-bkrow{display:flex;align-items:center;gap:12px;padding:8px 0;
+  border-bottom:1px solid var(--oc-line-soft);min-height:38px}
+.oc-bkrow:last-child{border-bottom:0}
+.oc-bkrow>.oc-bkname{flex:1 1 auto;min-width:0;font-size:12.5px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--oc-fg-dim);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.oc-bkrow>.oc-bkacts{flex:0 0 auto;display:flex;align-items:center;gap:8px;
+  flex-wrap:wrap;justify-content:flex-end}
+@media (max-width:640px){
+  .oc-bkrow{flex-wrap:wrap}
+  .oc-bkrow>.oc-bkname{flex:1 1 100%;white-space:normal;word-break:break-all}
+  .oc-bkrow>.oc-bkacts{flex:1 1 100%;justify-content:flex-start}
+}
+</style>
+
 <h2><a id="content" name="content">OpenClaw 助手 · 备份与恢复</a></h2>
 
 <div class="oc-card">
@@ -484,9 +505,12 @@ function post(url, data, cb){
   x.timeout = 900000;
   x.send(body.join('&'));
 }
-function get(url, cb){
+function get(url, cb, timeoutMs){
   var x = new XMLHttpRequest();
   x.open('GET', url, true);
+  // 必须有超时：没有的话请求一挂住回调就永远不来，「检查中…」会一直停着。
+  // 组件检查要发一次 HEAD 探测（后端单次上限 10 秒），给 30 秒足够。
+  x.timeout = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 30000;
   var fin = once(cb);
   x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
   x.onerror   = function(){ fin({ok:false, net:true}); };
@@ -540,23 +564,17 @@ function loadBackups(){
     arr.forEach(function(b){
       // 一行 = 文件名（左） + 体积 / 时间 / 操作（右）
       var row = document.createElement('div');
-      row.className = 'oc-rowline';
-      row.style.flexWrap = 'wrap';            // 窄屏下右侧操作区整体换行，不挤压文件名
+      row.className = 'oc-bkrow';
 
       var name = document.createElement('span');
+      name.className = 'oc-bkname';
       name.textContent = b.file;              // 服务端数据只进 textContent
-      // .oc-rowline>span 默认 nowrap，长文件名需要允许换行
-      name.style.whiteSpace = 'normal';
-      name.style.wordBreak = 'break-all';
-      name.style.color = 'var(--oc-fg-dim)';
+      // 单行显示 + 省略号；完整文件名放 title，鼠标悬停可看
+      name.title = b.file;
       row.appendChild(name);
 
       var act = document.createElement('div');
-      act.style.display = 'flex';
-      act.style.alignItems = 'center';
-      act.style.gap = '8px';
-      act.style.flexWrap = 'wrap';
-      act.style.justifyContent = 'flex-end';
+      act.className = 'oc-bkacts';
 
       var meta = document.createElement('span');
       meta.className = 'oc-hint';
@@ -582,7 +600,22 @@ function loadBackups(){
       mk('校验', function(){
         bkSay('正在校验 ' + b.file + ' …');
         post(API.backup_verify, { file: b.file }, function(rr){
-          bkSay(rr && rr.ok ? ('校验通过：' + b.file) : ('校验失败：' + ((rr && rr.data) || '未知错误')), !(rr && rr.ok));
+          if (!rr || !rr.ok){
+            bkSay('校验失败：' + ((rr && (rr.data || rr.error)) || '未知错误'), true);
+            return;
+          }
+          // 顺带把归档内容报出来：体积小的时候用户会怀疑"是不是没备份全"。
+          // 服务端数据只进字符串拼接，不拼 HTML。
+          var parts = ['校验通过：' + b.file];
+          if (typeof rr.entries === 'number'){
+            var bits = ['共 ' + rr.entries + ' 个条目'];
+            bits.push(rr.has_config ? '含配置' : '不含配置');
+            bits.push(rr.has_env ? '含密钥文件' : '不含密钥文件');
+            if (typeof rr.sessions === 'number' && rr.sessions > 0) bits.push('会话 ' + rr.sessions + ' 个文件');
+            if (typeof rr.workspace === 'number' && rr.workspace > 0) bits.push('工作区 ' + rr.workspace + ' 个文件');
+            parts.push(bits.join('，'));
+          }
+          bkSay(parts.join('\n'));
         });
       }, true);
       mk('恢复', function(){

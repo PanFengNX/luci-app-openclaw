@@ -344,25 +344,31 @@ function loadCurrent(){
 }
 
 function loadCatalog(){
-  $('m-status').textContent = '正在读取 OpenClaw 支持的服务商…';
-  get(API.providers, function(r){
-    CATALOG = jp(r.data||'[]', []);
-    if (!CATALOG.length){
-      // fallback to offline presets
-      get(API.presets, function(p){
-        var o = jp(p.data||'{"providers":[]}', {providers:[]});
-        CATALOG = (o.providers||[]).map(function(x){
-          x.bundled = !x.plugin; x.installed = false; x.configured = false; x.hasKey = false;
-          return x;
-        });
-        renderCatalog();
-      });
-      return;
-    }
-    renderCatalog();
+  // 先用**随包的内置清单**立刻渲染（读一个 JSON 文件，毫秒级），
+  // 再用服务端清单覆盖。服务端要逐个 provider 解析预设字段，
+  // 在路由器上可能要十几秒 —— 不能让它把下拉框卡成空白（实机就是这样：
+  // 进页面后"正在读取服务商…"停很久，两个下拉都是空的）。
+  $('m-status').textContent = '正在读取服务商…';
+  get(API.presets, function(p){
+    var o = jp(p.data||'{"providers":[]}', {providers:[]});
+    var base = (o.providers||[]).map(function(x){
+      x.bundled = !x.plugin; x.installed = false; x.configured = false; x.hasKey = false;
+      return x;
+    });
+    if (base.length){ CATALOG = base; renderCatalog(); }
+
+    // 服务端清单更准（含已配置的 provider、插件是否已装、Key 是否已写），
+    // 到了就替换；超时或为空则保留上面那份，不再让界面空着。
+    get(API.providers, function(r){
+      var arr = jp(r.data||'[]', []);
+      if (arr.length){ CATALOG = arr; renderCatalog(); return; }
+      if (!base.length){
+        $('m-status').textContent = '读取服务商列表失败：服务端与内置清单都为空。'
+          + '可点「刷新上游模型」重试，或检查网关是否在运行。';
+      }
+    }, 60000);
   });
 }
-
 function renderCatalog(){
   var sel = $('m-provider'); sel.innerHTML = '';
   CATALOG.forEach(function(p){

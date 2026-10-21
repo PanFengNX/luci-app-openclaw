@@ -1756,21 +1756,30 @@ cloud_probe_latest() {
 	#   OC_PROBED_LIST  探测到 200 的版本（空格分隔，升序）
 	#   OC_PROBE_OK     探测到 200 的个数
 	# 单个候选失败（超时 / 404 / 网络错误）只跳过它，不影响其它候选。
-	local cand v code latest=""
+	local cand v code latest="" rev="" any_http=0
 
 	OC_PROBED_LIST=""
 	OC_PROBE_OK=0
+	# 官方没有版本清单接口，只能按候选逐个探测。**从新到旧探、命中即停**：
+	# 早先是"全部探一遍再取最大"，8 个候选 × 每个最多 10 秒 = 最坏 80 秒，
+	# 而页面 20 秒就超时 —— 于是永远显示"无法连接官方下载源"，
+	# 哪怕最新版本其实一次 HEAD 就能问到。
 	cand="$(cloud_candidate_versions)"
-	for v in $cand; do
+	for v in $cand; do rev="$v $rev"; done
+	for v in $rev; do
 		code="$(cloud_probe_status "$(cloud_installer_url "$v")")"
+		# 只要拿到了 HTTP 状态码（哪怕是 404），就说明源是通的 ——
+		# 这和"网络不可达"是两回事，错误提示必须分开。
+		[ -n "$code" ] && any_http=1
 		[ "$code" = "200" ] || continue
 		OC_PROBED_LIST="$OC_PROBED_LIST $v"
 		OC_PROBE_OK=$((OC_PROBE_OK + 1))
-		if [ -z "$latest" ] || ver_gt "$v" "$latest"; then
-			latest="$v"
-		fi
+		latest="$v"
+		break
 	done
 	OC_PROBED_LIST="${OC_PROBED_LIST# }"
+	# 供调用方区分两种失败：源不通 vs 源通了但没有可用安装包
+	OC_PROBE_REACHABLE="$any_http"
 	printf '%s' "$latest"
 }
 
@@ -1784,8 +1793,14 @@ cmd_cli_check() {
 
 	latest="$(cloud_probe_latest)"
 	if [ "${OC_PROBE_OK:-0}" -le 0 ]; then
-		# 全部候选都探测失败只能是网络问题：绝不谎报「已是最新」。
-		cloud_fail "无法连接官方下载源，请检查网络"
+		# 绝不谎报「已是最新」，但也要说清是哪一种失败：
+		#   拿到了 HTTP 状态码（多为 404）→ 源是通的，只是没有可用安装包；
+		#   一个状态码都没拿到 → 才是网络 / DNS / TLS 的问题。
+		if [ "${OC_PROBE_REACHABLE:-0}" = "1" ]; then
+			cloud_fail "官方源可以访问，但没有找到可用的组件安装包（探测的版本都返回 404）"
+		else
+			cloud_fail "无法连接官方下载源，请检查网络（或设置里的 HTTP 代理）"
+		fi
 	fi
 
 	current="$(cloud_current_version)"

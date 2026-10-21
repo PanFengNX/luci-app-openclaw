@@ -128,10 +128,31 @@ oc_timeout() {
 	local t="$1"; shift
 	if command -v timeout >/dev/null 2>&1; then
 		timeout "$t" "$@"
-	else
-		oc_warn "本机无 timeout 命令，已不限制执行时长：$*"
-		"$@"
+		return $?
 	fi
+	# 没有 timeout applet 时**自己兜底**：放到后台跑，到点先 TERM 再 KILL。
+	# 早先这里是"直接执行、不设上限"，代价很实在 —— 实机缺 timeout，
+	# `openclaw models list --all` 一旦卡住，模型页的下拉框就永远是空的
+	# （前端 20 秒超时，后端却可能跑几分钟）。宁可杀掉，也不能无限等。
+	"$@" &
+	local pid=$! wd rc
+	(
+		i=0
+		while [ "$i" -lt "$t" ]; do
+			sleep 1
+			kill -0 "$pid" 2>/dev/null || exit 0
+			i=$((i + 1))
+		done
+		oc_warn "命令超过 ${t} 秒，已终止：$*"
+		kill -TERM "$pid" 2>/dev/null
+		sleep 1
+		kill -KILL "$pid" 2>/dev/null
+	) >/dev/null 2>&1 &
+	wd=$!
+	wait "$pid" 2>/dev/null
+	rc=$?
+	kill "$wd" 2>/dev/null
+	return "$rc"
 }
 
 # ---------------------------------------------------------------- uci
