@@ -225,6 +225,31 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
 }
 </style>
 
+<!-- 只作用于本页：上面那块共享样式是 10 个视图共用、逐字节一致的，
+     往里加选择器会和其它改动冲突，所以「版本升级」两行的布局单独放这里。
+     注意注释里不要出现 style 标签的字面写法：预览工具按标签配对抽取正文，
+     会把注释的结束符一起吃掉，页面正文整块变成注释。 -->
+<style id="oc-status-style">
+/* 「版本升级」那两行：标签 | 版本药丸 | 提示（吃掉剩余宽度）| 按钮。
+   共享块的 .oc-row-fixed>.oc-hint{grid-column:2 / -1} 会让提示跨到药丸和按钮
+   脚下，与四列布局冲突，所以这里按 id 提高优先级把它钉回第 3 列。
+   窄屏（≤640px）保持共享块的单列规则，这里只覆盖宽屏。 */
+@media (min-width:641px){
+  #ver-up .oc-row-fixed{grid-template-columns:var(--oc-label) 190px minmax(0,1fr) auto}
+  #ver-up .oc-row-fixed>.oc-hint{grid-column:3;width:auto;margin:0;white-space:normal}
+  #ver-up .oc-row-fixed>.oc-hint>b{font-weight:600}
+}
+/* 手填入口：默认折叠，展开后才占位。 */
+.oc-pick-manual{margin:2px 0 0}
+.oc-pick-manual .oc-row{margin:0 0 10px}
+.oc-pick-manual .oc-actions{margin-top:2px}
+/* 行内按钮默认被共享块降为次要样式；这一行只有升级一个动作，
+   启用时给回主按钮外观，禁用时保持灰色轮廓（一眼能看出"没有可升的"）。 */
+#ver-up .oc-row-fixed>button:not(:disabled){background:var(--oc-accent);
+  border-color:transparent;color:#fff}
+#ver-up .oc-row-fixed>button:not(:disabled):hover{filter:brightness(.94)}
+</style>
+
 <h2><a id="content" name="content">OpenClaw 助手 · 状态</a></h2>
 
 <div class="oc-card">
@@ -258,27 +283,37 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
     <div id="ver-err-lines"></div>
     <button id="btn-ver-retry" class="oc-btn ghost" style="margin-top:6px">重试</button>
   </div>
-  <div class="oc-row oc-row-fixed">
-    <label>OpenClaw</label>
-    <span class="oc-pill" id="up-oc-cur">-</span>
-    <span class="oc-pick">
-      <select id="oc-ver-select"></select>
-      <input type="text" id="oc-ver-input" placeholder="latest 或 2026.10.4" style="display:none">
-    </span>
-    <button id="btn-oc-upgrade" class="oc-btn">升级</button>
-    <span id="oc-ver-hint" class="oc-hint"></span>
+  <!-- 平时只显示当前版本；检测到新版本才出现提示和升级按钮。
+       没有「可选全部历史版本」的下拉 —— 目标版本永远取探测结果，
+       需要指定别的版本时才展开下面的手填入口。 -->
+  <div id="ver-up">
+    <div class="oc-row oc-row-fixed">
+      <label>OpenClaw</label>
+      <span class="oc-pill" id="up-oc-cur">-</span>
+      <span id="oc-ver-hint" class="oc-hint"></span>
+      <button id="btn-oc-upgrade" class="oc-btn" disabled>升级</button>
+    </div>
+    <div class="oc-row oc-row-fixed">
+      <label>Node.js</label>
+      <span class="oc-pill" id="up-node-cur">-</span>
+      <span id="node-ver-hint" class="oc-hint"></span>
+      <button id="btn-node-upgrade" class="oc-btn" disabled>升级</button>
+    </div>
   </div>
-  <div class="oc-row oc-row-fixed">
-    <label>Node.js</label>
-    <span class="oc-pill" id="up-node-cur">-</span>
-    <span class="oc-pick">
-      <select id="node-ver-select"></select>
-      <input type="text" id="node-ver-input" placeholder="例如 v22.22.2，留空=自动" style="display:none">
-    </span>
-    <button id="btn-node-upgrade" class="oc-btn">升级</button>
-    <span id="node-ver-hint" class="oc-hint"></span>
+  <div class="oc-actions">
+    <button id="btn-ver-manual" class="oc-btn ghost" type="button">手动指定版本…</button>
   </div>
-  <div class="oc-hint">拉不到版本列表时仍可手动填写版本号升级；Node.js 留空表示自动选择满足要求的版本。</div>
+  <div id="ver-manual" class="oc-pick-manual" style="display:none">
+    <div class="oc-row"><label for="oc-ver-input">OpenClaw</label>
+      <input type="text" id="oc-ver-input" placeholder="latest 或 2026.10.4"></div>
+    <div class="oc-row"><label for="node-ver-input">Node.js</label>
+      <input type="text" id="node-ver-input" placeholder="例如 v22.22.2，留空=自动"></div>
+    <div class="oc-actions">
+      <button id="btn-oc-manual" type="button">升级 OpenClaw</button>
+      <button id="btn-node-manual" class="oc-btn ghost" type="button">升级 Node.js</button>
+    </div>
+  </div>
+  <div class="oc-hint">拉不到版本列表时用「手动指定版本…」填写版本号升级；Node.js 留空表示自动选择满足要求的版本。</div>
   <div class="oc-sub">访问</div>
   <div class="oc-grid">
     <div class="oc-kv"><b>端口 / 绑定</b><span id="st-port">-</span></div>
@@ -364,9 +399,15 @@ var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer
   // versionsStatus：api_versions 透传的 versions.sh status（一行 JSON 字符串）。
   // versionsNet：整个请求都没拿到（断网 / 超时），与"后端说没拉到列表"区分开。
   versionsStatus:'', versionsNet:false, verLoading:false,
-  // ocPrefill / nodePrefill：上一次自动预填进输入框的版本号。只覆盖这个值，
-  // 绝不覆盖用户手填的内容。
-  ocPrefill:'', nodePrefill:'' };
+  // upgrading：安装类动作（升级 OpenClaw / Node、复用本机 Node）进行中。
+  // 它是按钮可用性的唯一真相：升级期间两个行内按钮都保持禁用，
+  // 而轮询完成时会走 loadInfo → renderOcUpdate/renderNodeUpdate，
+  // 渲染函数必须按它重新禁用，否则按钮会被重新点亮。
+  upgrading:false,
+  // ocCand / nodeCand：最近一次渲染算出的升级候选（null = 没有可升级的目标）。
+  // 按钮的 disabled 与「升级到 x」的目标版本都从这里取，保证提示和按钮一致。
+  ocCand:null, nodeCand:null };
+var VER_CHECKING = '正在检查更新…';
 
 function $(id){ return document.getElementById(id); }
 // 回调只允许触发一次：readyState==4 与 onerror 在某些浏览器上会同时到达，
@@ -400,12 +441,13 @@ function get(url, cb, timeoutMs){
   // 必须有超时：没有的话请求一挂住回调就永远不来，界面停在"正在…"。
   // 版本列表是唯一会串行跑两次网络下载的接口（后端最坏 60 秒），
   // 所以它按调用传更长的超时，其余（状态、轮询）用默认 20 秒。
+  // 注意这里只能设一次：早先的版本在 send() 前又写了一遍 20000，
+  // 把调用方传进来的 90000 覆盖掉了，版本检查因此长期误报超时。
   x.timeout = timeoutMs || 20000;
   var fin = once(cb);
   x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
-  x.timeout = 20000;
   x.send();
 }
 function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }
@@ -580,8 +622,8 @@ function cmpOne(v, c){
   return true;
 }
 
-// 状态页只保留版本列表，用于判断「是否有更新的 Node」与「本机 Node 是否满足要求」；
-// 版本下拉框与 engines 数据源提示在 openclaw/setup 页面。
+// 状态页只保留版本列表，用于判断「是否有更新」与「本机 Node 是否满足要求」；
+// engines 数据源提示在 openclaw/setup 页面。
 //
 // status 是后端 versions.sh status 的原文：ok / count / cached / error。
 // 它是「这次到底有没有拉到列表」的唯一依据 —— 只看数组是否为空无法区分
@@ -594,10 +636,13 @@ function loadVersions(refresh, done){
   get(API.versions + (refresh ? '?refresh=1' : ''), function(r){
     setVerChecking(false);
     // 整体失败（断网 / 超时 / 响应不是 JSON）：保留上一次的列表，只提示失败。
+    // 两行提示也必须重绘：否则会停在 setVerChecking(true) 写的「正在检查更新…」。
     if (!r || r.ok === false){
       state.versionsNet = true;
       state.versionsStatus = '';
       renderVersionStatus();
+      renderNodeUpdate();
+      renderOcUpdate();
       if (done) done();
       return;
     }
@@ -615,27 +660,66 @@ function loadVersions(refresh, done){
   }, VERSIONS_TIMEOUT);
 }
 
-// 检查中：显示一行灰色提示并禁用「重试」。自动检查发生在进入页面时，
-// 没有反馈的话用户会以为这个区块坏了 —— 这正是他报的问题。
+// 检查中：显示一行灰色提示并禁用「重试」，同时让两行提示显示「正在检查更新…」。
+// 自动检查发生在进入页面时，没有反馈的话用户会以为这个区块坏了 ——
+// 这正是他报的问题。加载进度条由后端在版本列表响应里捎带（progress/done/total）。
 function setVerChecking(on){
   var box = $('ver-err'), lines = $('ver-err-lines'), btn = $('btn-ver-retry');
   state.verLoading = !!on;
   if (btn) btn.disabled = !!on;
-  if (!box || !lines) return;
-  if (on){
-    lines.textContent = '';
-    var d = document.createElement('div');
-    d.textContent = '正在检查更新…（网络慢时可能需要几十秒）';
-    lines.appendChild(d);
-    box.className = 'oc-hint';
-    box.style.display = '';
-  } else {
-    box.className = 'oc-hint oc-err';
-    renderVersionStatus();
+  if (box && lines){
+    if (on){
+      lines.textContent = '';
+      var d = document.createElement('div');
+      d.textContent = VER_CHECKING + '（网络慢时可能需要几十秒）';
+      lines.appendChild(d);
+      box.className = 'oc-hint';
+      box.style.display = '';
+    } else {
+      box.className = 'oc-hint oc-err';
+      renderVersionStatus();
+    }
   }
+  // 检查期间两行提示同步显示「正在检查更新…」，出结果后由下面两个 render 覆盖。
+  // 候选也一并清空：否则 setUpgrading / 渲染函数按上一轮的候选把按钮重新点亮。
+  if (on){ state.ocCand = null; state.nodeCand = null; }
+  [['oc-ver-hint', 'btn-oc-upgrade'], ['node-ver-hint', 'btn-node-upgrade']].forEach(function(p){
+    var h = $(p[0]);
+    if (h){ h.textContent = on ? VER_CHECKING : ''; h.className = 'oc-hint'; }
+    var b = $(p[1]);
+    if (b) b.disabled = true;
+  });
 }
 
-// 版本列表失败提示：失败只影响"预填候选版本"，不影响升级入口本身。
+// 两行右侧提示的共用渲染器：只用一个 <b> 包住版本号，其余全是纯文本。
+// 服务端数据只进 textContent / createElement，绝不拼 innerHTML。
+var VER_HINT_COLOR = { ok:'oc-hint oc-ok', warn:'oc-hint oc-warn' };
+function renderVerHint(el, parts, cls){
+  if (!el) return;
+  el.textContent = '';
+  el.className = VER_HINT_COLOR[cls] || 'oc-hint';
+  (parts || []).forEach(function(p){
+    if (typeof p === 'string'){ el.appendChild(document.createTextNode(p)); return; }
+    var b = document.createElement('b');
+    b.textContent = p.bold || '';
+    el.appendChild(b);
+  });
+}
+
+// 「这次到底有没有把版本列表拉回来」：整体请求失败，或后端明确报了该源失败。
+// 它是「无法检查更新」与「已是最新」的分界线 —— 没拉到就绝不谎报"已是最新"。
+// 注意 mirrors 回退（source=mirror）只算提示，不算失败：列表是拿到了的。
+function verSource(){
+  return jp(state.versionsStatus || '', {}) || {};
+}
+function verCheckFailed(which){
+  if (state.versionsNet) return true;
+  var st = verSource(), s = st[which] || {};
+  return s.ok === false;
+}
+
+// 版本列表失败提示（红字 + 重试按钮）。失败只影响"检查更新"，
+// 不影响升级入口本身：手填入口随时可以升级。
 function versionErrors(){
   var out = [];
   if (state.versionsNet) return ['无法获取版本列表：请求超时或被中断（网络 / 镜像不可达），请点「重试」'];
@@ -706,99 +790,59 @@ function nodeUpdateCandidate(){
   return { latest: best, current: cur, engines: engines };
 }
 
-// ------------------------------------------------- 版本选择器
-// 列表能拉到就是下拉（点选），拉不到才退回手填 —— 手填只作为兜底，
-// 因为版本号写错只会在下载阶段报错，而下拉里都是真实存在的版本。
-function fillVerPicker(sel, opts){
-  if (!sel) return;
-  var keep = sel.value;
-  while (sel.firstChild) sel.removeChild(sel.firstChild);
-  for (var i = 0; i < opts.length; i++) sel.appendChild(new Option(opts[i].label, opts[i].value));
-  // 重绘（info 或列表晚到）时保留用户已经选过的值
-  var found = false;
-  for (var j = 0; j < sel.options.length; j++){
-    if (sel.options[j].value === keep){ found = true; break; }
-  }
-  if (!found && opts.length) sel.value = opts[0].value;
+// 版本列表只用来判断「有没有更新」：不再生成候选下拉（几十个历史版本
+// 对用户没有意义，选错版本只会在下载阶段报错）。目标版本永远取探测结果。
+
+// 两行的按钮：只在"确实探测到更高的目标版本"且当前没有安装动作在跑时可点。
+// 可点性完全由 ocCand / nodeCand 决定（见 verState），不重复算一遍候选，
+// 否则会出现「提示说无法检查更新、按钮却亮着」。
+function renderUpgradeBtns(){
+  var bo = $('btn-oc-upgrade'), bn = $('btn-node-upgrade');
+  if (bo) bo.disabled = !state.ocCand || !!state.upgrading;
+  if (bn) bn.disabled = !state.nodeCand || !!state.upgrading;
 }
 
-function ocVerOptions(){
-  var cur = String((state.info && state.info.openclaw) || '').replace(/^v/, '');
-  var out = [], seen = {};
-  (state.ocList || []).forEach(function(x){
-    var v = String((x && x.version) || '').replace(/^v/, '');
-    if (!ocSeg4(v) || seen[v]) return;
-    seen[v] = 1;
-    out.push({ value: v, label: v + (v === cur ? '（当前）' : '') });
-  });
-  out.sort(function(a, b){ return cmpVer4(b.value, a.value); });   // 新版本在前
-  return out;
-}
-
-function nodeVerOptions(){
-  var cur = String((state.info && state.info.node) || '').replace(/^v/, '');
-  var rest = [], seen = {};
-  (state.nodeList || []).forEach(function(n){
-    var v = String((n && (n.num || n.version)) || '').replace(/^v/, '');
-    if (!v || seen[v]) return;
-    seen[v] = 1;
-    rest.push({ value: 'v' + v, label: 'v' + v + (v === cur ? '（当前）' : '') });
-  });
-  rest.sort(function(a, b){ return cmpVer(b.value, a.value); });
-  return [{ value: 'auto', label: '自动（推荐：选满足 OpenClaw 要求的最高版本）' }].concat(rest);
-}
-
-// 当前生效的目标版本：下拉可见就取下拉，否则取手填框。
-function pickVer(which){
-  var sel = $(which + '-ver-select'), input = $(which + '-ver-input');
-  if (sel && sel.style.display !== 'none' && sel.options.length) return sel.value;
-  return input ? input.value : '';
-}
-
-// 有列表 → 下拉；没有 → 手填框。返回是否使用了下拉。
-function useVerPicker(which, opts){
-  var sel = $(which + '-ver-select'), input = $(which + '-ver-input');
-  var has = !!(opts && opts.length);
-  if (sel) sel.style.display = has ? '' : 'none';
-  if (input) input.style.display = has ? 'none' : '';
-  if (has) fillVerPicker(sel, opts);
-  return has;
+// 一行到底该显示什么，四种状态严格分开：
+//   loading  检查中            → 「正在检查更新…」，按钮禁用
+//   update   列表拿到了且有更高版本 → 「可升级到 x」，按钮可点
+//   latest   列表拿到了且没有更高版本 → 「已是最新」，按钮禁用
+//   unknown  拉不到列表 / 当前版本未知 → 「无法检查更新」或留空，按钮禁用
+// 关键点：latest 只可能出现在"列表确实非空"的分支里，拉不到列表绝不谎报已是最新。
+function verState(which, cand, list, cur){
+  if (state.verLoading) return 'loading';       // 检查中优先：否则「正在检查更新…」会被吞掉
+  if (!cur) return 'unknown';                   // 当前版本未知：不谈更新
+  if (cand) return 'update';
+  if (verCheckFailed(which)) return 'unknown';
+  if (!list || !list.length) return 'unknown';  // ok 但列表为空：同样无法判断
+  return 'latest';
 }
 
 function renderNodeUpdate(){
-  var hint = $('node-ver-hint'), input = $('node-ver-input'), sel = $('node-ver-select');
+  var hint = $('node-ver-hint');
   if (!hint) return;
-  var opts = nodeVerOptions();
-  var hasList = (state.nodeList || []).length > 0;
-  useVerPicker('node', hasList ? opts : []);
   var c = nodeUpdateCandidate();
+  var btn = $('btn-node-upgrade');
+  var cur = String((state.info && state.info.node) || '').replace(/^v/, '');
+  var st  = verState('node', c, state.nodeList, cur);
+  state.nodeCand = (st === 'update') ? c : null;
 
-  if (hasList && sel){
-    // 默认停在「自动」；检测到新版本且用户没手选过时，预选到那个版本。
-    if (c && !state.nodePicked){
-      var want = 'v' + String(c.latest).replace(/^v/, '');
-      for (var i = 0; i < sel.options.length; i++){
-        if (sel.options[i].value === want){ sel.value = want; break; }
-      }
-    }
-    sel.onchange = function(){ state.nodePicked = true; };
-  } else if (input){
-    // 拉不到列表才用手填：沿用原来的预填逻辑
-    if (!c){
-      if (state.nodePrefill && input.value === state.nodePrefill) input.value = '';
-      state.nodePrefill = '';
-    } else {
-      var v = 'v' + String(c.latest).replace(/^v/, '');
-      if (!input.value || input.value === state.nodePrefill) input.value = v;
-      state.nodePrefill = v;
-    }
+  hint.className = 'oc-hint';
+  if (st === 'loading'){
+    hint.textContent = VER_CHECKING;              // 检查期间：两行都不可点
+  } else if (st === 'update'){
+    // 有新版本：提示里新版本号加粗，按钮文案直接带上目标版本。
+    var v = String(c.latest).replace(/^v/, '');
+    renderVerHint(hint, ['可升级到 ', { bold: 'v' + v }]);
+    if (btn) btn.textContent = '升级到 v' + v;
+  } else if (st === 'latest'){
+    hint.textContent = '已是最新';
+  } else if (cur){
+    // 当前版本已知、但列表没拉回来：如实说"无法检查更新"，不谎报。
+    hint.textContent = '无法检查更新';
   }
-  // 服务端数据只进 textContent，绝不拼 HTML
-  hint.textContent = c
-    ? ('检测到新版本 v' + String(c.latest).replace(/^v/, '')
-       + '（当前 v' + String(c.current).replace(/^v/, '') + '）'
-       + (c.engines ? '，满足 OpenClaw 要求 ' + c.engines : ''))
-    : '';
+  // 回到非 update 状态时按钮文案复位：否则会残留上一轮的「升级到 x」。
+  if (btn && st !== 'update') btn.textContent = '升级';
+  renderUpgradeBtns();
 }
 
 // ------------------------------------------------- OpenClaw 更新提示
@@ -838,30 +882,28 @@ function ocUpdateCandidate(){
 }
 
 function renderOcUpdate(){
-  var hint = $('oc-ver-hint'), input = $('oc-ver-input'), sel = $('oc-ver-select');
+  var hint = $('oc-ver-hint');
   if (!hint) return;
-  var opts = ocVerOptions();
-  useVerPicker('oc', opts);
   var c = ocUpdateCandidate();
+  var btn = $('btn-oc-upgrade');
+  var cur = String((state.info && state.info.openclaw) || '').replace(/^v/, '');
+  var st  = verState('oc', c, state.ocList, cur);
+  state.ocCand = (st === 'update') ? c : null;
 
-  if (opts.length && sel){
-    if (c && !state.ocPicked){
-      for (var i = 0; i < sel.options.length; i++){
-        if (sel.options[i].value === c.latest){ sel.value = c.latest; break; }
-      }
-    }
-    sel.onchange = function(){ state.ocPicked = true; };
-  } else if (input){
-    if (!c){
-      if (state.ocPrefill && input.value === state.ocPrefill) input.value = '';
-      state.ocPrefill = '';
-    } else {
-      if (!input.value || input.value === state.ocPrefill) input.value = c.latest;
-      state.ocPrefill = c.latest;
-    }
+  hint.className = 'oc-hint';
+  if (st === 'loading'){
+    hint.textContent = VER_CHECKING;
+  } else if (st === 'update'){
+    renderVerHint(hint, ['可升级到 ', { bold: c.latest }]);
+    if (btn) btn.textContent = '升级到 ' + c.latest;
+  } else if (st === 'latest'){
+    hint.textContent = '已是最新';
+  } else if (cur){
+    hint.textContent = '无法检查更新';
   }
-  // 服务端数据只进 textContent，绝不拼 HTML
-  hint.textContent = c ? ('检测到新版本 v' + c.latest + '（当前 v' + c.current + '）') : '';
+  // 回到非 update 状态时按钮文案复位：否则会残留上一轮的「升级到 x」。
+  if (btn && st !== 'update') btn.textContent = '升级';
+  renderUpgradeBtns();
 }
 
 // 安装类操作的进度提示：安装日志已移到「设置」页，本页只显示一行状态。
@@ -873,6 +915,18 @@ function stOpSay(msg, bad){
   el.style.display = msg ? '' : 'none';
 }
 
+// 「有安装动作在跑」的唯一开关：两个行内升级按钮与手填入口的两个按钮
+// 一起禁用 / 按探测结果恢复。所有入口（行内、手填、复用本机 Node）都走它，
+// 否则总有一个按钮会被漏掉、永久禁用。
+function setUpgrading(on){
+  state.upgrading = !!on;
+  renderUpgradeBtns();
+  ['btn-oc-manual', 'btn-node-manual'].forEach(function(id){
+    var b = $(id);
+    if (b) b.disabled = !!on;
+  });
+}
+
 // 只轮询安装状态（不读安装日志）：日志元素在设置页，本页不依赖它。
 function startInstallPoll(what, onDone){
   if (state.logTimer) clearInterval(state.logTimer);
@@ -881,12 +935,13 @@ function startInstallPoll(what, onDone){
       var d = jp(r.data||'{}', {});
       if (d.state === 'done' || d.state === 'failed'){
         clearInterval(state.logTimer); state.logTimer = null;
-        // 安装类操作共用这一轮流程：所有「升级」按钮都在这里统一恢复，
-        // 否则只恢复其中一个，另一个会永久禁用。
-        if ($('btn-node-upgrade')) $('btn-node-upgrade').disabled = false;
-        if ($('btn-oc-upgrade'))   $('btn-oc-upgrade').disabled = false;
         stOpSay(what + (d.state==='done' ? '完成。' : '失败，请到设置页查看安装日志。'),
                 d.state==='failed');
+        // 先清掉候选再关 upgrading：此刻 info 与版本列表都还是旧的，
+        // 直接 setUpgrading(false) 会按旧候选把按钮重新点亮，用户能再点一次。
+        // 新候选等 loadInfo → renderOcUpdate/renderNodeUpdate 用新版本重算。
+        state.ocCand = null; state.nodeCand = null;
+        setUpgrading(false);
         loadInfo();
         // 调用方（如「使用它」复用本机 Node）可在这里恢复自己的按钮 / 重新探测。
         if (onDone) onDone(d.state);
@@ -896,7 +951,8 @@ function startInstallPoll(what, onDone){
 }
 
 // 版本号形状：latest 或 v?X.Y.Z（可带 -/+ 后缀）。不匹配就不发请求，
-// 避免把奇怪的字符串交给后端拼进下载地址。
+// 避免把奇怪的字符串交给后端拼进下载地址。行内按钮传的是探测结果，
+// 手填入口传的是输入框内容 —— 两者共用这一道校验。
 var VER_RE = /^(latest|v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?)$/;
 
 // 返回规范化后的版本号；空串 = 没填；null = 形状不合法。
@@ -906,15 +962,16 @@ function verValue(raw){
   return VER_RE.test(s) ? s : null;
 }
 
-function startNodeUpdate(){
+// target：目标版本。行内按钮传探测到的版本，手填入口传输入框内容。
+// Node.js 传空串表示"自动"（后端按 engines.node 挑）。
+function startNodeUpdate(target){
   var d = state.info || {};
   var dir   = d.base_dir || '';
   var ocdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
   if (!dir){ alert('未获取到安装目录，请到设置页刷新后重试'); return; }
+  if (state.upgrading) return;
 
-  var pick = pickVer('node');
-  // 下拉里的「自动」等价于留空（后端按 engines.node 自己挑）
-  var raw = (pick === 'auto') ? '' : verValue(pick);
+  var raw = verValue(target);
   if (raw === null){
     stOpSay('Node.js 版本号格式不正确：只接受形如 v22.22.2 的版本号', true);
     return;
@@ -935,13 +992,13 @@ function startNodeUpdate(){
   // 传下去会变成 npm 的固定版本约束，宁可回退到 latest。
   var oc = /^v?\d+\.\d+\.\d+$/.test(String(d.openclaw || '')) ? d.openclaw : 'latest';
 
-  $('btn-node-upgrade').disabled = true;
+  setUpgrading(true);
   stOpSay('正在更新 Node.js ' + (nv === 'auto' ? '（自动选择）' : '到 ' + nv)
         + ' …（完整日志见「设置」页）');
   post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc,
                       node_version: nv }, function(r){
     if (!r || r.ok === false){
-      $('btn-node-upgrade').disabled = false;
+      setUpgrading(false);
       stOpSay('Node.js 更新启动失败：'
         + ((r && (r.data || r.error)) || '服务无响应，请重试'), true);
       return;
@@ -951,13 +1008,21 @@ function startNodeUpdate(){
   });
 }
 
-function startOcUpdate(){
+// 行内「升级到 x」按钮：目标版本就是探测结果，不读任何输入框。
+function startNodeUpdateFromHint(){
+  var c = nodeUpdateCandidate();
+  if (!c) return;
+  startNodeUpdate('v' + String(c.latest).replace(/^v/, ''));
+}
+
+function startOcUpdate(target){
   var d = state.info || {};
   var dir   = d.base_dir || '';
   var ocdir = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
   if (!dir){ alert('未获取到安装目录，请到设置页刷新后重试'); return; }
+  if (state.upgrading) return;
 
-  var v = verValue(pickVer('oc'));
+  var v = verValue(target);
   if (v === null){
     stOpSay('OpenClaw 版本号格式不正确：只接受 latest 或形如 2026.10.4 的版本号', true);
     return;
@@ -980,12 +1045,12 @@ function startOcUpdate(){
   // 传当前版本时 install.sh 发现运行时已是该版本会跳过下载，不会换掉现有 Node。
   var nd = /^v?\d+\.\d+\.\d+$/.test(String(d.node || '')) ? String(d.node) : 'auto';
 
-  $('btn-oc-upgrade').disabled = true;
+  setUpgrading(true);
   stOpSay('正在升级 OpenClaw 到 ' + v + ' …（完整日志见「设置」页）');
   post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: v,
                       node_version: nd }, function(r){
     if (!r || r.ok === false){
-      $('btn-oc-upgrade').disabled = false;
+      setUpgrading(false);
       stOpSay('OpenClaw 升级启动失败：'
         + ((r && (r.data || r.error)) || '服务无响应，请重试'), true);
       return;
@@ -993,6 +1058,13 @@ function startOcUpdate(){
     stOpSay('OpenClaw 升级已启动，完成后本页会自动刷新。');
     startInstallPoll('OpenClaw 升级');
   });
+}
+
+// 行内「升级到 x」按钮：目标版本就是探测结果，不读任何输入框。
+function startOcUpdateFromHint(){
+  var c = ocUpdateCandidate();
+  if (!c) return;
+  startOcUpdate(c.latest);
 }
 
 // ------------------------------- 本机已有 Node 运行时：探测 / 一键复用
@@ -1111,12 +1183,14 @@ function useExistingNode(e, btn){
 
   if (btn) btn.disabled = true;
   state.nodeBusy = true;
+  setUpgrading(true);                     // 同一时刻只允许一个安装动作
   var host = $('st-node-existing');
   if (host){ host.style.display = ''; host.textContent = '正在切换到本机已有的 Node.js …（完整日志见「设置」页）'; }
   stOpSay('正在复用本机 Node.js ' + (e.version || '') + ' …');
   post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: 'system' }, function(r){
     if (!r || r.ok === false){
       state.nodeBusy = false;
+      setUpgrading(false);
       stOpSay('复用本机 Node 启动失败：'
         + ((r && (r.data || r.error)) || '服务无响应，请重试'), true);
       loadNodeExisting();                 // 重绘并恢复按钮
@@ -1307,10 +1381,31 @@ document.addEventListener('click', function(e){
     fail();
   }
 });
-if ($('btn-node-upgrade')) $('btn-node-upgrade').onclick = startNodeUpdate;
-if ($('btn-oc-upgrade'))   $('btn-oc-upgrade').onclick   = startOcUpdate;
+// 行内升级按钮：目标版本取探测结果，不读任何输入框。
+// 必须包一层：直接把 startOcUpdate 挂到 onclick 上，浏览器会把 Event 当第一个参数传进去。
+if ($('btn-oc-upgrade'))   $('btn-oc-upgrade').onclick   = function(){ startOcUpdateFromHint(); };
+if ($('btn-node-upgrade')) $('btn-node-upgrade').onclick = function(){ startNodeUpdateFromHint(); };
+
+// 手填入口（次要入口）：默认折叠，只在拉不到列表或用户想指定特定版本时展开。
+// 收起时不参与任何提交 —— 两个提交按钮就在折叠区里，收起后点不到。
+function toggleManual(force){
+  var box = $('ver-manual'), btn = $('btn-ver-manual');
+  if (!box) return;
+  var open = (typeof force === 'boolean') ? force : (box.style.display === 'none');
+  box.style.display = open ? '' : 'none';
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+if ($('btn-ver-manual')) $('btn-ver-manual').onclick = function(){ toggleManual(); };
+if ($('btn-oc-manual')) $('btn-oc-manual').onclick = function(){
+  var el = $('oc-ver-input');
+  startOcUpdate(el ? el.value : '');
+};
+if ($('btn-node-manual')) $('btn-node-manual').onclick = function(){
+  var el = $('node-ver-input');
+  startNodeUpdate(el ? el.value : '');
+};
 // 「重试」只重新拉一次版本列表（refresh=1），失败也保持按钮可用 ——
-// 输入框与升级按钮不受影响，手填版本号随时可以升级。
+// 手填入口不受影响，随时可以指定版本升级。
 if ($('btn-ver-retry')) $('btn-ver-retry').onclick = function(){
   var b = this;
   if (state.verLoading) return;

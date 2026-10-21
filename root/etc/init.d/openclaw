@@ -214,7 +214,10 @@ start_service() {
 	local port bind token json_port json_bind json_token cfg envfile
 	local force_opt="" user_opt="" env_args=""
 
-	config_load "$OC_UCI"
+	# 配置文件理论上由 postinst 从模板生成，但设备上可能被手工删掉 ——
+	# config_load 读不到时返回非 0，这里显式容错，让下面全部走 uci_get 的默认值，
+	# 而不是让 start_service 半途停住。
+	config_load "$OC_UCI" || true
 	config_get_bool enabled main enabled 0
 	config_get base_dir main base_dir ""
 

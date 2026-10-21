@@ -238,11 +238,11 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   </div>
   <div class="oc-hint" id="m-keyurl"></div>
 
-  <div class="oc-row">
+  <div class="oc-row" id="m-model-row">
     <label>模型</label>
     <select id="m-model"></select>
   </div>
-  <div class="oc-actions" style="margin:-4px 0 12px">
+  <div class="oc-actions" id="m-model-actions" style="margin:-4px 0 12px">
     <button id="btn-refresh-models" class="oc-btn ghost">刷新上游模型</button>
     <button id="btn-discover" class="oc-btn ghost">从 OpenClaw 刷新列表</button>
     <button id="btn-manual-model" class="oc-btn ghost">手动输入模型 ID</button>
@@ -420,8 +420,17 @@ function setModelBusy(busy){
 }
 
 function updateCustomRow(){
-  $('m-model-custom-row').style.display =
-    ($('m-provider').value === 'custom' || MANUAL_OPEN) ? '' : 'none';
+  // 自定义 Provider 没有固定清单：下拉里只会有一条「请手动输入」的占位项，
+  // 下面还另有一个手填框 —— 两处都让人填同一个值是没必要的。
+  // 所以自定义时把下拉、以及「刷新上游模型 / 从 OpenClaw 刷新列表 /
+  // 手动输入模型 ID」三个按钮一起收起来，只留手填框。
+  var custom = ($('m-provider').value === 'custom');
+  var manual = custom || MANUAL_OPEN;
+  $('m-model-custom-row').style.display = manual ? '' : 'none';
+  if ($('m-model-row'))     $('m-model-row').style.display     = custom ? 'none' : '';
+  if ($('m-model-actions')) $('m-model-actions').style.display = custom ? 'none' : '';
+  // 自定义时下拉与提示都没有意义，一并隐藏（hint 在下面单独渲染，别覆盖它）
+  if (custom && $('m-model-hint')) $('m-model-hint').textContent = '';
 }
 
 // Base URL 只对「自定义」或没有预设地址的 Provider 有意义。其余 Provider

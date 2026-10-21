@@ -166,3 +166,23 @@ fi
   先复制到暂存区、验证后再原子换入，源目录始终不动 —— 这是"规则 3"的完整实现。
 - `main.state_dir` / `main.openclaw_dir`：允许指向 `base_dir` 之外，`info` 与
   网关读同一份推导逻辑（`oc_state_dir`），避免"UI 写一个目录、网关读另一个"。
+
+---
+
+## 【硬性规则】安装包绝不能带 `/etc/config/` 下的文件
+
+**2026-10-21 真机事故**：升级到 1.8.8 之后，备份页「定时备份 → 启用」等设置被清回
+默认值。根因不是迁移写错 —— 安装包里**直接带着 `root/etc/config/openclaw`**，
+包管理器把它当普通文件解压覆盖，用户改过的整份配置当场丢掉。
+`conffiles` 只在 opkg 的 `.ipk` 里有效，apk 格式没有对应机制，靠它兜底不可行。
+
+正确做法（已落地）：
+
+- 默认配置放 `/usr/share/openclaw/config.default`（随包覆盖无害）
+- 源码树里**不出现** `root/etc/config/openclaw`
+- `postinst` 与 `.run` 安装器只在 `[ ! -f /etc/config/openclaw ]` 时从模板复制
+- 新增键的默认值交给 `uci-defaults/99-openclaw`（逐键判断"键不存在才写"）
+
+回归：`tools/tests/config-preserve.sh`（8 项）—— 既断言源码树里没有该文件，
+也**真实执行** postinst 那段逻辑，验证"已有配置逐字节不变"与"缺失时从模板生成"。
+已接入 `verify-project.sh` 第 7g 段。

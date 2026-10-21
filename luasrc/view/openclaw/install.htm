@@ -228,34 +228,48 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
 <h2><a id="content" name="content">OpenClaw 助手 · 安装</a></h2>
 
 <div class="oc-card">
-  <h3>当前安装位置</h3>
-  <div class="oc-grid">
-    <div class="oc-kv"><b>安装目录</b><span id="in-cur-dir">-</span></div>
-    <div class="oc-kv"><b>程序位置</b><span id="in-cur-ocdir">-</span></div>
-    <div class="oc-kv"><b>OpenClaw 版本</b><span id="in-cur-oc">-</span></div>
-    <div class="oc-kv"><b>Node.js 版本</b><span id="in-cur-node">-</span></div>
-  </div>
-  <div class="oc-hint">
-    目录在「基本设置」页修改（需点「保存并应用」才生效），本页按上面的值原样提交；版本可在下方「版本」区块选择或手动填写。
-  </div>
-</div>
+  <h3>运行环境与安装</h3>
 
-<div class="oc-card">
-  <h3>版本</h3>
-  <div id="in-ver-err" class="oc-hint oc-err" style="display:none;margin-bottom:8px"></div>
+  <div class="oc-row">
+    <label>安装目录</label>
+    <select id="in-dir"></select>
+    <input type="text" id="in-dir-custom" placeholder="或手动输入目录，如 /mnt/nvme0n1-3/Configs/OpenClaw">
+  </div>
+  <div class="oc-hint" id="in-dir-hint">
+    <div id="in-dir-warn" class="oc-err" style="display:none;margin-bottom:4px"></div>
+    建议选数据盘挂载点下的目录，例如 /mnt/&lt;磁盘&gt;/OpenClaw；不要选 /overlay、/rom 等系统分区。
+  </div>
+
+  <div class="oc-row">
+    <label>程序位置</label>
+    <input type="text" id="in-ocdir-shown" class="oc-addr" readonly>
+    <button id="btn-ocdir-reset" class="oc-btn ghost" style="display:none">恢复默认</button>
+  </div>
+  <div class="oc-hint" id="in-ocdir-hint">
+    <div id="in-ocdir-warn" class="oc-err" style="display:none;margin-bottom:4px"></div>
+    OpenClaw 程序本体固定装在 &lt;安装目录&gt;/openclaw，与数据分开存放 —— 卸载时只删程序、保留会话与凭据。
+    <div style="font-size:12px;margin-top:2px">需要把程序与数据分开存放时，请在 SSH 里 uci set openclaw.main.openclaw_dir=... 后重新安装。</div>
+    <div id="in-ocdir-msg" class="oc-ok" style="display:none;margin-top:4px"></div>
+  </div>
+
   <div class="oc-row">
     <label>OpenClaw 版本</label>
     <select id="in-oc"></select>
     <input type="text" id="in-oc-manual" placeholder="手动输入版本，如 2026.10.4 或 latest"
            style="display:none">
+    <button id="btn-reload-versions" class="oc-btn ghost">重新获取版本</button>
   </div>
+  <div class="oc-hint" id="in-engines">在线获取中…</div>
+
   <div class="oc-row">
     <label>Node.js 版本</label>
     <select id="in-node"></select>
     <input type="text" id="in-node-manual" placeholder="手动输入版本，如 v22.22.2"
            style="display:none">
   </div>
-  <div class="oc-hint">版本列表在线获取；拉不到列表时可选「手动输入版本」，直接填写版本号继续安装。</div>
+  <div class="oc-hint" id="in-node-hint"></div>
+
+  <div id="in-ver-err" class="oc-hint oc-err" style="display:none;margin-bottom:8px"></div>
 </div>
 
 <div class="oc-card">
@@ -324,11 +338,16 @@ var API = {
   backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
   restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>'
 };
-var state = { info:null, baseDir:'', ocVersion:'', nodeVersion:'', logTimer:null,
+var state = { info:null, ocList:[], nodeList:[], logTimer:null,
+  // 当前选中的目标版本（下拉或手填框的值）：重新拉列表时用来"沿用当前"
+  ocVersion:'', nodeVersion:'',
   // ocdirCustom：服务端当前保存的自定义程序目录（main.openclaw_dir），空串 = 默认
   // <安装目录>/openclaw。本页不提供编辑，但安装时必须原样回传 —— 否则会把 SSH
   // 或迁移流程设置的值冲掉。
   ocdirCustom: '',
+  // ocdirLoaded：info 是否已经回填过。save 对 openclaw_dir 是"给了就写、空串 =
+  // 恢复默认"的语义，info 还没回来就提交会把服务端的自定义程序目录误清成默认。
+  ocdirLoaded: false,
   // nodeMirrorCustom：UCI 里保存、但不在下拉列表中的自定义 Node 源（例如 SSH
   // 手填的镜像）。下拉只能显示"自动"，保存时必须原样回传这个值。
   nodeMirrorCustom: '',
@@ -370,21 +389,22 @@ function post(url, data, cb){
 function get(url, cb, timeoutMs){
   var x = new XMLHttpRequest();
   x.open('GET', url, true);
-  // 有超时，且能按调用指定：版本列表要串行跑两次网络下载（后端最坏 60 秒），
-  // 固定 20 秒会让它在这台设备上永远失败。
+  // 超时按调用传入：版本列表要串行跑两次网络下载（后端最坏 60 秒），固定
+  // 20 秒会让它在这台设备上永远失败；其余请求走默认值。
+  // 注意只能在这里赋一次 —— 再写一遍固定值会把调用方传的超时覆盖掉。
   x.timeout = timeoutMs || 20000;
   var fin = once(cb);
   x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
-  x.timeout = 20000;
   x.send();
 }
 function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }
 
 // ------------------------------- 目录检查（只是提示，最终以后端校验为准）
-// 本页没有目录输入框：安装目录 / 程序目录都来自 info，只做提交前的兜底检查
-// （例如 UCI 里被 SSH 手工写坏的值）。判定逻辑与基本设置页、后端保持一致。
+// 后端 oc_validate_base_dir 还会解析符号链接、检查真实路径，这里只覆盖用户
+// 最常撞到的两类误填：目录落在系统分区上、程序目录 == 安装目录（或它的上级）。
+// 目的不是替代后端，而是在点"安装"之前就把"为什么不行、该怎么改"说清楚。
 var OC_SYS_PREFIXES = [
   ['/bin','是系统程序目录'], ['/sbin','是系统程序目录'], ['/lib','是系统库目录'],
   ['/usr','是系统程序目录'], ['/etc','是系统配置目录'],
@@ -414,11 +434,11 @@ function dirProblem(p){
     if (p !== pre && p.indexOf(pre + '/') !== 0) continue;
     if (pre === '/overlay')
       return '/overlay 是系统分区（根文件系统的 overlay），容量有限且与系统配置混在一起，不适合放应用数据。'
-           + '请到「基本设置」改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
+           + '请在本页改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
     if (pre === '/rom')
-      return '/rom 是只读的固件分区，无法写入。请到「基本设置」改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
+      return '/rom 是只读的固件分区，无法写入。请在本页改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
     return pre + ' ' + OC_SYS_PREFIXES[i][1] + '，不能放应用数据。'
-         + '请到「基本设置」改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
+         + '请在本页改选数据盘挂载点下的目录，例如 /mnt/<磁盘>/OpenClaw。';
   }
   return '';
 }
@@ -431,28 +451,74 @@ function ocDirProblem(base, ocdir){
   if (p) return p;
   if (base && ocdir === base)
     return '程序目录不能等于安装目录（' + base + '）：那样卸载时会连带删除数据（会话 / 工作区）。'
-         + '请在「基本设置」恢复默认 —— 程序会自动装到 ' + base + '/openclaw。';
+         + '点本页「恢复默认」即可 —— 程序会自动装到 ' + base + '/openclaw。';
   if (base && base.indexOf(ocdir + '/') === 0)
     return '程序目录不能是安装目录的上级（' + ocdir + ' 包含 ' + base + '）：'
-         + '卸载时会连同安装目录（含数据）一起删除。请在「基本设置」恢复默认 —— 程序会自动装到 '
+         + '卸载时会连同安装目录（含数据）一起删除。点本页「恢复默认」即可 —— 程序会自动装到 '
          + base + '/openclaw。';
   return '';
 }
 
 function currentDirs(){
   return {
-    base:  normDir(state.baseDir),
-    // 程序目录只来自服务端（SSH / 迁移已有安装写入的 UCI），本页没有输入框
+    base:  normDir($('in-dir-custom').value || $('in-dir').value),
+    // 程序目录只来自服务端（SSH / 迁移已有安装写入的 UCI），页面上没有输入框
     ocdir: normDir(state.ocdirCustom)
   };
 }
 
-// 刷新只读展示，并把本次检查结果返回给调用方（提交前拦截用）
+// 刷新两条 hint，并把本次检查结果返回给调用方（提交前拦截用）
 function dirCheck(){
   var d = currentDirs();
   var baseMsg = dirProblem(d.base);
   var ocMsg   = ocDirProblem(d.base, d.ocdir);
+  setHint('in-dir-warn', baseMsg);
+  setHint('in-ocdir-warn', ocMsg);
   return { base: baseMsg, ocdir: ocMsg, dirs: d };
+}
+
+// 只读展示「程序位置」：默认 <安装目录>/openclaw；服务端保存过自定义值时显示它。
+// 自定义值可能是 SSH 里手工设错的，所以照样过一遍 ocDirProblem() 给出告警。
+function renderOcdir(){
+  var base = normDir($('in-dir-custom').value || $('in-dir').value);
+  var ocdir = normDir(state.ocdirCustom);
+  $('in-ocdir-shown').value = state.ocdirLoaded
+    ? (ocdir || (base ? base + '/openclaw' : ''))
+    : '（读取中…）';                       // 服务端数据只进 input.value
+  $('btn-ocdir-reset').style.display = (state.ocdirLoaded && ocdir) ? '' : 'none';
+  setHint('in-ocdir-msg', '');            // 目录一变，上一次「已恢复默认」的提示就过期了
+  setHint('in-ocdir-warn', state.ocdirLoaded ? ocDirProblem(base, ocdir) : '');
+}
+
+// 手填框里的目录若正好等于某个挂载点下的 OpenClaw，下拉跟着选中它
+function syncDirSelect(){
+  var sel = $('in-dir'), cur = normDir($('in-dir-custom').value);
+  if (!cur) return;
+  for (var i = 0; i < sel.options.length; i++){
+    if (normDir(sel.options[i].value) === cur){ sel.selectedIndex = i; return; }
+  }
+}
+
+function loadMounts(){
+  get(API.mounts, function(r){
+    var arr = listOf((r && r.data) || '[]');
+    var sel = $('in-dir'), cur = normDir($('in-dir-custom').value);
+    clearSelect(sel);
+    arr.forEach(function(m){
+      var o = document.createElement('option');
+      o.value = String(m.path || '').replace(/\/$/,'') + '/OpenClaw';
+      o.textContent = m.path + '  （可用 ' + m.free_mb + ' MB，' + m.dev + '）';
+      sel.appendChild(o);
+    });
+    if (!arr.length){
+      var o = document.createElement('option');
+      o.value = '/mnt/data/OpenClaw'; o.textContent = '/mnt/data（未检测到外置盘）';
+      sel.appendChild(o);
+    }
+    syncDirSelect();
+    dirCheck();
+    renderOcdir();
+  });
 }
 
 // ------------------------------- Node.js 源回填
@@ -501,11 +567,9 @@ function nodeMirrorSave(){
   return { node_mirror: '', clear: '1' };
 }
 
-// ------------------------------- 版本：由「基本设置」页带过来
-// api_info 只返回"已安装"的版本（openclaw / node），不返回 UCI 里保存的
-// oc_version / node_version。基本设置页在用户选择版本时把值写进 sessionStorage
-// （同一标签页内有效），这里优先用它 —— 否则用户在基本设置里选的版本会被
-// 静默忽略，点安装实际装的是 latest。
+// ------------------------------- 版本：本页选择，随 save + install 一起提交
+// 旧版「基本设置」页把选择写进 sessionStorage 再交给本页。该页面已不再提供版本
+// 选择，但同一标签页里可能还留着旧值，读一次不影响什么。
 var PICK_KEY = 'openclaw.installPick';
 
 function readPick(){
@@ -525,15 +589,72 @@ function pickTarget(pick, key, installed, fallback){
   return fallback;
 }
 
-function renderCurrent(){
-  var d = state.info || {};
-  var base = state.baseDir, ocdir = normDir(state.ocdirCustom);
-  $('in-cur-dir').textContent   = base || '-';
-  $('in-cur-ocdir').textContent = ocdir || (base ? base + '/openclaw' : '-');
-  $('in-cur-oc').textContent    = state.ocVersion
-    + (d.openclaw ? '（已安装 ' + d.openclaw + '）' : '（未安装）');
-  $('in-cur-node').textContent  = state.nodeVersion
-    + (d.node ? '（已安装 ' + d.node + '）' : '（未安装）');
+// ------------------------------- engines.node 判定
+// 与 shell 侧 engines_match 同义：支持 || 分隔的多组、组内空格分隔的多个比较符。
+// 低于要求的 Node 装上也跑不起来（install.sh 会 verify_node_version 后退出），
+// 所以直接在下拉里禁用。
+function engineOK(nodeNum, engines){
+  if (!engines) return true;
+  var parts = engines.split('||');
+  for (var i = 0; i < parts.length; i++){
+    var cmps = parts[i].trim().split(/\s+/), ok = true;
+    for (var j = 0; j < cmps.length; j++){
+      var c = cmps[j];
+      if (!c) continue;
+      if (!cmpOne(nodeNum, c)){ ok = false; break; }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+function fields(v){
+  var a = (v || '0.0.0').replace(/^v/, '').split('.');
+  for (var i = 0; i < 3; i++) a[i] = parseInt((a[i] || '0').replace(/[^0-9].*$/, ''), 10) || 0;
+  return a;
+}
+function cmpOne(v, c){
+  if (c === '' || c === '*') return true;
+  var op = c.match(/^(>=|<=|>|<|=|\^|~)/);
+  op = op ? op[1] : '=';
+  var cv = c.replace(/^(>=|<=|>|<|=|\^|~)/, '');
+  var a = fields(v), b = fields(cv), raw = cv.split('.');
+  for (var i = 0; i < 3; i++){
+    if (raw[i] === 'x' || raw[i] === 'X' || raw[i] === undefined) break;
+    if (a[i] !== b[i]){
+      if (op === '>=' || op === '>') return a[i] > b[i];
+      if (op === '<=' || op === '<') return a[i] < b[i];
+      return false;
+    }
+  }
+  if (op === '>' || op === '<') return false;
+  return true;
+}
+
+// 当前 OpenClaw 版本要求的 Node 范围（来自 api_versions 的 engines 字段）
+function currentEngines(){
+  var v = $('in-oc').value;
+  if (v === VER_MANUAL) v = verTrim($('in-oc-manual').value);
+  var e = '';
+  state.ocList.forEach(function(x){ if (x.version === v) e = x.engines || ''; });
+  return e;
+}
+
+// Node.js 版本行的提示：目标 OpenClaw 版本要求什么 Node
+function renderNodeHint(){
+  var el = $('in-node-hint');
+  var v = $('in-oc').value;
+  if (v === VER_MANUAL) v = verTrim($('in-oc-manual').value) || '（手动输入）';
+  var e = currentEngines();
+  el.textContent = '';                    // 版本数据来自服务端，只进 textContent
+  el.appendChild(document.createTextNode('OpenClaw ' + v + ' 要求 Node.js：'));
+  var b = document.createElement('b'); b.textContent = e || 'any'; el.appendChild(b);
+  el.appendChild(document.createTextNode('　低于该要求的版本已被禁用。'));
+}
+
+// 数据源提示行：npm / node 两个上游 + 本机 libc 架构
+function renderSources(src){
+  $('in-engines').textContent = '数据源：npm ' + (src.npm || '') + '  |  node ' + (src.node || '')
+    + '  |  ' + (src.arch || '') + (src.musl == '1' ? ' musl' : ' glibc');
 }
 
 // ------------------------------- 版本选择
@@ -555,9 +676,10 @@ function addOption(sel, text, value){
   return o;
 }
 
-function fillVersionSelect(sel, manual, list, cur, isNode){
+// engines：OpenClaw 要求的 Node 范围（只有 Node 下拉用）
+function fillVersionSelect(sel, manual, list, cur, isNode, engines){
   clearSelect(sel);
-  var seen = {}, i, v, it, label, n = 0;
+  var seen = {}, i, v, it, label, n = 0, o, ok;
   if (isNode){ addOption(sel, '自动（按 OpenClaw 要求选择）', 'auto'); seen['auto'] = 1; }
   if (cur && !seen[cur]){
     addOption(sel, '沿用当前：' + cur, cur);
@@ -568,10 +690,16 @@ function fillVersionSelect(sel, manual, list, cur, isNode){
     v = verTrim(it.version);
     if (!v || seen[v]) continue;
     seen[v] = 1; n++;
-    label = v;
-    if (it.tag) label += '（' + it.tag + '）';
-    else if (it.lts) label += '（LTS ' + it.lts + '）';
-    addOption(sel, label, v);
+    label = v; ok = true;
+    if (isNode){
+      ok = engineOK(it.num || v, engines);
+      if (it.lts) label += '（LTS ' + it.lts + '）';
+      if (!ok) label += '（低于要求 ' + engines + '）';
+    } else if (it.tag){
+      label += '（' + it.tag + '）';
+    }
+    o = addOption(sel, label, v);
+    if (!ok) o.disabled = true;
   }
   addOption(sel, '手动输入版本…', VER_MANUAL);
   if (!n){
@@ -581,11 +709,18 @@ function fillVersionSelect(sel, manual, list, cur, isNode){
     if (!manual.value) manual.value = cur || '';
   } else {
     sel.value = cur || sel.options[0].value;
-    manual.style.display = 'none';
+    // cur 恰好是低于要求的版本时，退到第一个可用项
+    if (sel.selectedIndex >= 0 && sel.options[sel.selectedIndex].disabled){
+      for (i = 0; i < sel.options.length; i++){
+        if (!sel.options[i].disabled){ sel.value = sel.options[i].value; break; }
+      }
+    }
+    manual.style.display = (sel.value === VER_MANUAL) ? '' : 'none';
+    if (sel.value === VER_MANUAL && !manual.value) manual.value = cur || '';
   }
 }
 
-// 下拉 / 手填变化时同步到 state，让上方「当前安装位置」卡片显示的目标版本跟着变
+// 下拉 / 手填变化时同步到 state，重新拉列表时用它"沿用当前"
 function syncVersionState(isNode){
   var sel = $(isNode ? 'in-node' : 'in-oc');
   var man = $(isNode ? 'in-node-manual' : 'in-oc-manual');
@@ -593,10 +728,9 @@ function syncVersionState(isNode){
   if (!v) return;
   if (!(isNode && v === 'auto') && !VER_RE.test(v)) return;
   if (isNode) state.nodeVersion = v; else state.ocVersion = v;
-  renderCurrent();
 }
 
-function bindVersionSelect(selId, manualId, isNode){
+function bindVersionSelect(selId, manualId, isNode, onPick){
   var sel = $(selId), man = $(manualId);
   sel.onchange = function(){
     if (sel.value === VER_MANUAL){
@@ -607,8 +741,9 @@ function bindVersionSelect(selId, manualId, isNode){
       man.value = '';
     }
     syncVersionState(isNode);
+    if (onPick) onPick();
   };
-  man.oninput = function(){ syncVersionState(isNode); };
+  man.oninput = function(){ syncVersionState(isNode); if (onPick) onPick(); };
 }
 
 // 提交前取最终值：手填为空 / 形状不合法一律不提交（返回 null）。
@@ -676,34 +811,48 @@ function versionErrorLines(r, st, ocl, ndl){
   return out;
 }
 
-function loadVersions(){
-  get(API.versions, function(r){
+// refresh=true 绕过后端缓存强制在线刷新（「重新获取版本」按钮）
+function loadVersions(refresh){
+  get(API.versions + (refresh ? '?refresh=1' : ''), function(r){
     var st = null;
     if (r && r.status) st = (typeof r.status === 'object') ? r.status : jp(String(r.status), null);
     var ocl = (r && r.openclaw) ? listOf(r.openclaw) : [];
     var ndl = (r && r.node) ? listOf(r.node) : [];
-    fillVersionSelect($('in-oc'), $('in-oc-manual'), ocl, state.ocVersion, false);
-    fillVersionSelect($('in-node'), $('in-node-manual'), ndl, state.nodeVersion, true);
+    state.ocList = ocl; state.nodeList = ndl;
+    if (r && r.ok !== false && !r.net && r.sources) renderSources(jp(r.sources || '{}', {}));
+    else $('in-engines').textContent = '数据源：无法获取（仍可手动填写版本号安装）';
+    fillVersionSelect($('in-oc'), $('in-oc-manual'), ocl, state.ocVersion, false, '');
+    fillVersionSelect($('in-node'), $('in-node-manual'), ndl, state.nodeVersion, true, currentEngines());
+    renderNodeHint();
     renderVerError(versionErrorLines(r, st, ocl, ndl));
   }, 90000);   // 后端要串行跑两次网络下载，20 秒不够
 }
 
 function loadInfo(){
   get(API.info, function(r){
-    var d = jp(r.data||'{}', {});
-    state.info = d;
-    state.baseDir = normDir(d.base_dir || '');
-    // 程序目录是服务端状态：oc_dir_custom 为假表示用默认（<安装目录>/openclaw）
-    state.ocdirCustom = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
-    var pick = readPick();
-    state.ocVersion   = pickTarget(pick, 'oc',   d.openclaw, 'latest');
-    state.nodeVersion = pickTarget(pick, 'node', d.node, 'auto');
-    renderCurrent();
-    // Node.js 源是服务端保存的状态（可能是 SSH 手填的），回填后下拉才与
-    // 实际使用的源一致；保存逻辑见 nodeMirrorSave()。
-    applyNodeMirror(d.node_mirror);
+    var d = jp((r && r.data) || '{}', {});
+    if (r && r.ok !== false && r.data){
+      state.info = d;
+      // 安装目录以页面控件为准：info 只在手填框还空着时作为初值。
+      // 不能拿下拉是否已有值来判断 —— 挂载点列表通常先回来，下拉总会有值。
+      if (d.base_dir && !$('in-dir-custom').value)
+        $('in-dir-custom').value = d.base_dir;
+      // 程序目录是服务端状态：oc_dir_custom 为假表示用默认（<安装目录>/openclaw）
+      state.ocdirCustom = d.oc_dir_custom ? (d.openclaw_dir || '') : '';
+      state.ocdirLoaded = true;
+      var pick = readPick();
+      state.ocVersion   = pickTarget(pick, 'oc',   d.openclaw, 'latest');
+      state.nodeVersion = pickTarget(pick, 'node', d.node, 'auto');
+      // Node.js 源是服务端保存的状态（可能是 SSH 手填的），回填后下拉才与
+      // 实际使用的源一致；保存逻辑见 nodeMirrorSave()。
+      applyNodeMirror(d.node_mirror);
+    }
+    syncDirSelect();
+    dirCheck();
+    renderOcdir();
     // 版本下拉依赖上面解析出的 ocVersion / nodeVersion，必须放在后面。
-    loadVersions();
+    // info 失败时也照拉：本页是唯一的版本选择入口，不能因为 info 挂了就没法选版本。
+    loadVersions(false);
   });
 }
 
@@ -819,12 +968,34 @@ function fmtTime(ts){
 }
 
 $('in-registry').onchange = function(){ state.registryTouched = true; };
-bindVersionSelect('in-oc', 'in-oc-manual', false);
-bindVersionSelect('in-node', 'in-node-manual', true);
+bindVersionSelect('in-oc', 'in-oc-manual', false, function(){
+  // OpenClaw 版本一改，Node 的可用范围就变了：按新的 engines 重画 Node 下拉
+  fillVersionSelect($('in-node'), $('in-node-manual'), state.nodeList, state.nodeVersion, true, currentEngines());
+  renderNodeHint();
+});
+bindVersionSelect('in-node', 'in-node-manual', true, renderNodeHint);
+
+// 安装目录控件：下拉只是手填框的快捷方式，两者都算"页面上的安装目录"
+$('in-dir').onchange = function(){ $('in-dir-custom').value = $('in-dir').value; dirCheck(); renderOcdir(); };
+$('in-dir-custom').oninput = function(){ dirCheck(); renderOcdir(); };
+
+// 恢复默认：清掉内存里的自定义程序目录，保存时随请求回传空串
+$('btn-ocdir-reset').onclick = function(){
+  state.ocdirCustom = '';
+  renderOcdir();
+  var base = normDir($('in-dir-custom').value || $('in-dir').value);
+  setHint('in-ocdir-msg', '已恢复默认，安装时会装到 ' + (base ? base + '/openclaw' : '<安装目录>/openclaw'));
+};
+
+// 重新获取版本：绕过后端缓存，强制在线刷新一次
+$('btn-reload-versions').onclick = function(){
+  $('in-engines').textContent = '正在在线获取…';
+  loadVersions(true);
+};
 
 $('btn-install').onclick = function(){
-  // 目录与版本都来自 info（本页不可编辑）。先做一次兜底检查：UCI 里的值可能
-  // 是 SSH 手工写坏的，提交前就把"为什么不行"说清楚。
+  // 安装目录以页面上的控件为准；程序目录来自服务端，只做兜底检查
+  // （UCI 里的值可能是 SSH 手工写坏的），提交前就把"为什么不行"说清楚。
   var chk = dirCheck();
   if (chk.base || chk.ocdir){
     var why = chk.base || chk.ocdir;
@@ -834,23 +1005,25 @@ $('btn-install').onclick = function(){
   }
   var dir = chk.dirs.base;
   if (!dir){
-    alert('安装目录为空，请先在「基本设置」页选择安装目录并点「保存并应用」');
+    alert('请先选择或填写安装目录');
     return;
   }
   var ocdir = chk.dirs.ocdir;
-  // 程序目录页面上不可编辑，但必须原样回传服务端当前值：save 对 openclaw_dir
-  // 是"空值也显式写入"的语义，漏传或传空都会冲掉已有自定义目录。
   // 版本取下拉 / 手动输入框：手填为空或形状不合法时直接拦下，不提交。
   var oc = resolveVersion('in-oc', 'in-oc-manual', false, 'OpenClaw ');
   if (oc === null) return;
   var nd = resolveVersion('in-node', 'in-node-manual', true, 'Node.js ');
   if (nd === null) return;
 
-  // 先保存设置：save 现在会返回真实结果。目录被安全校验拒绝时必须停下来提示，
-  // 否则安装会在后面以难懂的方式失败。
+  // 先保存设置：安装按 UCI 里的目录/版本走。目录被安全校验拒绝时必须停下来
+  // 提示，否则安装会在后面以难懂的方式失败。
   var nm = nodeMirrorSave();
-  var data = { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: nd,
+  var data = { base_dir: dir, oc_version: oc, node_version: nd,
     node_mirror: nm.node_mirror, node_mirror_clear: nm.clear };
+  // 程序目录页面上不可编辑，但必须原样回传服务端当前值：save 对 openclaw_dir
+  // 是"空值也显式写入"的语义，漏传或传空都会冲掉已有自定义目录。
+  // info 未回填时不提交：那时 state 里的空串会被服务端当成"恢复默认"。
+  if (state.ocdirLoaded) data.openclaw_dir = ocdir;
   // npm 源 / 代理：info 不返回当前保存值，回填不了；未改动就不提交，
   // 否则会把用户之前保存的镜像源 / 代理冲成默认值。
   if (state.registryTouched) data.npm_registry = $('in-registry').value;
@@ -860,7 +1033,7 @@ $('btn-install').onclick = function(){
   post(API.save, data, function(sr){
     if (sr && sr.ok === false){
       logSay('设置保存失败：服务端拒绝了本次配置。请按下面的提示检查对应输入框：\n'
-        + '· 安装目录（在「基本设置」）：必须是数据盘上的绝对路径（如 /mnt/<磁盘>/OpenClaw），\n'
+        + '· 安装目录（本页第一行）：必须是数据盘上的绝对路径（如 /mnt/<磁盘>/OpenClaw），\n'
         + '  不能是 /etc、/tmp、/var、/overlay、/rom 等系统路径，也不能是符号链接；\n'
         + '· 程序目录：页面不可修改，默认固定为 <安装目录>/openclaw；\n'
         + '  若曾在 SSH 里设过 openclaw_dir，请确认它不等于安装目录、也不是它的上级；\n'
@@ -899,7 +1072,16 @@ $('btn-uninstall').onclick = function(){
   setTimeout(function(){ loadInfo(); }, 3000);
 };
 
+// 先把目录控件画出来（此时 info 还没回来，程序位置显示「读取中」），
+// loadInfo / loadMounts 回来后各自再刷新一次。
+dirCheck();
+renderOcdir();
+// 先把目录控件画出来（此时 info 还没回来，程序位置显示「读取中」），
+// loadInfo / loadMounts 回来后各自再刷新一次。
+dirCheck();
+renderOcdir();
 loadInfo();
+loadMounts();
 // 安装可能是上一次启动的（刷新页面 / 从别的菜单进来）：必须主动接管进度，
 // 否则日志区会一直停在「（尚未开始）」，看起来像根本没在装。
 checkInstallStatusOnLoad();

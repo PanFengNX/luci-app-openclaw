@@ -124,7 +124,7 @@ head_ "5. 必须存在的关键文件"
 for f in \
 	Makefile \
 	root/etc/init.d/openclaw \
-	root/etc/config/openclaw \
+	root/usr/share/openclaw/config.default \
 	root/etc/uci-defaults/99-openclaw \
 	root/usr/libexec/istorec/openclaw.sh \
 	root/usr/libexec/openclaw/lib.sh \
@@ -279,6 +279,19 @@ if [ -f tools/tests/mounts.sh ]; then
 	fi
 else
 	skip "缺少 tools/tests/mounts.sh"
+fi
+
+head_ "7g. 升级不得覆盖用户配置（包内不能带 /etc/config/openclaw）"
+if [ -f tools/tests/config-preserve.sh ]; then
+	if out="$(sh tools/tests/config-preserve.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "config-preserve.sh 全部断言通过"
+	else
+		bad "config-preserve.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/config-preserve.sh"
 fi
 
 # --------------------------------------------------------------------------

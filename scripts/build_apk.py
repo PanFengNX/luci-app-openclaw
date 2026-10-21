@@ -64,6 +64,14 @@ EXEC_DIRS = ("init.d", "libexec")
 
 SCRIPTS = """#!/bin/sh
 [ -n "${IPKG_INSTROOT}" ] && exit 0
+# /etc/config/openclaw 不再随包发布 —— 包里带这个文件时，升级会用默认值
+# 整份覆盖用户配置（定时备份、加密开关这些全会丢）。改成"只在不存在时
+# 从模板生成"，升级就永远不碰用户已有的配置。
+# 模板放在 /usr/share 下，覆盖它无害。
+if [ ! -f /etc/config/openclaw ] && [ -f /usr/share/openclaw/config.default ]; then
+	cp /usr/share/openclaw/config.default /etc/config/openclaw 2>/dev/null
+	chmod 600 /etc/config/openclaw 2>/dev/null
+fi
 chmod +x /etc/init.d/openclaw 2>/dev/null
 chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null
 chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null
@@ -363,6 +371,11 @@ __PAYLOAD__
 base64 -d "$T/payload.b64" >"$T/payload.tgz"
 echo "extracting ..."
 tar -xzf "$T/payload.tgz" -C /
+# 同上：只在缺失时生成配置，绝不覆盖用户已有的 /etc/config/openclaw
+if [ ! -f /etc/config/openclaw ] && [ -f /usr/share/openclaw/config.default ]; then
+	cp /usr/share/openclaw/config.default /etc/config/openclaw 2>/dev/null || true
+	chmod 600 /etc/config/openclaw 2>/dev/null || true
+fi
 chmod +x /etc/init.d/openclaw 2>/dev/null || true
 chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null || true
 chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null || true

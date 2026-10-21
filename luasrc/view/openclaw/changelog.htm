@@ -253,7 +253,7 @@ function get(url, cb){
 function clearNode(n){ while (n.firstChild) n.removeChild(n.firstChild); }
 
 /* 所有内容都经 textContent 写入：服务端返回的是 Markdown 原文，
- * 绝不能被当作 HTML 解析。样式走内联 style，避免改动共用 <style> 块。 */
+ * 绝不能被当作 HTML 解析。样式走内联 style，避免改动共用样式块。 */
 function makeLine(text, css){
   var d = document.createElement('div');
   d.textContent = text;
