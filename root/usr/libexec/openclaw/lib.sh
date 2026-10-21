@@ -878,7 +878,9 @@ oc_mounts() {
 	# 输出：挂载点<TAB>可用MB<TAB>文件系统，按可用空间从大到小。
 	# 约定：只往 stdout 写结果（cmd_mounts 会直接拼进 JSON），日志走 stderr。
 	local dev mnt fst opts rest free seen=""
-	[ -r /proc/mounts ] || return 0
+	# 数据源可覆盖：测试用假 mounts 文件喂进来，线上仍是 /proc/mounts。
+	local mf="${OC_PROC_MOUNTS:-/proc/mounts}"
+	[ -r "$mf" ] || return 0
 	while read -r dev mnt fst opts rest; do
 		[ -n "$mnt" ] || continue
 		# /proc/mounts 把空格 / 制表符转义成 \040 / \011；这类路径不能
@@ -891,11 +893,12 @@ oc_mounts() {
 		esac
 		# 只读挂载装不了东西
 		case ",$opts," in *,ro,*) continue ;; esac
-		# 排除系统前缀
+		# 排除系统前缀。/boot 与 /efi 是引导分区：vfat、通常几十到一两百 MB，
+		# 装不下 Node 运行时 + OpenClaw 本体，列进下拉只会让人误选。
 		case "$mnt" in
 			/|/rom|/rom/*|/overlay|/overlay/*|/tmp|/tmp/*|/var|/var/*) continue ;;
 			/usr|/usr/*|/etc|/etc/*|/dev|/dev/*|/proc|/proc/*|/sys|/sys/*) continue ;;
-			/run|/run/*) continue ;;
+			/boot|/boot/*|/efi|/efi/*|/run|/run/*) continue ;;
 		esac
 		# 同一挂载点可能被多个 bind mount 枚举到
 		case "$seen" in *"|$mnt|"*) continue ;; esac
@@ -904,9 +907,11 @@ oc_mounts() {
 		oc_validate_base_dir "$mnt" 2>/dev/null || continue
 		free="$(df -m "$mnt" 2>/dev/null | awk 'NR==2{print $4}')"
 		case "$free" in ''|*[!0-9]*) continue ;; esac
-		[ "$free" -gt 0 ] 2>/dev/null || continue
+		# 装不下的不列：Node 运行时 + OpenClaw 本体约 400 MB，留一倍余量。
+		# 一个 119 MB 的分区列在下拉里，用户选中后必然在安装阶段失败。
+		[ "$free" -ge 512 ] 2>/dev/null || continue
 		printf '%s\t%s\t%s\n' "$mnt" "$free" "$fst"
-	done </proc/mounts | sort -rn -k2,2
+	done <"$mf" | sort -rn -k2,2
 }
 
 # ---------------------------------------------------------------- discovery
@@ -1388,6 +1393,7 @@ oc_validate_base_dir_shape() {
 		/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/usr|/usr/*|/etc|/etc/*) return 1 ;;
 		/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*) return 1 ;;
 		/tmp|/tmp/*|/var|/var/*|/overlay|/overlay/*|/rom|/rom/*) return 1 ;;
+		/boot|/boot/*|/efi|/efi/*) return 1 ;;
 	esac
 	return 0
 }
