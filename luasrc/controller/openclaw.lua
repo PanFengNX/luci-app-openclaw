@@ -143,6 +143,56 @@ local function need_dir()
 	return true
 end
 
+-- 请求方法 / 查询串的检查放在这里（文件前部），**必须在使用之前**声明：
+-- Lua 5.1 是词法作用域，声明写在文件后半段时，前面 api_apply 里的调用会
+-- 解析成全局查找（nil），一调就 "attempt to call a nil value"，整个端点 500。
+-- 这个坑本项目已经踩过一次（RUNDIR 声明晚于 api_apply 的使用）。
+--
+local function is_post()
+	-- http.getenv 在 luci-compat 里一直存在，但取不到时按「不是 POST」处理，
+	-- 宁可拒绝也不要把敏感参数当成查询串接受。
+	local m = nil
+	if http.getenv then m = http.getenv("REQUEST_METHOD") end
+	return (m or ""):upper() == "POST"
+end
+
+-- 光强制 POST 还不够：http.formvalue() 同时查 POST body 与 URL query，
+-- 所以 `POST /api/apply?apikey=...` 依然能生效，而 uhttpd 记录的是完整 URL。
+-- 这里直接检查查询串里有没有敏感键名，有就拒绝 —— 让它连"能生效"都做不到，
+-- 用户只能改用 body 提交，凭据也就不会进访问日志。
+local SECRET_QS = { "apikey", "pass", "password", "code", "secret", "token" }
+
+-- URL 解码（%XX）。只处理百分号编码，'+' 按 query 惯例还原成空格。
+local function url_decode(s)
+	-- '+' 是 Lua 的模式量词，必须转义成 %+ 才是字面量加号。
+	-- 写成 gsub("+", " ") 会在运行时抛 malformed pattern（量词缺主语）。
+	s = s:gsub("%+", " ")
+	return (s:gsub("%%(%x%x)", function(h)
+		return string.char(tonumber(h, 16))
+	end))
+end
+
+local SECRET_SET = {}
+for _, k in ipairs(SECRET_QS) do SECRET_SET[k] = true end
+
+local function query_has_secret()
+	local qs = nil
+	if http.getenv then qs = http.getenv("QUERY_STRING") end
+	if not qs or qs == "" then return false end
+	-- 按键值对逐个比对键名，而不是在整串里找子串：
+	--   * 子串匹配会误伤 apikey_hint=1（它只是个开关，不是凭据）；
+	--   * 也不能用 find(s, 1, true) 去匹配 "[&?]" —— plain 模式会把方括号
+	--     当字面量，永远不命中，等于漏掉 & 之后的键。
+	for pair in (qs .. "&"):gmatch("([^&]*)&") do
+		local k = pair:match("^([^=]*)=")
+		if k then
+			k = url_decode(k)
+			if SECRET_SET[k] then return true end
+		end
+	end
+	return false
+end
+
 -- sys.exec() 只返回 stdout 且丢掉退出码，写操作会因此一律回报成功。这里把
 -- 合并后的输出落到私有 rundir 的临时文件，退出码与文本都能拿到；调用方负责
 -- 在动作结束后删除临时文件（run_capture 自己删）。
@@ -392,6 +442,18 @@ function api_models_url()
 end
 
 function api_apply()
+	-- 必须 POST：apikey 走 GET 查询串会落进 uhttpd 的访问日志（完整 URL 都记）。
+	-- 同文件另外 12 个写操作端点都有这道检查，这里是漏掉的一处。
+	-- 第二道检查针对"POST 但把 key 塞进 query"：formvalue 两种来源都读，
+	-- 所以只挡 GET 还不够。
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	if query_has_secret() then
+		out({ ok = false, error = "凭据不能放在 URL 查询串里，请用表单提交" })
+		return
+	end
 	local p    = http.formvalue("provider") or ""
 	local key  = http.formvalue("apikey") or ""
 	local mdl  = http.formvalue("model") or ""
@@ -858,6 +920,10 @@ end
 -- （会被 helper 的 getopts 当成选项）。这些名字会原样下传给 openclaw.sh。
 local SAFE_NAME = "^[A-Za-z0-9][A-Za-z0-9._-]*$"
 local MAX_UPLOAD = 64 * 1024 * 1024   -- 64 MiB
+-- 分块写出/读取的块大小。备份下载与诊断包导出共用，必须**在使用之前**声明：
+-- Lua 5.1 是词法作用域，声明写在文件后半段时前面的引用会解析成全局查找
+-- （nil），fh:read(nil) 会退化成按行读，二进制文件直接被读坏。
+local EXPORT_CHUNK = 65536   -- 64 KiB
 
 function api_backups()
 	local r = sh(SH .. " backups")
@@ -998,14 +1064,34 @@ function api_backup_download()
 		http.write("backup not found")
 		return
 	end
-	local data = fh:read("*a") or ""
-	fh:close()
+	local size = fh:seek("end") or 0
+	fh:seek("set", 0)
 	-- 顺序不能反：prepare_content() 会立刻把响应头刷出并置 sent，
 	-- 之后再调用 header() 是空操作，附件名会丢。
 	http.header("Content-Disposition", 'attachment; filename="' .. f .. '"')
 	http.header("X-Content-Type-Options", "nosniff")
+	http.header("Cache-Control", "no-store")
+	if size > 0 then
+		http.header("Content-Length", tostring(size))
+	end
 	http.prepare_content("application/octet-stream")
-	http.write(data)
+	-- 分块写出，与 api_export 同一策略：备份默认含 workspace，可达数百 MB，
+	-- read("*a") 会把整份同时压在 Lua 与 uhttpd 的内存里，小内存路由器直接 OOM。
+	while true do
+		local chunk, err = fh:read(EXPORT_CHUNK)
+		if not chunk then
+			-- read 返回 nil 有两种情况：正常 EOF（err 为 nil）与 I/O 错误。
+			-- 后者如果不区分，客户端会收到一个 Content-Length 声明了 size
+			-- 却提前断流的响应，看不出是磁盘还是网络的问题。至少留一行日志。
+			if err then
+				io.stderr:write("openclaw: 备份下载中途读失败（" ..
+					tostring(f) .. "）：" .. tostring(err) .. "\n")
+			end
+			break
+		end
+		http.write(chunk)
+	end
+	fh:close()
 end
 
 -- ---------------------------------------------------------------- cloud
@@ -1023,13 +1109,6 @@ end
 local CLOUD      = "/usr/libexec/openclaw/cloud.sh"
 local SAFE_REMOTE = "^[A-Za-z0-9][A-Za-z0-9._-]*$"
 
-local function is_post()
-	-- http.getenv 在 luci-compat 里一直存在，但取不到时按「不是 POST」处理，
-	-- 宁可拒绝也不要把敏感参数当成查询串接受。
-	local m = nil
-	if http.getenv then m = http.getenv("REQUEST_METHOD") end
-	return (m or ""):upper() == "POST"
-end
 
 -- cloud.sh 的 stdout 契约是「只有一行 JSON」；解析失败时把原始文本带回前端，
 -- 至少让用户看到真实的报错，而不是一句笼统的失败。
@@ -1473,7 +1552,8 @@ end
 -- /tmp/luci-app-openclaw-diag-<ts>.tar.gz，stdout 只有一行 JSON：
 --   {"ok":true,"path":"...","size":N} / {"ok":false,"error":"..."}
 -- 这里只负责调用、解析路径、回传文件；export 子命令本身不改。
-local EXPORT_CHUNK  = 65536   -- 64 KiB
+-- EXPORT_CHUNK 在文件前部的常量区声明（下载与导出共用），
+-- 这里不再重复 local：重复声明会让前面的使用点拿到另一份 nil。
 
 local function export_fail(msg)
 	-- status() 会立刻把响应头刷出，所以 Content-Type 必须先写进头表；

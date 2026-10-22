@@ -1,9 +1,59 @@
-<!-- version: 1.8.12 -->
+<!-- version: 1.8.13 -->
 
 # 更新日志
 
 本文件记录 luci-app-openclaw 的版本变更，格式参考 Keep a Changelog。
 版本按倒序排列，最新的在最上面。
+
+## 1.8.13
+
+### 修复全盘审计发现的 4 个问题
+
+**备份列表在含空格的安装目录下完全失效**
+`cmd_list` 用 `for f in $(ls ...)` 取文件，命令替换会按空白分词 —— 目录名带空格时
+每个路径被拆碎，`[ -f ]` 全部失败，列表返回 `[]`。用户看到"备份页一片空白"，
+但磁盘上备份都在。`oc_validate_base_dir` 实测放行含空格的路径，所以这条能真实触发。
+改成 glob 展开 + `printf '%s\t%s'` 拼 mtime + `sort -rn` + `while read`，
+排序语义与原来的 `ls -1t` 一致（不按文件名里的时间戳，那会让手工放进来的
+`openclaw-backup-manual.tar.gz` 冒充最新）。
+
+**API Key 可以走 GET 进访问日志**
+`api_apply` 是唯一读了 `apikey` 却没有 `is_post()` 的端点（另外 12 个都有）。
+`http.formvalue()` 同时读 POST body 与 URL query，所以 `GET ...?apikey=sk-...`
+能生效，uhttpd 会把完整 URL 写进访问日志。补了 `is_post()`，并额外加
+`query_has_secret()` 挡住"POST 但把 key 塞进 query"这种绕过。
+
+**备份下载整份读进内存**
+`read("*a")` 会把整份归档同时压在 Lua 与 uhttpd 内存里。备份默认含 workspace，
+可达数百 MB，小内存路由器直接 OOM。同一文件的 `api_export` 早已 64KB 分块，
+这里漏了。改成同样的分块策略，并区分 EOF 与 I/O 错误（后者写 stderr，
+不再静默截断响应）。
+
+**provider id 含空格时模型页出幽灵条目**
+`for id in $all` 未加引号，`openclaw.json` 里的 provider key 含空格就被拆成多个
+id，下拉框出现 `my`、`provider` 这种不存在的服务商。加了形状过滤
+（`^[A-Za-z0-9][A-Za-z0-9_.-]*$`，与控制器侧 `PROVIDER_ID` 同口径），
+被过滤的 id 落一行 stderr 日志，方便排查"我的 provider 为什么不显示"。
+
+### 顺带修掉的自身缺陷
+
+- `EXPORT_CHUNK` 原先声明在文件后半段，而 `api_backup_download` 在前半段就用了它。
+  Lua 5.1 词法作用域下这里解析成全局 nil，`fh:read(nil)` 会退化成按行读，
+  二进制文件直接被读坏。已把声明前移到常量区。
+- `is_post` / `query_has_secret` 新增时也放在了 `api_apply` 之后，同类问题，已一并前移。
+
+### 新增回归
+
+- `tools/tests/backup-list-space.sh`（8 项）：普通/含空格/含中文目录都能列出全部备份
+  且按时间倒序；空目录返回 `[]`；`oc_json_str` 往返保持内容；源码里不再有
+  `for x in $(ls ...)`。
+- `tools/tests/api-post-guard.sh`（4 项）：读凭据的端点都强制 POST、`is_post()` fail-closed、
+  视图不把凭据拼进 URL、前端用 `post()` 调用这些端点。
+- `tools/tests/lua-patterns.py`：静态检查 Lua 模式串陷阱 —— 模式以量词开头
+  （`gsub("+", ...)` 这类，运行时报 malformed pattern），以及 `find(..., true)`
+  的 plain 模式里含元字符（永远不命中）。这两类都是本轮实际踩到的。
+
+全量回归 74 项通过。
 
 ## 1.8.12
 

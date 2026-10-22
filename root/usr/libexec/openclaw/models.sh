@@ -524,10 +524,25 @@ catalog() {
 	# live_list 要跑两次 openclaw（models list --all / providers list），
 	# 每次 20 秒上限，最坏 40 秒；而页面 20 秒就超时 —— 下拉框于是长时间空着，
 	# 看起来就是「读不出服务商」。实时清单只在用户点「刷新上游模型」时才用。
+	# provider id 先过滤形状，再进 `for id in $all`。
+	# 这一步是必需的，不只是"顺手校验"：$all 在 for 里未加引号，会按 IFS 分词。
+	# openclaw.json 的 provider key 是任意字符串（JSON 允许空格），一旦含空格
+	# 就被拆成多个 id —— 下拉框里冒出 "my"、"provider" 这种幽灵条目，真正的
+	# "my provider" 反而丢了。过滤后 id 里不可能有空白，分词才是安全的。
+	# 形状与控制器侧的 PROVIDER_ID（^[A-Za-z0-9][A-Za-z0-9_.-]*$）同口径。
+	# 用 BRE 而不是 grep -E：精简版 busybox 可能没编进 egrep 别名，而 BRE
+	# 一定在。这个表达式不含 + ? | 之类，BRE 与 ERE 等价。
+	#
+	# 被过滤掉的 id **不能静默丢弃**：用户确实在 openclaw.json 里配了它，
+	# 下拉框里却看不到，比"看到两个幽灵条目"更难排查。落一行 stderr 进
+	# 任务日志，至少能查出"为什么我的 provider 不见了"。
 	all="$({
 		configured_list
 		preset_ids
-	} | grep -v '^$' | awk '!seen[$0]++')"
+	} | grep -v '^$' | awk '
+		/^[A-Za-z0-9][A-Za-z0-9_.-]*$/ { if (!seen[$0]++) print; next }
+		{ printf "models.sh: 跳过不合规的 provider id（含空格或特殊字符）：%s\\n", $0 > "/dev/stderr" }
+	')"
 	printf '['
 	for id in $all; do
 		[ -n "$id" ] || continue

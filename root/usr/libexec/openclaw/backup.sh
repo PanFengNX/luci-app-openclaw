@@ -437,13 +437,32 @@ cmd_list() {
 	dir="$(backup_dir)"
 	printf '['
 	[ -d "$dir" ] || { printf ']\n'; return 0; }
-	# 新的在前
-	for f in $(ls -1t "$dir"/openclaw-backup-*.tar.gz 2>/dev/null); do
+	# 新的在前。
+	#
+	# **不能**写成 `for f in $(ls ...)`：命令替换的结果按 IFS 分词，安装目录
+	# 一旦含空格，每个路径都被拆成多段，下面的 [ -f ] 全部失败 —— 列表返回
+	# []，用户看到"备份页一片空白"，可磁盘上备份其实都在。
+	#
+	# 这里用 glob 展开（路径展开不按空白拆，空格原样保留），把 mtime 与路径
+	# 用 TAB 拼成一行，按数值倒序排，再整行切回路径。三点理由：
+	#   * 排序键用 **mtime**，与原来 `ls -1t` 的语义完全一致。改按文件名里的
+	#     时间戳排会退化：手工放进来的 openclaw-backup-manual.tar.gz 这类
+	#     匹配 glob 但不是本脚本产出的文件，会按字典序冒充"最新"。
+	#   * 数值排序不受 locale 影响，不必依赖 LC_ALL=C。
+	#   * TAB 分隔：路径里可能有空格，不能按空格切。
+	# 无匹配时 glob 原样留下模式本身，由 [ -f ] 跳过。
+	{
+		for f in "$dir"/openclaw-backup-*.tar.gz; do
+			if [ -f "$f" ]; then
+				printf '%s\t%s\n' "$(date -r "$f" +%s 2>/dev/null || echo 0)" "$f"
+			fi
+		done
+	} | sort -rn 2>/dev/null | while IFS="$(printf '\t')" read -r ts f; do
+		[ -n "$f" ] || continue
 		[ -f "$f" ] || continue
-		n="$(basename "$f")"
+		n="${f##*/}"
 		size="$(wc -c <"$f" 2>/dev/null | tr -d ' ')"
 		case "$size" in ''|*[!0-9]*) size=0 ;; esac
-		ts="$(date -r "$f" +%s 2>/dev/null)"
 		case "$ts" in ''|*[!0-9]*) ts=0 ;; esac
 		[ "$first" = "1" ] || printf ','
 		first=0

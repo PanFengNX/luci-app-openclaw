@@ -321,6 +321,45 @@ else
 	skip "缺少 tools/tests/naming.sh"
 fi
 
+head_ "7i2. Lua 模式串陷阱（量词开头 / plain 模式误用元字符）"
+if [ -f tools/tests/lua-patterns.py ]; then
+	if out="$("$PY" tools/tests/lua-patterns.py . 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "lua-patterns.py 检查通过"
+	else
+		bad "lua-patterns.py 发现问题"
+		printf '%s\n' "$out" | grep -E 'ERROR|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/lua-patterns.py"
+fi
+
+head_ "7j. 备份列表在含空格的安装目录下必须可用"
+if [ -f tools/tests/backup-list-space.sh ]; then
+	if out="$(sh tools/tests/backup-list-space.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "backup-list-space.sh 全部断言通过"
+	else
+		bad "backup-list-space.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/backup-list-space.sh"
+fi
+
+head_ "7k. 读凭据的端点必须强制 POST"
+if [ -f tools/tests/api-post-guard.sh ]; then
+	if out="$(sh tools/tests/api-post-guard.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "api-post-guard.sh 全部断言通过"
+	else
+		bad "api-post-guard.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/api-post-guard.sh"
+fi
+
 head_ "8. 打包与三种包格式校验"
 if [ "$DO_BUILD" -eq 0 ]; then
 	skip "--no-build 指定，跳过"
