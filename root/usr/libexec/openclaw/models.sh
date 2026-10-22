@@ -349,19 +349,52 @@ live_models() {
 	# 只认"像模型 id"的 token：必须有字母、不含路径片段、不以冒号结尾。
 	# 宁可少列几个，也不能把 CLI 的报错文字当成模型塞进下拉框 —— 用户会以为
 	# 那是能选的模型，选中后必然失败。
+	#
+	# 实测过的翻车：`models list` 在没有任何模型时打印 "No models found."，
+	# 旧的过滤只挡了 "not found" 这一种写法，于是句尾那个 token 被当成模型，
+	# 下拉框里出现一项 **found.**（还带着句号）并被自动选中。
+	# 三层防线：
+	#   1. 整行是英文句子的（含空格且以句号结尾）直接丢 —— 模型清单不长这样
+	#   2. token 去掉尾部标点再判断，避免 "found." 蒙混过关
+	#   3. 关键词黑名单补上常见提示词
 	printf '%s' "$out" | \
 		grep -viE 'not found|no command|Try:|Docs:|Usage:|command not found|Permission denied' | \
 		grep -v '^/' | \
+		awk '
+			# 第 1 层：含空格 + 以 . 结尾 = 英文句子，不是模型 id
+			/ / && /[.]$/ { next }
+			{ print }
+		' | \
 		grep -o '[A-Za-z0-9][A-Za-z0-9._:/-]*' | \
 		awk -v prov="$1" '
+			# 第 3 层用的黑名单：CLI 的提示词 / 报错常见词，不是模型 id。
+			# **必须写成一行**：跨行续行会让 split 切出的字段数不对
+			# （实测 44 个词被切成 48 项），黑名单于是漏掉部分词。
+			BEGIN {
+				n = split("id name model models provider providers all list true false null default none help usage error errors warn warning command docs https current openclaw found nothing available installed configured unknown failed cannot missing please version update updated total count status loading fetching supported invalid node module find cannot", arr, " ")
+				for (i = 1; i <= n; i++) BLOCK[arr[i]] = 1
+			}
+			# 第 2 层：先剥掉尾部标点（句号/逗号/分号/右括号），再校验形状。
+			# **必须包在 { } 里**：裸写 sub(...) 会被 awk 当成"模式"，而模式的
+			# 默认动作是 print —— 于是凡是匹配到尾部标点的行会被原样打印一遍，
+			# 绕过后面所有过滤（实测 provider:/models: 就是这么漏出去的）。
+			{ sub(/[.,;:)\]]+$/, "", $0) }
 			length($0) < 3 { next }
 			$0 ~ /[A-Z]/ { next }          # 模型 id 全是小写，大写只可能来自报错文字
 			$0 ~ /\// && $0 !~ /^[a-z0-9._-]+\/[a-z0-9._:-]+$/ { next }
 			$0 ~ /\.sh$/ || $0 ~ /:$/ { next }
 			$0 !~ /[a-z]/ { next }
+			# 纯版本号（v24.19.0 / v2.1）：来自 Node 自身的报错头，不是模型 id。
+			$0 ~ /^v[0-9]+(\.[0-9]+)+$/ { next }
 			$0 == prov { next }
-			$0 ~ /^(id|name|model|models|provider|providers|all|list|true|false|null|default|none|help|usage|error|warn|warning|command|docs|https|current|openclaw)$/ { next }
-			{ print }
+			# 第 3 层：常见提示词 / 报错词。
+			# 注意 awk 的 sub() 只改了 $0 这个字符串，$1 仍是原值 ——
+			# 所以这里对 $0 用 ~，不要写成 $0 ~ /^($0)$/ 那种自比较。
+			{
+				k = tolower($0)
+				if (k in BLOCK) next
+				print
+			}
 		' | sort -u
 }
 

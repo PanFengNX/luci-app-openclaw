@@ -1751,15 +1751,22 @@ cloud_candidate_versions() {
 }
 
 cloud_probe_latest() {
-	# 逐个探测候选版本；stdout: 可用的最大版本号（一个都没有时为空）。
-	# 设置：
-	#   OC_PROBED_LIST  探测到 200 的版本（空格分隔，升序）
-	#   OC_PROBE_OK     探测到 200 的个数
+	# 逐个探测候选版本。结果**全部通过全局变量返回，不再往 stdout 打**：
+	#   OC_PROBE_LATEST    可用的最大版本号（一个都没有时为空）
+	#   OC_PROBED_LIST     探测到 200 的版本（空格分隔，升序）
+	#   OC_PROBE_OK        探测到 200 的个数
+	#   OC_PROBE_REACHABLE 是否至少拿到过一个 HTTP 状态码
+	#
+	# 为什么不用返回值：调用方若写成 latest="$(cloud_probe_latest)"，函数体
+	# 就在子 shell 里跑，上面这几个变量一个都传不回来 —— 调用方拿到的
+	# OC_PROBE_OK 永远是 0，于是"探测成功"被判成"网络不通"。这个 bug 让
+	# 检查更新永远显示"无法连接官方下载源"。
 	# 单个候选失败（超时 / 404 / 网络错误）只跳过它，不影响其它候选。
 	local cand v code latest="" rev="" any_http=0
 
 	OC_PROBED_LIST=""
 	OC_PROBE_OK=0
+	OC_PROBE_LATEST=""
 	# 官方没有版本清单接口，只能按候选逐个探测。**从新到旧探、命中即停**：
 	# 早先是"全部探一遍再取最大"，8 个候选 × 每个最多 10 秒 = 最坏 80 秒，
 	# 而页面 20 秒就超时 —— 于是永远显示"无法连接官方下载源"，
@@ -1780,7 +1787,7 @@ cloud_probe_latest() {
 	OC_PROBED_LIST="${OC_PROBED_LIST# }"
 	# 供调用方区分两种失败：源不通 vs 源通了但没有可用安装包
 	OC_PROBE_REACHABLE="$any_http"
-	printf '%s' "$latest"
+	OC_PROBE_LATEST="$latest"
 }
 
 cmd_cli_check() {
@@ -1791,7 +1798,13 @@ cmd_cli_check() {
 		cloud_fail "不支持的架构：$(uname -m 2>/dev/null)"
 	fi
 
-	latest="$(cloud_probe_latest)"
+	# 必须**直接调用**，不能用 latest="$(cloud_probe_latest)"：
+	# 命令替换在子 shell 里执行，函数设置的 OC_PROBE_OK / OC_PROBE_REACHABLE /
+	# OC_PROBED_LIST 全都随子 shell 一起消失。结果就是 latest 拿到了版本号，
+	# 而 OC_PROBE_OK 仍是初始的 0 —— 于是无论探测成功与否都报
+	# "无法连接官方下载源"。函数改成把结果写进 OC_PROBE_LATEST。
+	cloud_probe_latest
+	latest="$OC_PROBE_LATEST"
 	if [ "${OC_PROBE_OK:-0}" -le 0 ]; then
 		# 绝不谎报「已是最新」，但也要说清是哪一种失败：
 		#   拿到了 HTTP 状态码（多为 404）→ 源是通的，只是没有可用安装包；
@@ -1836,7 +1849,8 @@ cmd_cli_update() {
 	fi
 
 	if [ -z "$want" ]; then
-		latest="$(cloud_probe_latest)"
+		cloud_probe_latest
+		latest="$OC_PROBE_LATEST"
 		if [ "${OC_PROBE_OK:-0}" -le 0 ] || [ -z "$latest" ]; then
 			cloud_fail "无法连接官方下载源，请检查网络"
 		fi

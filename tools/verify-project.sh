@@ -360,6 +360,19 @@ else
 	skip "缺少 tools/tests/api-post-guard.sh"
 fi
 
+head_ "7l. shell 状态传递与 awk 模式陷阱"
+if [ -f tools/tests/shell-state.sh ]; then
+	if out="$(sh tools/tests/shell-state.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "shell-state.sh 全部断言通过"
+	else
+		bad "shell-state.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/shell-state.sh"
+fi
+
 head_ "8. 打包与三种包格式校验"
 if [ "$DO_BUILD" -eq 0 ]; then
 	skip "--no-build 指定，跳过"
