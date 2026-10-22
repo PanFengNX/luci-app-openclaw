@@ -162,7 +162,7 @@ fi
   每一步都先判断再动手，重装不报错。
 - `cloud.sh` 的 `cloud_cron_legacy_cleanup`：删除旧版本写在 `/etc/crontabs/` 下的
   备份，只删确切的一个文件名。
-- `cmd_migrate`（`istorec/openclaw.sh`）：把已有的 OpenClaw 安装复制进本插件目录，
+- `cmd_migrate`（`openclaw/cli.sh`）：把已有的 OpenClaw 安装复制进本插件目录，
   先复制到暂存区、验证后再原子换入，源目录始终不动 —— 这是"规则 3"的完整实现。
 - `main.state_dir` / `main.openclaw_dir`：允许指向 `base_dir` 之外，`info` 与
   网关读同一份推导逻辑（`oc_state_dir`），避免"UI 写一个目录、网关读另一个"。

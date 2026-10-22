@@ -766,7 +766,7 @@ install_default_providers() {
 # `restart` 一直是静默空转 —— 这就是"装完还得再点一次启动"的根因。
 # 自动启动时一并把 main.enabled 置 1。
 svc_running() {
-	# 与 istorec/openclaw.sh 的 running() 同一语义，但用 lib.sh 的精确探测：
+	# 与 openclaw/cli.sh 的 running() 同一语义，但用 lib.sh 的精确探测：
 	# `pgrep -f 'openclaw.*(gateway|run)'` 会误命中编辑器 / tail -f / grep。
 	[ -n "$(oc_gateway_pids 2>/dev/null)" ] && return 0
 	[ -f /var/run/openclaw.pid ] && \

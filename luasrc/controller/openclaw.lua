@@ -9,7 +9,7 @@ local util  = require "luci.util"
 local http  = require "luci.http"
 local jsonc = require "luci.jsonc"
 
-local SH     = "/usr/libexec/istorec/openclaw.sh"
+local SH     = "/usr/libexec/openclaw/cli.sh"
 local MODELS = "/usr/libexec/openclaw/models.sh"
 
 function index()

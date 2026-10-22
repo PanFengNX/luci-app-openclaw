@@ -24,7 +24,7 @@
 # 审计日志：每次 create / verify / restore / delete 的结果追加到
 #   $OC_BKUPLOG（/var/log/openclaw-backup.log），格式：
 #   YYYY-MM-DD HH:MM:SS <ACTION> <RESULT> <detail>
-# 读取用 istorec/openclaw.sh 的 backup-log [N] 子命令。
+# 读取用 openclaw/cli.sh 的 backup-log [N] 子命令。
 
 OC_LIB="/usr/libexec/openclaw/lib.sh"
 [ -f "$OC_LIB" ] || OC_LIB="$(dirname "$0")/lib.sh"
@@ -246,7 +246,13 @@ oc_archive_summary() {
 	# 一并报出来：配置 / 数据根 / 会话 / 工作区 / 密钥文件。
 	local f="$1" tmp="$OC_RUNDIR/bk-sum.$$" n_cfg n_data n_sess n_ws n_env total
 	rm -f "$tmp" 2>/dev/null
-	tar -tzf "$f" >"$tmp" 2>/dev/null || { rm -f "$tmp"; printf '"entries":0'; return 1; }
+	# 只要**普通文件**（清单行首是 '-'）：tar -t 也列目录，目录会把
+	# "会话 2 个文件"说成 3 个 —— 用户数一遍就会发现对不上。
+	# 名字从第 6 个字段起（busybox 与 GNU tar 的 -tv 都是这个格式）。
+	tar -tzvf "$f" 2>/dev/null | awk 'substr($0,1,1) == "-" {
+		name = ""; for (i = 6; i <= NF; i++) name = name (i > 6 ? " " : "") $i; print name
+	}' >"$tmp" || { rm -f "$tmp"; printf '"entries":0'; return 1; }
+	[ -s "$tmp" ] || { rm -f "$tmp"; printf '"entries":0'; return 1; }
 	total="$(wc -l <"$tmp" 2>/dev/null | tr -d ' ')"
 	n_cfg="$(grep -c '^\./etc/config/openclaw$' "$tmp" 2>/dev/null)"
 	n_env="$(grep -c '^\./home/\.openclaw/\.env$' "$tmp" 2>/dev/null)"
@@ -254,10 +260,15 @@ oc_archive_summary() {
 	n_ws="$(grep -c '^\./home/\.openclaw/workspace/' "$tmp" 2>/dev/null)"
 	n_data="$(grep -c '^\./home/\.openclaw/' "$tmp" 2>/dev/null)"
 	rm -f "$tmp" 2>/dev/null
-	for v in total n_cfg n_env n_sess n_ws n_data; do
-		eval "x=\$$v"
-		case "$x" in ''|*[!0-9]*) eval "$v=0" ;; esac
-	done
+	# 逐个校验成数字，**不用 eval**：grep -c 在极少数情况下会输出空串或
+	# 带空白的值，直接拼进 JSON 就坏了；但 eval 拼变量名会把统计值当代码执行。
+	oc_sum_num() { case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
+	total="$(oc_sum_num "$total")"
+	n_cfg="$(oc_sum_num "$n_cfg")"
+	n_env="$(oc_sum_num "$n_env")"
+	n_sess="$(oc_sum_num "$n_sess")"
+	n_ws="$(oc_sum_num "$n_ws")"
+	n_data="$(oc_sum_num "$n_data")"
 	printf '"entries":%s,"has_config":%s,"has_env":%s,"sessions":%s,"workspace":%s,"data_files":%s' \
 		"$total" "$([ "$n_cfg" -gt 0 ] && echo true || echo false)" \
 		"$([ "$n_env" -gt 0 ] && echo true || echo false)" "$n_sess" "$n_ws" "$n_data"

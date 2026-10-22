@@ -56,9 +56,9 @@ FORBIDDEN_PATH_PATTERNS = (
 # 关键文件：不允许被补丁删除
 CRITICAL_FILES = (
     "root/etc/init.d/openclaw",
-    "root/etc/config/openclaw",
+    "root/usr/share/openclaw/config.default",
     "root/etc/uci-defaults/99-openclaw",
-    "root/usr/libexec/istorec/openclaw.sh",
+    "root/usr/libexec/openclaw/cli.sh",
     "root/usr/libexec/openclaw/lib.sh",
     "root/usr/libexec/openclaw/install.sh",
     "root/usr/libexec/openclaw/versions.sh",

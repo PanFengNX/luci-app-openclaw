@@ -15,7 +15,7 @@ LuCI 入口：**服务 → OpenClaw 助手**（`/cgi-bin/luci/admin/services/ope
 | 包名 | `luci-app-openclawmgr` | `luci-app-openclaw` |
 | UCI 配置 | `/etc/config/openclawmgr`（段 `openclawmgr`） | `/etc/config/openclaw`（段 `openclaw`） |
 | procd 服务 | `/etc/init.d/openclawmgr` | `/etc/init.d/openclaw` |
-| 主脚本 | `/usr/libexec/istorec/openclawmgr.sh` | `/usr/libexec/istorec/openclaw.sh` |
+| 主脚本 | `/usr/libexec/istorec/openclawmgr.sh` | `/usr/libexec/openclaw/cli.sh` |
 | 脚本目录 | `/usr/libexec/openclawmgr/` | `/usr/libexec/openclaw/` |
 | 运行用户 | `openclawmgr` | `openclaw` |
 | 运行目录 | `/tmp/.openclaw` | `/tmp/.openclaw` |
@@ -30,7 +30,7 @@ OpenClaw 程序与数据各自独立，**默认不共享任何文件**。
 > 此时需要留意旧包写回的废弃配置键，详见下文
 > [「与 iStoreOS 自带的 OpenClawMgr 共存」](#与-istoreos-自带的-openclawmgr-共存)。
 
-> `usr/libexec/istorec/openclaw.sh` 只是为了让 iStore 能显示/控制本包而实现的
+> `usr/libexec/openclaw/cli.sh` 里那组 `install/start/stop/status/port/token`
 > **可选**接口；不装 iStore 也完全可用。
 
 ## 兼容性
@@ -80,7 +80,7 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 | 程序目录固定为 `<安装目录>/openclaw` | ✅ 页面上只读；分离存放需 SSH 写 UCI |
 | 一键备份与恢复 | ✅ 归档逐条安全校验 + 还原前自动快照 |
 | UCI 配置 `openclaw.main.*` | ✅ `base_dir`、`openclaw_dir`、`port`、`bind`、`enabled` … |
-| istorec 接口 `install/start/stop/status/port/token` | ✅ `/usr/libexec/istorec/openclaw.sh`（**可选**，供 iStore 显示与控制） |
+| 控制接口 `install/start/stop/status/port/token` | ✅ `/usr/libexec/openclaw/cli.sh`（**可选**，iStore 若装了也能识别） |
 
 ## 稳定性设计（对齐 iStoreOS 并修正其缺陷）
 
@@ -268,7 +268,7 @@ openclaw.sh restore <文件名> [--no-safety]
 iStoreOS 25.12.x 基于 OpenWrt 25.12，包管理器是 **apk-tools v3**，请安装：
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.8.11-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.8.12-r1.apk
 ```
 
 **不要**装 `...-v2.apk` —— 那是 apk-tools 2.x / Alpine 的格式，不是 OpenWrt 25.12 的
@@ -370,13 +370,13 @@ python3 scripts/build_apk.py
 ### apk（OpenWrt 25.12+ / apk-tools 3.x）
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.8.11-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.8.12-r1.apk
 ```
 
 ### ipk（opkg）—— **OpenWrt 24.10 及更早、iStoreOS 等 opkg 系统**
 
 ```sh
-opkg install luci-app-openclaw_1.8.11_all.ipk
+opkg install luci-app-openclaw_1.8.12_all.ipk
 ```
 
 在 LuCI / iStore 界面里也可以直接「手动上传安装」这个 ipk。
@@ -400,7 +400,7 @@ opkg install luci-app-openclaw_1.8.11_all.ipk
 ### .run 自解压（无需包管理器）
 
 ```sh
-sh luci-app-openclaw-1.8.11.run
+sh luci-app-openclaw-1.8.12.run
 ```
 
 ### 集成到固件 / SDK 编译
@@ -415,7 +415,7 @@ make package/luci-app-openclaw/compile V=s
 ### 自行生成安装包（无需 SDK）
 
 ```sh
-python3 scripts/build_apk.py --version 1.8.11 --release 1 --sign
+python3 scripts/build_apk.py --version 1.8.12 --release 1 --sign
 python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 / ipk）
 ```
 
@@ -478,7 +478,7 @@ root/usr/bin/openclaw                    系统命令行入口（透传 CLI，ro
 root/etc/config/openclaw                 UCI 默认配置（独立）
 root/etc/init.d/openclaw                 procd 服务
 root/etc/uci-defaults/99-openclaw        首次安装初始化（用户、目录、默认挂载点）
-root/usr/libexec/istorec/openclaw.sh      可选 iStore 控制接口
+root/usr/libexec/openclaw/cli.sh          控制接口（install/start/stop/status/port/token）
 root/usr/libexec/openclaw/lib.sh       公共库（semver / engines 解析、下载、日志）
 root/usr/libexec/openclaw/versions.sh  在线版本发现与兼容性校验
 root/usr/libexec/openclaw/install.sh   安装流程

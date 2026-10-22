@@ -73,7 +73,7 @@ if [ ! -f /etc/config/openclaw ] && [ -f /usr/share/openclaw/config.default ]; t
 	chmod 600 /etc/config/openclaw 2>/dev/null
 fi
 chmod +x /etc/init.d/openclaw 2>/dev/null
-chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null
+chmod +x /usr/libexec/openclaw/cli.sh 2>/dev/null
 chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null
 chmod +x /usr/bin/openclaw 2>/dev/null
 rm -f /tmp/luci-indexcache /tmp/luci-modulecache
@@ -81,7 +81,7 @@ rm -f /tmp/luci-indexcache /tmp/luci-modulecache
 # 用户看到的是"命令不存在"而不是安装失败。这里统一复核一次可执行位，
 # 缺了就报错退出，让包管理器把这次安装标成失败。
 missing=""
-for f in /usr/bin/openclaw /etc/init.d/openclaw /usr/libexec/istorec/openclaw.sh; do
+for f in /usr/bin/openclaw /etc/init.d/openclaw /usr/libexec/openclaw/cli.sh; do
 	[ -x "$f" ] || missing="$missing $f"
 done
 for f in /usr/libexec/openclaw/*.sh; do
@@ -377,7 +377,7 @@ if [ ! -f /etc/config/openclaw ] && [ -f /usr/share/openclaw/config.default ]; t
 	chmod 600 /etc/config/openclaw 2>/dev/null || true
 fi
 chmod +x /etc/init.d/openclaw 2>/dev/null || true
-chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null || true
+chmod +x /usr/libexec/openclaw/cli.sh 2>/dev/null || true
 chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null || true
 chmod +x /usr/bin/openclaw 2>/dev/null || true
 [ -x /etc/uci-defaults/99-openclaw ] && /etc/uci-defaults/99-openclaw

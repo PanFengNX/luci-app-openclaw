@@ -143,7 +143,7 @@ else
 	say OK "OpenClaw 可执行文件就绪"
 fi
 # all helper scripts executable
-for f in "$OC_DIR"/bin/* /usr/libexec/openclaw/*.sh /usr/libexec/istorec/openclaw.sh; do
+for f in "$OC_DIR"/bin/* /usr/libexec/openclaw/*.sh; do
 	[ -f "$f" ] || continue
 	[ -x "$f" ] || { chmod +x "$f" 2>/dev/null && say FIX "已修复可执行权限：$f"; }
 done
@@ -296,7 +296,7 @@ fi
 # 先修环境，再让 OpenClaw 修它自己的配置，最后重启 —— 这样 doctor --fix 的
 # 修改能随最后一次重启生效。doctor --fix 可能因个别问题修不了而返回非零，
 # 因此只记 WARN，不让整次 repair 判失败。
-# 等价于 istorec/openclaw.sh 的 installed()：程序与 Node 都可执行才算已安装。
+# 等价于 openclaw/cli.sh 的 installed()：程序与 Node 都可执行才算已安装。
 if [ -x "$OB" ] && [ -x "$NB" ]; then
 	doc_out="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
 		oc_timeout 300 "$OB" doctor --fix 2>&1)"

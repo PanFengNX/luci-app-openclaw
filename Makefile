@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-openclaw
-PKG_VERSION:=1.8.11
+PKG_VERSION:=1.8.12
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=openclaw
@@ -55,7 +55,7 @@ define Package/$(PKG_NAME)/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 chmod +x /etc/init.d/openclaw 2>/dev/null
-chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null
+chmod +x /usr/libexec/openclaw/cli.sh 2>/dev/null
 chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null
 chmod +x /usr/bin/openclaw 2>/dev/null
 rm -f /tmp/luci-indexcache /tmp/luci-modulecache
@@ -63,7 +63,7 @@ rm -f /tmp/luci-indexcache /tmp/luci-modulecache
 # 用户看到的是"命令不存在"而不是安装失败。这里统一复核一次可执行位，
 # 缺了就报错退出，让包管理器把这次安装标成失败。
 missing=""
-for f in /usr/bin/openclaw /etc/init.d/openclaw /usr/libexec/istorec/openclaw.sh; do
+for f in /usr/bin/openclaw /etc/init.d/openclaw /usr/libexec/openclaw/cli.sh; do
 	[ -x "$$f" ] || missing="$$missing $$f"
 done
 for f in /usr/libexec/openclaw/*.sh; do

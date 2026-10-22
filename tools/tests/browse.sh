@@ -33,7 +33,7 @@ import sys
 import tempfile
 
 proj = pathlib.Path(sys.argv[1])
-src = (proj / 'root/usr/libexec/istorec/openclaw.sh').read_text(encoding='utf-8')
+src = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
 lib = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
 
 total = 0

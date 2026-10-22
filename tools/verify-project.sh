@@ -126,7 +126,7 @@ for f in \
 	root/etc/init.d/openclaw \
 	root/usr/share/openclaw/config.default \
 	root/etc/uci-defaults/99-openclaw \
-	root/usr/libexec/istorec/openclaw.sh \
+	root/usr/libexec/openclaw/cli.sh \
 	root/usr/libexec/openclaw/lib.sh \
 	root/usr/libexec/openclaw/install.sh \
 	root/usr/libexec/openclaw/versions.sh \
@@ -306,6 +306,19 @@ if [ -f tools/tests/oc-timeout.sh ]; then
 	fi
 else
 	skip "缺少 tools/tests/oc-timeout.sh"
+fi
+
+head_ "7i. 命名不沿用 iStoreOS（本包不依赖它）"
+if [ -f tools/tests/naming.sh ]; then
+	if out="$(sh tools/tests/naming.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "naming.sh 全部断言通过"
+	else
+		bad "naming.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/naming.sh"
 fi
 
 head_ "8. 打包与三种包格式校验"

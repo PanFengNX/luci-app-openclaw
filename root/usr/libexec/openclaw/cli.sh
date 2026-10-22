@@ -1,15 +1,20 @@
 #!/bin/sh
-# openclaw - OpenClaw Launcher for OpenWrt (iStore compatible CLI)
+# openclaw - OpenClaw 控制接口（LuCI 控制器的后端）
 #
 # Native (non-docker) deployment of the official OpenClaw package:
 #   procd + private Node.js runtime + npm global install of "openclaw".
 #
-# Also implements the iStoreOS entry.sh contract (optional - the package
-# works standalone; iStore just uses this to show/control it):
-#   openclaw.sh status   -> "" (not deployed) | "stopped" | "running"
-#   openclaw.sh port     -> gateway port
-#   openclaw.sh token    -> gateway auth token
-#   openclaw.sh install|start|stop
+# 位置：/usr/libexec/openclaw/cli.sh
+# 以前叫 /usr/libexec/istorec/openclaw.sh —— 那个目录名是 iStoreOS 的约定，
+# 但本包并不依赖 iStoreOS，沿用它只会让人误以为必须装 iStore。
+# 现在和其他 helper（lib.sh / install.sh / backup.sh …）放在同一个目录。
+#
+# 下面这组子命令原本是给 iStore 的 entry.sh 契约用的，保留是因为它们本身
+# 就是合理的只读/控制入口（SSH 里也能用），不再依赖任何 iStore 机制：
+#   cli.sh status   -> "" (not deployed) | "stopped" | "running"
+#   cli.sh port     -> gateway port
+#   cli.sh token    -> gateway auth token
+#   cli.sh install|start|stop
 
 OC_LIB="/usr/libexec/openclaw/lib.sh"
 OC_VER="/usr/libexec/openclaw/versions.sh"

@@ -1496,7 +1496,7 @@ oc_pid_alive() {
 	# kernel threads have an empty cmdline; either way it is not ours
 	[ -n "$cmd" ] || { OC_PID_REASON="reused"; return 1; }
 	case "$cmd" in
-		*istorec/openclaw.sh*|*openclaw/install.sh*|*openclaw/backup.sh*|\
+		*openclaw/cli.sh*|*openclaw/install.sh*|*openclaw/backup.sh*|\
 		*openclaw/cloud.sh*|*openclaw/models.sh*|*openclaw/channels.sh*|\
 		*openclaw/versions.sh*)
 			return 0 ;;

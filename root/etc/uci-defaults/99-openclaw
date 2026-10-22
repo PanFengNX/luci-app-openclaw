@@ -79,8 +79,17 @@ if [ -n "$base" ]; then
 	oc_fix_perms >/dev/null 2>&1
 fi
 
+# 旧版本的入口脚本放在 /usr/libexec/istorec/openclaw.sh（iStoreOS 的目录约定）。
+# 本包不依赖 iStore，已改到 /usr/libexec/openclaw/cli.sh。升级时把旧文件删掉 ——
+# 只删这一个确切路径，不扫目录：那个目录在装了 iStore 的设备上可能还有别人的脚本。
+if [ -f /usr/libexec/istorec/openclaw.sh ]; then
+	rm -f /usr/libexec/istorec/openclaw.sh 2>/dev/null
+	# 目录空了才删（rmdir 只删空目录，不会误伤别人的脚本）
+	rmdir /usr/libexec/istorec 2>/dev/null || true
+fi
+
 chmod +x /etc/init.d/openclaw 2>/dev/null
-chmod +x /usr/libexec/istorec/openclaw.sh 2>/dev/null
+chmod +x /usr/libexec/openclaw/cli.sh 2>/dev/null
 chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null
 chmod +x /usr/bin/openclaw 2>/dev/null
 

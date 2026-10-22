@@ -1,9 +1,36 @@
-<!-- version: 1.8.11 -->
+<!-- version: 1.8.12 -->
 
 # 更新日志
 
 本文件记录 luci-app-openclaw 的版本变更，格式参考 Keep a Changelog。
 版本按倒序排列，最新的在最上面。
+
+## 1.8.12
+
+### 不再沿用 iStoreOS 的路径命名
+
+安装日志里会闪过 `/usr/libexec/istorec/openclaw.sh`（postinst 的 chmod 那一行），
+看起来像是要从 iStore 拉东西。实际上本包从不访问 iStore —— 那个目录名纯粹是
+历史遗留（iStoreOS 自带管理器的约定）。
+
+- 入口脚本移到 **`/usr/libexec/openclaw/cli.sh`**，和 lib.sh / install.sh /
+  backup.sh 放在同一个目录，`root/usr/libexec/istorec/` 目录已删除；
+- 控制器、Makefile、postinst、`.run` 安装器、uci-defaults、repair.sh、
+  打包与校验工具全部改到新路径；
+- **升级时会清掉旧文件**：只删 `/usr/libexec/istorec/openclaw.sh` 这一个确切路径，
+  目录用 `rmdir`（只删空目录）—— 装了 iStore 的设备上那个目录里可能还有别人的
+  脚本，绝不能扫目录；
+- `install/start/stop/status/port/token` 这组子命令保留（SSH 里也有用），
+  但不再依赖任何 iStore 机制。
+
+回归 `tools/tests/naming.sh`（11 项）：断言源码树里没有 istorec 引用、
+控制器指向新路径、旧目录已删除、清理逻辑只删确切路径且用 rmdir 而非 `rm -rf`、
+进程归属判断认得新文件名。已接入 `verify-project.sh` 第 7i 段。
+
+### 备份校验的内容摘要
+
+「校验」现在会报条目总数、是否含配置、是否含密钥文件、会话与工作区各多少文件。
+只统计**普通文件**（tar 清单里也列目录，不排除的话"2 个会话"会显示成 3）。
 
 ## 1.8.11
 

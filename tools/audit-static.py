@@ -67,7 +67,7 @@ def check_shell():
         # 4) /tmp 下的固定名临时文件（并发会互相覆盖）
         #    只看随包脚本：tools/ 里的 /tmp/... 多半是测试夹具或扫描正则。
         for i, l in enumerate(lines, 1):
-            if f.parent.name not in ("openclaw", "istorec"):
+            if f.parent.name != "openclaw":
                 break
             if l.lstrip().startswith("#"):
                 continue
@@ -83,7 +83,7 @@ def check_shell():
         # 5) shebang
         # 只有随包发布到路由器的脚本才要求 #!/bin/sh；tools/ 下的开发者脚本
         # 用 bash 是刻意的。
-        if f.parent.name in ("openclaw", "istorec"):
+        if f.parent.name == "openclaw":
             if lines and not lines[0].startswith("#!"):
                 add("medium", f, 1, "缺少 shebang")
             elif lines and not re.match(r"^#!/bin/sh\b", lines[0]):
