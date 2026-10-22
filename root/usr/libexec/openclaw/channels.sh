@@ -366,7 +366,13 @@ channel_install() {
 			return 1
 		fi
 		oc_info "安装微信插件（官方 CLI）"
-		oc_run_capture 600 "$NPM_BIN" exec -y @tencent-weixin/openclaw-weixin-cli@latest -- install
+		# 必须显式给 --registry：不指定时 npm 会去读系统 npmrc
+		# （/root/.npmrc、$prefix/etc/npmrc），在改过源的设备上会走
+		# 一个用户从没在本插件里选过的源。这里与 install.sh / models.sh
+		# 保持同一口径：只用 main.npm_registry，空则官方源。
+		oc_run_capture 600 "$NPM_BIN" exec -y \
+			--registry "$(uci_get main.npm_registry https://registry.npmjs.org)" \
+			@tencent-weixin/openclaw-weixin-cli@latest -- install
 		rc=$?
 		if [ "$rc" -ne 0 ]; then
 			oc_err "微信插件安装失败（rc=$rc），未修改渠道配置"

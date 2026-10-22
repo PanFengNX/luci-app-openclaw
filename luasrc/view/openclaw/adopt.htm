@@ -235,6 +235,16 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
 .oc-browser-bar{display:flex;align-items:center;gap:10px;margin-bottom:8px}
 .oc-browser-path{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   color:var(--oc-fg-dim);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.oc-browser-toggle{margin-left:auto;display:flex;align-items:center;gap:5px;
+  font-size:12px;color:var(--oc-fg-dim);cursor:pointer;flex:0 0 auto;user-select:none}
+.oc-browser-toggle input{margin:0;cursor:pointer}
+.oc-browser-jumps{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.oc-browser-jumps:empty{display:none}
+.oc-jump{font-size:11px;padding:2px 8px;border-radius:10px;cursor:pointer;
+  border:1px solid var(--oc-line-soft);background:var(--oc-surface);
+  color:var(--oc-fg-dim);font-family:ui-monospace,Menlo,Consolas,monospace}
+.oc-jump:hover{background:var(--oc-surface-2);color:var(--oc-fg)}
+.oc-browser-row.is-hidden .oc-name{opacity:.66}
 .oc-browser-list{max-height:260px;overflow:auto;border:1px solid var(--oc-line-soft);
   border-radius:var(--oc-r-sm);background:var(--oc-surface)}
 .oc-browser-row{display:flex;align-items:center;gap:8px;padding:7px 10px;cursor:pointer;
@@ -269,14 +279,18 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   </div>
   <div class="oc-row" style="margin-top:10px">
     <label for="mig-dir">源目录</label>
-    <input type="text" id="mig-dir" class="oc-addr" readonly placeholder="尚未选择，点右侧「浏览…」">
+    <input type="text" id="mig-dir" class="oc-addr" placeholder="点「浏览…」选择，或直接粘贴绝对路径">
     <button id="btn-mig-browse" type="button">浏览…</button>
   </div>
   <div id="mig-browser" class="oc-browser" style="display:none">
     <div class="oc-browser-bar">
       <button id="btn-mig-up" class="oc-btn ghost" type="button">↑ 上一级</button>
       <span id="mig-cur" class="oc-browser-path">/</span>
+      <label class="oc-browser-toggle" title="OpenClaw 的数据目录名是 .openclaw，要迁移「只有数据」的安装就得显示隐藏文件夹">
+        <input type="checkbox" id="mig-show-hidden"> 显示隐藏文件夹
+      </label>
     </div>
+    <div id="mig-jumps" class="oc-browser-jumps"></div>
     <div id="mig-list" class="oc-browser-list"></div>
     <div id="mig-browser-msg" class="oc-hint"></div>
     <div class="oc-actions">
@@ -490,6 +504,23 @@ function renderMigPath(){
   updateMigControls();
 }
 
+// 手输路径的轻量规范化：只做"去首尾空白 + 去尾斜杠"，不猜也不补全。
+// 真正的合法性由后端 browse / migrate 判定，这里改多了反而会掩盖用户的输入错误。
+(function(){
+  var inp = $('mig-dir');
+  if (!inp) return;
+  var tidy = function(){
+    var v = String(inp.value == null ? '' : inp.value).replace(/^\s+|\s+$/g, '');
+    if (v.length > 1) v = v.replace(/\/+$/, '');
+    if (v !== inp.value) inp.value = v;
+    // 手输也算"用户选过"，否则 discover 回来会把用户填的值覆盖掉。
+    if (v) state.migPicked = true;
+    updateMigControls();
+  };
+  inp.onchange = tidy;
+  inp.onblur = tidy;
+})();
+
 // 选中一个目录：唯一写 #mig-dir 的地方（预填走 renderMigPath）。
 // migPicked 一旦置位，后续的 discover / info 重绘都不会再改它。
 function setMigPath(v){
@@ -526,6 +557,8 @@ var browsePath   = '';      // 当前所在目录（后端回显的规范路径�
 var browseParent = '';      // '' ＝已经在 / 或尚未加载
 var browseSeq    = 0;       // 请求序号：连点「进入」时丢弃过期响应
 var browseLoading = false;  // 请求在途：「选择这个目录」必须先禁用
+var browseShowHidden = false; // 是否列出 . 开头的目录（.openclaw 数据目录）
+var browseHiddenCount = 0;   // 当前目录下被隐藏的个数，用于提示
 
 // 迁移过程的唯一输出口（doMigrate / pollMigrate 共用）。
 function migSay(msg, bad){
@@ -732,11 +765,15 @@ function renderBrowseList(entries){
     row.tabIndex = 0;
     row.setAttribute('role', 'button');
 
+    var nm = String(e.name == null ? '' : e.name);
+    // 隐藏目录（.openclaw 这类）淡一点，与普通目录区分；名字本身不动。
+    if (nm.charAt(0) === '.') row.className += ' is-hidden';
+
     var name = document.createElement('span');
     name.className = 'oc-name';
     // 不用 emoji 前缀：没有 emoji 字体的环境会渲染成空方块，
     // 而这一行是唯一入口，宁可朴素。图标由 CSS 的 ::before 提供。
-    name.textContent = String(e.name == null ? '' : e.name);
+    name.textContent = nm;
     row.appendChild(name);
 
     var kind = String(e.kind == null ? '' : e.kind);
@@ -770,7 +807,12 @@ function renderBrowseList(entries){
 function loadBrowse(path, note){
   var seq = ++browseSeq;
   var url = API.browse;
-  if (path) url += (url.indexOf('?') < 0 ? '?' : '&') + 'path=' + encodeURIComponent(path);
+  var qs = [];
+  if (path) qs.push('path=' + encodeURIComponent(path));
+  // 显示隐藏文件夹的开关带在每次请求上：后端默认不列 .openclaw，
+  // 而"只有数据"的安装恰恰就在 .openclaw 里，必须能主动看见。
+  if (browseShowHidden) qs.push('show=1');
+  if (qs.length) url += (url.indexOf('?') < 0 ? '?' : '&') + qs.join('&');
 
   // 加载中：清空列表并提示，避免旧目录的行还能点
   browseLoading = true;
@@ -810,11 +852,47 @@ function loadBrowse(path, note){
     var list = Array.isArray(d.entries) ? d.entries : [];
     renderBrowseList(list);
 
+    browseHiddenCount = Number(d.hidden_count || 0) || 0;
+
     var msg = note || '';
     if (!list.length) msg += (msg ? '\n' : '') + '这个目录下没有子文件夹';
+    if (!browseShowHidden && browseHiddenCount > 0){
+      msg += (msg ? '\n' : '') + '另有 ' + browseHiddenCount
+        + ' 个隐藏文件夹未显示（OpenClaw 的数据目录 .openclaw 就是其中之一，'
+        + '勾选上方「显示隐藏文件夹」可查看）';
+    }
     if (d.truncated) msg += (msg ? '\n' : '') + '只显示前 300 个文件夹';
     browserMsg(msg, false);
     syncBrowseButtons();
+  });
+}
+
+// 挂载点快捷区：迁移的旧安装几乎总在某个数据盘上，一层层从 / 点下来很费事。
+// 这里把 mounts 的路径做成小圆点，点一下直接跳过去。只读，不影响安全判断。
+var jumpsLoaded = false;
+function loadJumpPoints(){
+  var host = $('mig-jumps');
+  if (!host) return;
+  if (jumpsLoaded) return;
+  jumpsLoaded = true;
+  get(API.mounts, function(r){
+    if (!host) return;
+    while (host.firstChild) host.removeChild(host.firstChild);
+    var arr = [];
+    try { arr = JSON.parse((r && r.data) || '[]'); } catch(e){ arr = []; }
+    if (!(arr instanceof Array)) arr = [];
+    for (var i = 0; i < arr.length; i++){
+      var p = arr[i] && arr[i].path;
+      if (!p || p.charAt(0) !== '/') continue;
+      var b = document.createElement('span');
+      b.className = 'oc-jump';
+      b.textContent = p;
+      b.title = '跳到 ' + p;
+      (function(target){
+        b.onclick = function(){ if (!migBusy) loadBrowse(target); };
+      })(p);
+      host.appendChild(b);
+    }
   });
 }
 
@@ -823,6 +901,7 @@ function openBrowser(){
   var box = $('mig-browser');
   if (!box) return;
   box.style.display = '';
+  loadJumpPoints();
   // 以已选目录为起点；没选过就不带 path，由后端给默认起点。
   var inp = $('mig-dir');
   var from = inp ? String(inp.value || '').replace(/^\s+|\s+$/g, '') : '';
@@ -860,6 +939,14 @@ function pickCurrent(){
   var pick = $('btn-mig-pick'), cancel = $('btn-mig-cancel');
   if (bb) bb.onclick = openBrowser;
   if (up) up.onclick = function(){ if (!migBusy && browseParent) enterDir(browseParent); };
+
+  // 「显示隐藏文件夹」：切换后立刻按当前目录重取，不改变已选目录与开关状态。
+  var sh = $('mig-show-hidden');
+  if (sh) sh.onchange = function(){
+    if (migBusy) return;
+    browseShowHidden = !!sh.checked;
+    loadBrowse(browsePath || '');
+  };
   if (pick) pick.onclick = pickCurrent;
   if (cancel) cancel.onclick = function(){ if (!migBusy) closeBrowser(); };
 

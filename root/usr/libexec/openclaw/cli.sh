@@ -892,12 +892,20 @@ browse_fail() {
 cmd_browse() {
 	# browse [<dir>] -> {"ok":true,"path":..,"parent":..,"truncated":..,"entries":[..]}
 	#
-	# 只列子目录（不列文件），跳过 . 开头的隐藏目录（.openclaw 这类数据目录
-	# 由 discover 负责，不属于浏览目标）。每个条目带 kind：
+	# 只列子目录（不列文件）。每个条目带 kind：
 	# oc_probe_openclaw_dir 命中时是 ours / istore / data，否则空串 —— 前端
 	# 可以据此在列表里直接标出"这里是一个 OpenClaw 安装"。
-	local dir="${2:-}" parent prefix p base name ep esc esc_dir body=""
-	local truncated=false n=0 kind
+	#
+	# 隐藏目录（.openclaw / .config）**默认不显示**：它们平时是噪音，但
+	# `.openclaw` 恰好也是 OpenClaw 的数据目录名，用户想迁移"只有数据"的
+	# 安装时恰恰需要点进去。所以第三条参数 show_hidden=1 时连同隐藏目录
+	# 一起列，前端提供一个「显示隐藏文件夹」开关。
+	local dir="${2:-}" show_hidden="${3:-0}" parent prefix p base name ep esc esc_dir body=""
+	local truncated=false n=0 kind hidden_count=0
+
+	# 只认 0/1：这个值只用来做布尔判断，但仍然按白名单收口，
+	# 免得将来有人把它拼进别的地方。
+	case "$show_hidden" in 1) show_hidden=1 ;; *) show_hidden=0 ;; esac
 
 	# 不传参数时的默认起点：优先 /mnt（外置盘都挂在这里），没有则 /
 	if [ -z "$dir" ]; then
@@ -949,17 +957,31 @@ cmd_browse() {
 	# 每条省掉一次 fork（单层最多 300 条，路由器上这个差别能感觉到）。
 	esc_dir="$(browse_esc "$dir")"
 
-	# ash 的 */ 通配本身按名字有序、天然跳过 . 开头的目录；空目录 / 无匹配
-	# 时 $p 原样等于模式串，靠 -d 判断自然跳过。不要换成 ls | while read：
-	# 名字里有空格 / 换行时那条路会出错。
+	# ash 的 */ 通配本身按名字有序；空目录 / 无匹配时 $p 原样等于模式串，
+	# 靠 -d 判断自然跳过。不要换成 ls | while read：名字里有空格 / 换行时
+	# 那条路会出错。
+	#
+	# **隐藏目录要单独列模式**：`*/` 天生不匹配 . 开头的名字，所以之前
+	# 把"跳过隐藏目录"的逻辑写在循环体里是死代码 —— 那些目录根本进不来，
+	# hidden_count 永远是 0。这里补两个模式：
+	#   ".[!.]*/"  匹配 .openclaw / .config（点后面不是点）
+	#   "..?*/"    匹配 ..foo 这类（正常不会有，但漏了会误判成"没有隐藏目录"）
+	# 这两个模式都不会匹配 "." 与 ".." 自身。
 	#
 	# entries 先攒在 body 里，最后一次性打印：truncated 只有遍历结束才知道，
 	# 而它在 JSON 里排在 entries 前面，没法边遍历边写。
-	for p in "$prefix"*/; do
+	for p in "$prefix"*/ "$prefix".[!.]*/ "$prefix"..?*/; do
 		[ -d "$p" ] || continue
 		base="${p%/}"
 		name="${base##*/}"
-		case "$name" in .*) continue ;; esac
+		case "$name" in
+			.*)
+				# 隐藏目录**始终计数**（不论是否显示）：前端拿它决定"要不要
+				# 提示还有 N 个隐藏文件夹、并展示开关"。只在不显示时跳过。
+				hidden_count=$((hidden_count + 1))
+				[ "$show_hidden" = "1" ] || continue
+				;;
+		esac
 		# 名字里的换行等控制字符无法安全地放进 JSON（oc_json_str 会静默丢掉
 		# 它们，前端拿到的 path 就点不进去），整条跳过而不是转义。
 		case "$name" in *[[:cntrl:]]*) continue ;; esac
@@ -986,8 +1008,9 @@ cmd_browse() {
 		body="$body{\"name\":\"$esc\",\"path\":\"$esc_ep\",\"kind\":\"$kind\"}"
 	done
 
-	printf '{"ok":true,"path":"%s","parent":"%s","truncated":%s,"entries":[%s]}\n' \
-		"$esc_dir" "$(oc_json_str "$parent")" "$truncated" "$body"
+	printf '{"ok":true,"path":"%s","parent":"%s","truncated":%s,"hidden":%s,"hidden_count":%s,"entries":[%s]}\n' \
+		"$esc_dir" "$(oc_json_str "$parent")" "$truncated" \
+		"$([ "$show_hidden" = "1" ] && echo true || echo false)" "$hidden_count" "$body"
 	return 0
 }
 

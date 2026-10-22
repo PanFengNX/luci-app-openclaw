@@ -112,10 +112,10 @@ try:
     esc_runner = work / 'esc.sh'
     esc_runner.write_text(esc_script, encoding='utf-8', newline='\n')
 
-    def run(path=None):
+    def run(path=None, show='0'):
         argv = ['sh', runner.as_posix()]
         if path is not None:
-            argv += ['', path]
+            argv += ['', path, show]
         r = subprocess.run(argv, capture_output=True, text=True)
         body = r.stdout.strip()
         try:
@@ -136,7 +136,23 @@ try:
     names = [e['name'] for e in d.get('entries', [])]
     check(d.get('ok') is True, '目录列表返回 ok:true')
     check('notadir.txt' not in names, '只列目录，不列文件')
-    check('.hidden' not in names, '跳过 . 开头的隐藏目录')
+    check('.hidden' not in names, '默认不列 . 开头的隐藏目录')
+    check(d.get('hidden_count') == 1, '默认时报告被隐藏的个数（hidden_count）')
+    check(d.get('hidden') is False, '默认时 hidden 标志为 false')
+
+    # ── 显示隐藏目录：.openclaw 本身就是数据目录名，必须能点进去 ──
+    dh = run(P(root / 'data'), '1')[0]
+    hnames = [e['name'] for e in dh.get('entries', [])]
+    check('.hidden' in hnames, 'show=1 时列出隐藏目录')
+    check(dh.get('hidden') is True, 'show=1 时 hidden 标志为 true')
+    check(dh.get('hidden_count') == 1, 'show=1 时 hidden_count 仍然报告个数')
+    check('普通 目录' in hnames, 'show=1 时普通目录仍在')
+
+    # 参数白名单：非 1 一律当 0
+    for weird in ('yes', '2', 'x', ''):
+        dw = run(P(root / 'data'), weird)[0]
+        wn = [e['name'] for e in dw.get('entries', [])]
+        check('.hidden' not in wn, 'show=%r 被当成 0（不列隐藏）' % weird)
     check('普通 目录' in names, '名字含空格与中文的目录能原样出现')
     check(names == sorted(names), '条目按名字排序')
     check(d.get('parent') == P(root), 'parent 指向上一级')

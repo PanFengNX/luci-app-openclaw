@@ -853,17 +853,23 @@ function api_browse()
 	-- 只读列目录，给迁移页的「浏览…」用。path 为空表示用 helper 的默认起点
 	-- （/mnt，其次 /）。这里只做形状校验，真正的安全判断在 helper 里
 	-- （绝对路径 / 控制字符 / 路径长度 / 拒绝 /proc 等伪文件系统）。
+	-- show=1 时连隐藏目录一起列（.openclaw 本身就是数据目录名，想迁移
+	-- "只有数据"的安装时必须能点进去）。默认不显示，避免 .config 之类的噪音。
 	local p = http.formvalue("path")
+	local show = http.formvalue("show")
+	local flag = (show == "1") and " 1" or " 0"
 	if p and p ~= "" then
 		local dir = oc_dir_arg(p)
 		if not dir then
 			out({ ok = false, error = "目录参数无效" })
 			return
 		end
-		out({ ok = true, data = sh(SH .. " browse " .. q(dir)) })
+		out({ ok = true, data = sh(SH .. " browse " .. q(dir) .. flag) })
 		return
 	end
-	out({ ok = true, data = sh(SH .. " browse") })
+	-- 不传 path 时也要把 show 传下去：默认起点（/mnt）同样适用同一个开关。
+	-- 空目录参数写成 q("")，避免手工拼引号时被转义层吃掉。
+	out({ ok = true, data = sh(SH .. " browse " .. q("") .. flag) })
 end
 
 function api_doctor()
