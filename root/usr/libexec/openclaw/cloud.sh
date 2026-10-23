@@ -2283,15 +2283,30 @@ cloud_ls_empty_state() {
 	# 而且没有任何线索指向"你还没传过备份"。
 	#
 	# 判定覆盖三类形状，全部来自实测输出：
-	#   * 中文 / 英文的"不存在"
+	#   * 中文 / 英文的"找不到 / 不存在"
 	#   * 未登录（ls 在未登录时同样失败）
-	#   * JSON 里的 errno：百度 PCS 用 -9 表示文件/目录不存在、-3 表示路径无效
+	#   * 错误码：百度 PCS 用 -9 表示文件/目录不存在、-3 表示路径无效
+	#
+	# 实测真实输出长这样（rc=0，但内容是个错误对象）：
+	#   {"code":1,"data":null,"error":"找不到指定的文件或目录（错误码 -9），请检查路径是否正确。"}
+	# 两个坑都在这一句里：措辞是「找不到」不是「不存在」，错误码是文本里的
+	# 「错误码 -9」而不是 JSON 字段 "errno":-9。只按后者写会全部漏掉。
 	case "$1" in
 		'') return 0 ;;
-		*不存在*|*"not exist"*|*"does not exist"*|*"No such"*|*"no such file"*) return 0 ;;
-		*"path not found"*|*"file not found"*|*"目录无效"*|*"路径无效"*) return 0 ;;
+		*不存在*|*找不到*|*未找到*|*"not exist"*|*"does not exist"*|*"No such"*|*"no such file"*) return 0 ;;
+		*"path not found"*|*"file not found"*|*目录无效*|*路径无效*|*"invalid path"*) return 0 ;;
 		*未登录*|*"not logged"*|*"login required"*|*请先登录*|*"not login"*) return 0 ;;
-		*'"errno":-9'*|*'"errno": -9'*|*'"errno":-3'*|*'"errno": -3'*) return 0 ;;
+	esac
+
+	# 数值错误码：**先去掉所有空白再比对**。这样 "errno": -9 与
+	# 「错误码 -9」用同一组模式就能覆盖，不必为空格写六种变体；
+	# 也顺带兼容全角冒号。
+	local norm
+	norm="$(printf '%s' "$1" | tr -d '[:space:]')"
+	case "$norm" in
+		*'"errno":-9'*|*'"errno":-3'*|*'"code":-9'*|*'"code":-3'*) return 0 ;;
+		*错误码-9*|*错误码：-9*|*错误码:-9*) return 0 ;;
+		*错误码-3*|*错误码：-3*|*错误码:-3*) return 0 ;;
 	esac
 	return 1
 }
