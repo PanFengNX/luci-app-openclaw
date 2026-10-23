@@ -292,6 +292,18 @@ else
 	skip "缺少 tools/tests/cloud-no-od.sh"
 fi
 
+if [ -f tools/tests/model-flags.sh ]; then
+	if out="$(sh tools/tests/model-flags.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "model-flags.sh 全部断言通过"
+	else
+		bad "model-flags.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/model-flags.sh"
+fi
+
 head_ "7f. 安装目录候选（/boot 等系统分区必须被剔除）"
 if [ -f tools/tests/mounts.sh ]; then
 	if out="$(sh tools/tests/mounts.sh 2>&1)"; then

@@ -479,7 +479,11 @@ plugin_installed() {
 		[ -x "$(oc_oc_bin)" ] && return 0
 		return 1
 	fi
-	grep -q "$p" "$(oc_conf)" 2>/dev/null && return 0
+	# 这里原本还有一条兜底：`grep -q "$p" "$(oc_conf)" && return 0`。
+	# 它把"provider id 在 openclaw.json 里出现过"当成"插件包已安装"，
+	# 而默认模型写成 "deepseek/deepseek-v4.1-flash-1017" 就含 deepseek 子串
+	# —— 于是插件根本没装也显示「插件已装」。删掉：只认包真的在磁盘上，
+	# 或 `plugins list` 真的列出了它。
 	return 1
 }
 
@@ -519,17 +523,32 @@ require_plugin() {
 # ---------------------------------------------------------------- state
 provider_has_key() {
 	# provider_has_key <provider>
-	local envname
+	#
+	# 只认两处**真的存了密钥**的地方：
+	#   1. .env 里 <ENVNAME>=<非空值>
+	#   2. openclaw.json 的 models.providers.<id>.apiKey 非空
+	#
+	# 不能用 provider_configured 当代理：配了 baseUrl / models 却没有 Key
+	# 是很常见的情况，那样会谎报「已有 Key」。.env 也要求值非空
+	# （^NAME=. 而不是 ^NAME=），空赋值等于没配。
+	local envname v
 	envname="$(preset_field "$1" env)"
 	if [ -n "$envname" ] && [ -f "$(oc_data_dir)/.env" ]; then
-		grep -q "^${envname}=" "$(oc_data_dir)/.env" 2>/dev/null && return 0
+		grep -q "^${envname}=." "$(oc_data_dir)/.env" 2>/dev/null && return 0
 	fi
-	provider_configured "$1"
+	v="$(configured_field "$1" apiKey)" || return 1
+	[ -n "$v" ] || return 1
+	case "$v" in '""'|null|'<空>') return 1 ;; esac
+	return 0
 }
 
 provider_configured() {
-	[ -f "$(oc_conf)" ] || return 1
-	grep -q "\"$1\"" "$(oc_conf)" 2>/dev/null
+	# 只认 models.providers.<id> 这个键**存在**。
+	# 旧实现是 grep -q "\"$1\"" —— 只要 id 以带引号的形式出现在
+	# openclaw.json 任意位置就算"已配置"：默认模型 "deepseek/xxx" 里的
+	# provider 段、甚至注释性的字段都能让它成立。结果插件没装、Key 没配，
+	# 页面上三颗药丸全绿（用户实际截图）。
+	configured_has "$1"
 }
 
 # ---------------------------------------------------------------- catalogue

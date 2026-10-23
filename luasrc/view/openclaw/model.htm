@@ -245,7 +245,6 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   <div class="oc-actions" id="m-model-actions" style="margin:-4px 0 12px">
     <button id="btn-refresh-models" class="oc-btn ghost">刷新上游模型</button>
     <button id="btn-discover" class="oc-btn ghost">从 OpenClaw 刷新列表</button>
-    <button id="btn-manual-model" class="oc-btn ghost">手动输入模型 ID</button>
   </div>
   <div class="oc-hint" id="m-model-hint"></div>
   <div class="oc-hint" id="m-model-source" style="display:none"></div>
@@ -296,7 +295,6 @@ var API = {
 var CATALOG = [];
 var UPSTREAM = [];       // 当前 provider 从上游拉到的模型 id
 var FETCH_SEQ = 0;       // 切换 provider 时丢弃过期的异步响应
-var MANUAL_OPEN = false; // 用户是否主动展开了「手动输入模型 ID」
 var MODEL_USER_PICKED = false; // 用户是否手动选过模型（之后不再自动覆盖）
 var MODEL_AUTO_PICKED = '';    // 最近一次自动选中的模型 id（空表示未自动选）
 function $(id){ return document.getElementById(id); }
@@ -426,13 +424,14 @@ function setModelBusy(busy){
 }
 
 function updateCustomRow(){
-  // 自定义 Provider 没有固定清单：下拉里只会有一条「请手动输入」的占位项，
-  // 下面还另有一个手填框 —— 两处都让人填同一个值是没必要的。
-  // 所以自定义时把下拉、以及「刷新上游模型 / 从 OpenClaw 刷新列表 /
-  // 手动输入模型 ID」三个按钮一起收起来，只留手填框。
+  // 手填框只留给「自定义 Provider」：它没有固定清单，下拉里只有一条
+  // 「请手动输入」的占位项，除此之外没有别的来源。
+  //
+  // 内置 Provider 一律不需要手填 —— 模型清单在选中服务商时就会自动拉取
+  // （上游 → 本机 OpenClaw → 内置预设），下拉里始终有可选项。之前还留了一个
+  // 「手动输入模型 ID」按钮，纯属多余，已移除。
   var custom = ($('m-provider').value === 'custom');
-  var manual = custom || MANUAL_OPEN;
-  $('m-model-custom-row').style.display = manual ? '' : 'none';
+  $('m-model-custom-row').style.display = custom ? '' : 'none';
   if ($('m-model-row'))     $('m-model-row').style.display     = custom ? 'none' : '';
   if ($('m-model-actions')) $('m-model-actions').style.display = custom ? 'none' : '';
   // 自定义时下拉与提示都没有意义，一并隐藏（hint 在下面单独渲染，别覆盖它）
@@ -638,7 +637,6 @@ function renderProvider(){
 }
 
 $('m-provider').onchange = function(){
-  MANUAL_OPEN = false;
   MODEL_USER_PICKED = false;
   MODEL_AUTO_PICKED = '';
   $('m-model').innerHTML = '';   // 不把上一个 provider 的选中项带过来
@@ -659,12 +657,6 @@ $('m-model-custom').oninput = function(){
 };
 
 $('btn-refresh-models').onclick = function(){ fetchUpstream(false); };
-
-$('btn-manual-model').onclick = function(){
-  MANUAL_OPEN = true;
-  updateCustomRow();
-  $('m-model-custom').focus();
-};
 
 // Base URL 改动后重新拉取；尚未保存的地址服务端还看不到，先提示保存。
 $('m-base').onchange = function(){
@@ -711,7 +703,11 @@ $('btn-apply').onclick = function(){
   var p = $('m-provider').value;
   var prov = curProvider();
   var hasPlugin = !!(prov && prov.plugin);
-  var m = $('m-model-custom').value.trim() || $('m-model').value;
+  // 手填框只对「自定义 Provider」有效：它一直留在 DOM 里（只是隐藏），
+  // 曾经填过再切回内置服务商时，那个旧值会盖掉下拉里的选择。
+  var m = (p === 'custom')
+    ? ($('m-model-custom').value.trim() || $('m-model').value)
+    : $('m-model').value;
   var k = $('m-key').value.trim();
   var b = $('m-base').value.trim();
   if (p === 'custom' && !b){ alert('自定义 Provider 需要 Base URL'); return; }
