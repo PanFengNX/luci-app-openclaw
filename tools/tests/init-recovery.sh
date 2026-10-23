@@ -81,6 +81,21 @@ if core_line:
     before = init[max(0, idx - 600):idx]
     check('if [ "$core_dumps" = "1" ]' in before, 'core_pattern 写在 core_dumps 分支内')
 
+# ---- core_dumps 的读写链路：能存、能读、界面能提交 ----
+cli = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
+ctrl = (proj / 'luasrc/controller/openclaw.lua').read_text(encoding='utf-8')
+setup = (proj / 'luasrc/view/openclaw/setup.htm').read_text(encoding='utf-8')
+
+check('--core-dumps' in cli, 'cmd_save 接受 --core-dumps')
+check(re.search(r'--core-dumps\).*?0\|1', cli, re.S) is not None,
+      '--core-dumps 只接受 0/1')
+check('"core_dumps":%s' in cli, 'cmd_info 输出 core_dumps')
+check('"core_dumps"' in ctrl, '控制器 save 白名单含 core_dumps')
+check('id="cfg-coredump"' in setup, '设置·基础页有崩溃转储下拉')
+check('core_dumps: $(' in setup, '保存时提交 core_dumps')
+check("$('cfg-enabled').value = String" in setup,
+      '开机自启下拉会按服务端状态回填（原先不回填，保存一次就把禁用改回启用）')
+
 # ---------------------------------------------------------------- 行为断言
 def func(name):
     lines = init.splitlines()

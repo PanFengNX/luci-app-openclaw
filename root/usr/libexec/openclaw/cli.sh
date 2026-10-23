@@ -439,7 +439,7 @@ cmd_info() {
 		ver="$(HOME="$home" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" "$(oc_oc_bin)" --version 2>/dev/null | head -n1)"
 		nver="$( "$(oc_node_bin)" -v 2>/dev/null)"
 	fi
-	printf '{"status":"%s","installed":%s,"port":"%s","token":"%s","openclaw":"%s","node":"%s","node_mode":"%s","base_dir":"%s","openclaw_dir":"%s","oc_dir_custom":%s,"home":"%s","free_mb":"%s","arch":"%s","musl":%s,"bind":"%s","node_mirror":"%s","url":"http://%s:%s/"}\n' \
+	printf '{"status":"%s","installed":%s,"port":"%s","token":"%s","openclaw":"%s","node":"%s","node_mode":"%s","base_dir":"%s","openclaw_dir":"%s","oc_dir_custom":%s,"home":"%s","free_mb":"%s","arch":"%s","musl":%s,"bind":"%s","node_mirror":"%s","enabled":%s,"core_dumps":%s,"url":"http://%s:%s/"}\n' \
 		"$st" \
 		"$(installed && echo true || echo false)" \
 		"$port" "$token" "${ver:-}" "${nver:-}" \
@@ -450,6 +450,8 @@ cmd_info() {
 		"$(oc_arch)" "$(oc_is_musl && echo 1 || echo 0)" \
 		"$(uci_get main.bind lan)" \
 		"$(oc_json_str "$(uci_get main.node_mirror '')")" \
+		"$(uci_get main.enabled 0)" \
+		"$(uci_get main.core_dumps 0)" \
 		"$(uci -q get network.lan.ipaddr 2>/dev/null || echo 127.0.0.1)" "$port"
 }
 
@@ -914,6 +916,13 @@ cmd_save() {
 			--enabled)
 				case "${2:-}" in 0|1) uci_set main.enabled "$2" ;;
 					*) oc_err "拒绝保存非法 enabled：${2:-}（只能 0/1）"; exit 2 ;;
+				esac
+				shift 2 ;;
+			--core-dumps)
+				# 崩溃排查开关：1 = 允许 core dump（写到 <安装目录>/logs/）。
+				# 默认 0 —— core 文件可能几百 MB，崩溃循环会写满存储。
+				case "${2:-}" in 0|1) uci_set main.core_dumps "$2" ;;
+					*) oc_err "拒绝保存非法 core_dumps：${2:-}（只能 0/1）"; exit 2 ;;
 				esac
 				shift 2 ;;
 			# mirrors and proxies are handed to curl/npm as root; a value

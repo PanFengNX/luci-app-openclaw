@@ -370,7 +370,7 @@ end
 function api_save()
 	local keys = {
 		"base_dir", "port", "bind", "oc_version", "node_version",
-		"npm_registry", "node_mirror", "http_proxy", "enabled"
+		"npm_registry", "node_mirror", "http_proxy", "enabled", "core_dumps"
 	}
 	local args = ""
 	for _, k in ipairs(keys) do

@@ -245,6 +245,17 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   <div class="oc-row"><label>开机自启</label>
     <select id="cfg-enabled"><option value="1">启用</option><option value="0">禁用</option></select>
   </div>
+  <div class="oc-row"><label>崩溃转储</label>
+    <select id="cfg-coredump">
+      <option value="0">关闭（默认）</option>
+      <option value="1">开启</option>
+    </select>
+  </div>
+  <div class="oc-hint">
+    开启后网关崩溃时会把 core 写到 <code>&lt;安装目录&gt;/logs/</code>，用于定位
+    段错误这类 native 层问题。core 文件可能几百 MB，排查完建议关掉。
+    改动在保存后随下一次服务启动生效。
+  </div>
   <div class="oc-actions"><button id="btn-save">保存并应用</button></div>
 </div>
 
@@ -300,12 +311,16 @@ function loadInfo(){
     var d = jp(r.data, {});
     $('cfg-port').value = d.port || '18789';
     $('cfg-bind').value = d.bind || 'lan';
+    // enabled / core_dumps 之前没有回填，下拉永远显示第一项（"启用"），
+    // 与实际状态不符 —— 保存一次就会把禁用悄悄改回启用。
+    $('cfg-enabled').value = String(d.enabled == null ? 1 : d.enabled) === '0' ? '0' : '1';
+    $('cfg-coredump').value = String(d.core_dumps == null ? 0 : d.core_dumps) === '1' ? '1' : '0';
   });
 }
 
 $('btn-save').onclick = function(){
   var data = { port: $('cfg-port').value, bind: $('cfg-bind').value,
-    enabled: $('cfg-enabled').value };
+    enabled: $('cfg-enabled').value, core_dumps: $('cfg-coredump').value };
   post(API.save, data, function(r){
     if (!r || r.ok === false){
       alert('保存失败：' + ((r && (r.data || r.error)) || '服务无响应，请检查端口（1025-65535）后重试'));
