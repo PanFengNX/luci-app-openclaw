@@ -1169,6 +1169,39 @@ cloud_install_alive() {
 	return 1
 }
 
+cloud_enc_header_ok() {
+	# cloud_enc_header_ok <file> -> 0 表示文件头是 "OCBK1\n" + 版本字节 1
+	#
+	# 不用 od：见调用处的说明。版本字节 0x01 可以放进 shell 变量
+	# （只有 NUL 不行），所以第 7 字节直接与 printf '\001' 比较。
+	local f="$1" magic ver
+	magic="$(head -c 5 "$f" 2>/dev/null)"
+	[ "$magic" = "OCBK1" ] || return 1
+	ver="$(head -c 7 "$f" 2>/dev/null | tail -c 1)"
+	[ "$ver" = "$(printf '\001')" ] || return 1
+	return 0
+}
+
+cloud_installer_arch_ok() {
+	# cloud_installer_arch_ok <file> <arch> -> 0 通过 / 1 不匹配（并设置 OC_INSTALL_ERR）
+	#
+	# 只在「该版本未收录 sha256」时调用：有哈希可对时，哈希本身已经证明了
+	# 架构，再读 ELF 头是重复劳动，还会因为 busybox 没有 od 而冒出一条
+	# 让人以为出问题的 WARN。
+	local dest="$1" arch="$2" mach
+	if ! command -v od >/dev/null 2>&1; then
+		oc_warn "缺少 od，跳过 ELF 架构校验（该版本未收录 sha256；架构不符时执行阶段会报 Exec format error）"
+		return 0
+	fi
+	# ELF e_machine（偏移 18，小端 2 字节）：arm64=0xb7，x86_64=0x3e
+	mach="$(od -An -tx1 -j18 -N2 "$dest" 2>/dev/null | tr -d ' \n')"
+	case "$arch:$mach" in
+		arm64:b700|amd64:3e00) return 0 ;;
+	esac
+	OC_INSTALL_ERR="安装器架构不匹配：期望 $arch，ELF machine=${mach:-未知}"
+	return 1
+}
+
 cloud_install_progress_loop() {
 	# cloud_install_progress_loop <dest> <log> <stage> <total>
 	# 下载期间每秒写一行；阶段离开 download（或 worker 被 kill）就退出。
@@ -1179,6 +1212,10 @@ cloud_install_progress_loop() {
 	local dest="$1" log="$2" stage="$3" total="$4" n st wpid i=0
 	while [ "$i" -lt 900 ]; do
 		i=$((i + 1))
+		# 先等一秒再写第一行：本循环是独立进程、比 worker 先启动，立刻写会
+		# 出现「已下载 0.0 MB / 14.2 MB」排在「下载…：<url>」之前，
+		# 看着像还没开始就已经下完了。
+		sleep 1
 		st="$(cat "$stage" 2>/dev/null)"
 		case "$st" in
 			''|download) ;;
@@ -1201,7 +1238,6 @@ cloud_install_progress_loop() {
 			printf '已下载 %s MB\n' "$(cloud_install_mb "$n")" \
 				>>"$log" 2>/dev/null
 		fi
-		sleep 1
 	done
 }
 
@@ -1354,23 +1390,6 @@ cloud_install_version() {
 		return 1
 	fi
 
-	# 架构检查是尽力而为的：od 不存在时跳过，绝不因此拒绝安装。
-	# 架构不对的二进制在执行时内核会直接拒绝（Exec format error），
-	# 后面本来就要跑它，不缺这一道前置检查 —— 它只是让错误更早、更清楚。
-	if command -v od >/dev/null 2>&1; then
-		# ELF e_machine（偏移 18，小端 2 字节）：arm64=0xb7，x86_64=0x3e
-		mach="$(od -An -tx1 -j18 -N2 "$dest" 2>/dev/null | tr -d ' \n')"
-		case "$arch:$mach" in
-			arm64:b700|amd64:3e00) ;;
-			*)
-				rm -f "$dest" 2>/dev/null
-				OC_INSTALL_ERR="安装器架构不匹配：期望 $arch，ELF machine=${mach:-未知}"
-				return 1 ;;
-		esac
-	else
-		oc_warn "缺少 od，跳过 ELF 架构校验（架构不符时执行阶段会报 Exec format error）"
-	fi
-
 	# ---- 完整性校验：执行前最后一道闸 ----
 	# 命中白名单就必须一致，不一致直接删文件并失败；未收录的版本保持原行为
 	# （只记录 sha256），但日志必须写明「未校验」，事后能从安装日志判断
@@ -1396,12 +1415,22 @@ cloud_install_version() {
 			return 1
 		fi
 		cblog "安装器 sha256 校验通过（$ver/$arch）"
+		# 哈希命中就等于证明了架构：白名单是 (版本, 架构) → 哈希 的映射，
+		# 两个架构的包哈希不同。这时再去读 ELF 头纯属多余，也就不再需要
+		# od —— 这正是之前那行「缺少 od，跳过 ELF 架构校验」的由来，
+		# 明明已经用 sha256 证明了，却还留一条 WARN 吓人。
 	else
 		if command -v sha256sum >/dev/null 2>&1; then
 			sha="$(sha256sum "$dest" 2>/dev/null | awk '{print $1}')"
 			oc_warn "安装器 sha256：${sha:-无法计算}（版本 $ver/$arch 该版本未收录，未校验）"
 		else
 			oc_warn "安装器未校验：版本 $ver/$arch 该版本未收录，且系统缺少 sha256sum"
+		fi
+		# 没有哈希可依赖时才做架构检查。尽力而为：od 不存在就跳过，
+		# 绝不因此拒绝安装 —— 架构不对时内核会在执行阶段报 Exec format error。
+		if ! cloud_installer_arch_ok "$dest" "$arch"; then
+			rm -f "$dest" 2>/dev/null
+			return 1
 		fi
 	fi
 	chmod 700 "$dest" 2>/dev/null || true
@@ -2227,9 +2256,11 @@ EOF
 			cloud_tmp_cleanup
 			cloud_fail "加密校验失败：密文 ${csize} 字节，期望 $((lsize + 51)) 字节"
 		fi
-		magic="$(od -An -tx1 -N6 "$enc_out" 2>/dev/null | tr -d ' \n')"
-		ver="$(od -An -tu1 -j6 -N1 "$enc_out" 2>/dev/null | tr -d ' \n')"
-		if [ "$magic" != "4f43424b310a" ] || [ "$ver" != "1" ]; then
+		# 文件头校验**不能依赖 od**：部分 OpenWrt / iStoreOS 的 busybox 没编进
+		# od，命令缺失时输出为空，于是正常加密文件会被判成"文件头不对"，
+		# 加密上传必然失败。这里用 head / tail（busybox 必备）读魔数与版本字节。
+		# 注意命令替换会吃掉尾部换行，所以只比前 5 字节 "OCBK1"。
+		if ! cloud_enc_header_ok "$enc_out"; then
 			cloud_tmp_cleanup
 			cloud_fail "加密校验失败：文件头不是 OCBK1/v1"
 		fi
