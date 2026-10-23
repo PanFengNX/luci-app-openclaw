@@ -6,7 +6,7 @@
 #   * only pass --force when the port is >1024 AND lsof/fuser exists, so
 #     OpenClaw can never kill the router's own management services
 #   * `--allow-unconfigured` so the gateway comes up even without a model
-#   * respawn 3600 10 5 - give up only after 10 crashes in an hour
+#   * respawn 3600 5 0 - never give up (see the comment at the call site)
 #   * locate the CLI entry from several candidates (npm layout changes)
 
 START=99
@@ -209,6 +209,65 @@ _env_args() {
 	printf '%s' "$out"
 }
 
+oc_schema_heal() {
+	# 启动前自检：把"恢复备份 / 升级 OpenClaw 之后网关起不来"这一类故障
+	# 就地修掉。
+	#
+	# 症状（实测）：恢复回来的是旧布局数据，agent 库 schema 24 而新版要求 25，
+	# 日志写 "uses schema version 24 ... run openclaw doctor --fix"，
+	# procd 每次启动都 exit_code=1、端口根本不开 —— 看起来像"服务挂了"，
+	# 实际只差一次 doctor --fix。
+	#
+	# 判据刻意收得很紧，只在上一次网关日志里**同时**出现
+	# "schema version" 与 "doctor --fix" 时才动手：
+	#   * 不无条件跑 doctor —— 它要遍历整个状态目录，几秒到几十秒，
+	#     不该拖慢每一次开机；
+	#   * 每次开机最多一次（标记放在 /tmp 下的 rundir，重启即清空），
+	#     避免 doctor 修不好时变成"启动 → 修 → 启动"的死循环；
+	#   * doctor 失败也照常继续启动，让 procd 的重启策略接手。
+	#
+	# oc_schema_heal <base> <state_dir> <home> <node_bin> <entry>
+	local base="$1" state_dir="$2" home="$3" node_bin="$4" entry="$5"
+	local marker log f tail_txt
+
+	marker="/tmp/.openclaw/schema-healed"
+	[ -e "$marker" ] && return 0
+
+	# 网关日志：$TMPDIR/openclaw-<uid>/openclaw-*.log，取最新的一份。
+	log=""
+	for f in "$base"/tmp/openclaw-*/openclaw-*.log; do
+		[ -f "$f" ] || continue
+		if [ -z "$log" ] || [ "$f" -nt "$log" ]; then log="$f"; fi
+	done
+	[ -n "$log" ] || return 0
+
+	tail_txt="$(tail -n 200 "$log" 2>/dev/null)"
+	case "$tail_txt" in
+		*"schema version"*) ;;
+		*) return 0 ;;
+	esac
+	case "$tail_txt" in
+		*"doctor --fix"*) ;;
+		*) return 0 ;;
+	esac
+
+	mkdir -p /tmp/.openclaw 2>/dev/null
+	: >"$marker" 2>/dev/null
+	logger -t openclaw "状态库 schema 版本落后（日志：$log），自动执行 doctor --fix --force"
+	(
+		export HOME="$home"
+		export OPENCLAW_STATE_DIR="$state_dir"
+		export OPENCLAW_CONFIG_PATH="${state_dir}/openclaw.json"
+		if command -v timeout >/dev/null 2>&1; then
+			timeout 300 "$node_bin" "$entry" doctor --fix --force
+		else
+			"$node_bin" "$entry" doctor --fix --force
+		fi
+	) >/dev/null 2>&1
+	logger -t openclaw "doctor --fix --force 结束（rc=$?），继续启动"
+	return 0
+}
+
 start_service() {
 	local base nodedir globaldir home state_dir entry node_bin
 	local port bind token json_port json_bind json_token cfg envfile
@@ -219,6 +278,9 @@ start_service() {
 	# 而不是让 start_service 半途停住。
 	config_load "$OC_UCI" || true
 	config_get_bool enabled main enabled 0
+	# core dump 默认关：core 文件可能有几百 MB，反复崩会把路由器的存储写满。
+	# 排查 native 层崩溃（段错误）时才临时打开。
+	config_get_bool core_dumps main core_dumps 0
 	config_get base_dir main base_dir ""
 
 	base="$(oc_base_dir)"
@@ -281,6 +343,9 @@ start_service() {
 	chmod 700 "$base/tmp" 2>/dev/null || _warn_chmod "$base/tmp"
 	chown "$OC_USER:$OC_USER" "$base/tmp" 2>/dev/null || _warn_chown "$base/tmp"
 
+	# 上一次启动若因 schema 版本落后而失败，这里先修一次再启动（每开机一次）。
+	oc_schema_heal "$base" "$state_dir" "$home" "$node_bin" "$entry"
+
 	# --- --force lets OpenClaw kill a conflicting listener, but only when it
 	#     can do so safely and only on unprivileged ports.
 	if [ "$port" -gt 1024 ] 2>/dev/null &&
@@ -333,7 +398,30 @@ start_service() {
 	# 检查已经保证该用户存在）。绝不能再加 [ -n ] 之类的条件 —— 一旦条件
 	# 不成立，procd 会以 root 启动网关且没有任何提示。
 	procd_set_param user "$user_opt"
-	procd_set_param respawn 3600 10 5
+	# respawn <threshold> <timeout> <retry>：retry=0 表示**永不放弃**。
+	# 旧值 5 是"一小时内崩 5 次就彻底不再拉起"—— 段错误这类问题恰恰会连续崩，
+	# 于是表现成"停了再也不回来"，只能手动 /etc/init.d/openclaw start。
+	# timeout=5 是首次重启延迟，逐次翻倍、封顶 threshold(3600s)，所以"永不放弃"
+	# 不会变成狂刷：退避到 1 小时才重试一次。
+	procd_set_param respawn 3600 5 0
+	# term_timeout：给插件收尾的时间。procd 默认只有 5 秒，而插件会抓着资源
+	# 不放（实测日志："Plugin deepseek forced retirement after 5000ms: 1
+	# still-running call(s)"），5 秒必然走到 SIGKILL，留下半关闭的 sqlite。
+	procd_set_param term_timeout 30
+
+	# core dump：默认关（main.core_dumps=1 才开）。打开后 procd 解除 RLIMIT_CORE，
+	# 并把 core_pattern 指到安装目录下的 logs/ —— 那是大容量盘，不会写满 overlay。
+	# 注意 core_pattern 是**全局**设置，只在这个开关打开时才改：
+	# 别的程序也在用同一份内核设置，不该被插件无条件改掉。
+	if [ "$core_dumps" = "1" ]; then
+		procd_set_param limits core="unlimited unlimited"
+		mkdir -p "$base/logs" 2>/dev/null || true
+		chown "$OC_USER:$OC_USER" "$base/logs" 2>/dev/null || _warn_chown "$base/logs"
+		# %e 可执行名 %t 时间戳 %p pid %s 信号
+		printf '%s/core.%%e.%%t.%%p.%%s\n' "$base/logs" >/proc/sys/kernel/core_pattern 2>/dev/null \
+			|| logger -t openclaw "无法写入 core_pattern，core 可能落到默认位置"
+		logger -t openclaw "core dump 已开启：$base/logs"
+	fi
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance

@@ -159,7 +159,11 @@ scan_forbid() {
 	fi
 }
 scan_forbid "无 pgrep -f 模糊强杀"          "pgrep -f '?openclaw'?[^)]*kill|kill -9 \\\$\\(pgrep"
-scan_forbid "无 /tmp 固定名临时文件"        "/tmp/openclaw-|/tmp/oc-[a-z]"
+# 只挡**固定名**的临时文件（可预测名字 + 写入 = 符号链接攻击面）。
+# 名字里带 * 的是只读 glob（例如扫网关日志目录），不可能被预置链接，不算。
+# 原来的模式 /tmp/openclaw- 会把 "$base"/tmp/openclaw-*/openclaw-*.log 这种
+# 读取误判成写入（实测 1.8.21 就撞上了）。
+scan_forbid "无 /tmp 固定名临时文件"        "/tmp/openclaw[a-z]*-[A-Za-z0-9._$-]+|/tmp/oc-[a-z][A-Za-z0-9._$-]+"
 scan_forbid "无未引用的 run 参数拼接"        'run " \.\. cmd'
 scan_forbid "无 --token 出现在命令行"        '\-\-token "\$token"'
 scan_forbid "无 curl 管道执行"              '\(curl\|wget\)[^|]*\|\s*\(sh\|bash\|ash\)'
@@ -302,6 +306,18 @@ if [ -f tools/tests/model-flags.sh ]; then
 	fi
 else
 	skip "缺少 tools/tests/model-flags.sh"
+fi
+
+if [ -f tools/tests/init-recovery.sh ]; then
+	if out="$(sh tools/tests/init-recovery.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "init-recovery.sh 全部断言通过"
+	else
+		bad "init-recovery.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/init-recovery.sh"
 fi
 
 head_ "7f. 安装目录候选（/boot 等系统分区必须被剔除）"

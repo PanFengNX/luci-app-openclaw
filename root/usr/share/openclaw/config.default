@@ -17,6 +17,8 @@ config main 'main'
 	option node_mode 'global'
 	option npm_registry ''
 	option node_mirror ''
+	# 崩溃排查用：1 = 允许生成 core dump（写到 <安装目录>/logs/）。默认 0。
+	option core_dumps '0'
 	option http_proxy ''
 	# Node.js 压缩包的 SHA256 校验是强制的：校验清单拉不到、清单里没有该文件、
 	# 或系统缺少 sha256sum，安装都会中止。只有明确接受「可能装到被替换的二进制」
