@@ -281,6 +281,11 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   </div>
   <div id="st-node-existing" class="oc-hint" style="display:none;margin-top:10px"></div>
   <div class="oc-sub">版本升级</div>
+  <!-- 提示（中性）：列表取到了、只是走了镜像。与下面的错误框分开，
+       否则"官方源不可达"会以红字 + 重试的样子出现，看着像功能坏了。 -->
+  <div id="ver-note" class="oc-hint" style="display:none;margin-bottom:8px">
+    <div id="ver-note-lines"></div>
+  </div>
   <div id="ver-err" class="oc-hint oc-err" style="display:none;margin-bottom:8px">
     <div id="ver-err-lines"></div>
     <button id="btn-ver-retry" class="oc-btn ghost" style="margin-top:6px">重试</button>
@@ -731,30 +736,63 @@ function verCheckFailed(which){
   return s.ok === false;
 }
 
-// 版本列表失败提示（红字 + 重试按钮）。失败只影响"检查更新"，
+// 版本列表**失败**提示（红字 + 重试按钮）。失败只影响"检查更新"，
 // 不影响升级入口本身：手填入口随时可以升级。
+//
+// 注意：镜像回退（source=mirror）不属于失败 —— 列表是拿到了的，两个版本
+// 都能正常判断"已是最新"。早先把它塞进这个函数，于是整块变成红字 + 重试，
+// 看起来像坏了（用户实际截图就是这个）。提示走 versionNotes()。
 function versionErrors(){
   var out = [];
   if (state.versionsNet) return ['无法获取版本列表：请求超时或被中断（网络 / 镜像不可达），请点「重试」'];
   var st = jp(state.versionsStatus || '', {}) || {};
   var oc = st.oc || {}, nd = st.node || {};
   if (oc.ok === false) out.push('无法获取版本列表：' + (oc.error || '原因未知'));
-  else if (oc.source === 'mirror') out.push('版本列表来自国内镜像（registry.npmmirror.com），官方源不可达');
   if (nd.ok === false) out.push('无法获取 Node.js 版本列表：' + (nd.error || '原因未知'));
+  return out;
+}
+
+// 非错误提示：列表取到了，只是没走官方源。中性灰字、不带重试按钮 ——
+// 它说明的是"我们替你换了条路"，不是"出问题了"。
+function versionNotes(){
+  var out = [];
+  if (state.versionsNet) return out;              // 已经有真错误了，别再叠提示
+  var st = jp(state.versionsStatus || '', {}) || {};
+  var oc = st.oc || {}, nd = st.node || {};
+  if (oc.ok === true && oc.source === 'mirror'){
+    out.push('OpenClaw 版本列表来自国内镜像（registry.npmmirror.com）；官方源当前不可达，不影响判断与升级。');
+  }
+  if (nd.ok === true && nd.source === 'mirror'){
+    out.push('Node.js 版本列表来自国内镜像；官方源当前不可达，不影响判断与升级。');
+  }
   return out;
 }
 
 function renderVersionStatus(){
   var box = $('ver-err'), lines = $('ver-err-lines');
-  if (!box || !lines) return;
-  lines.textContent = '';
-  var msgs = versionErrors();
-  msgs.forEach(function(t){
-    var d = document.createElement('div');
-    d.textContent = t;                     // 服务端数据只进 textContent
-    lines.appendChild(d);
-  });
-  box.style.display = msgs.length ? '' : 'none';
+  if (box && lines){
+    lines.textContent = '';
+    var msgs = versionErrors();
+    msgs.forEach(function(t){
+      var d = document.createElement('div');
+      d.textContent = t;                   // 服务端数据只进 textContent
+      lines.appendChild(d);
+    });
+    box.style.display = msgs.length ? '' : 'none';
+  }
+
+  // 提示区与错误区分开：没有真错误时这里是中性灰字，页面不会看起来像坏了。
+  var note = $('ver-note'), noteLines = $('ver-note-lines');
+  if (note && noteLines){
+    noteLines.textContent = '';
+    var notes = versionNotes();
+    notes.forEach(function(t){
+      var d = document.createElement('div');
+      d.textContent = t;
+      noteLines.appendChild(d);
+    });
+    note.style.display = notes.length ? '' : 'none';
+  }
 }
 
 // 状态页没有版本下拉框，无法取「当前所选版本」；退回已安装版本的 engines。

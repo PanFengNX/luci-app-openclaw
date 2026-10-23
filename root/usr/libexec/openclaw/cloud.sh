@@ -2274,6 +2274,28 @@ cmd_upload() {
 }
 
 # ---------------------------------------------------------------- ls
+cloud_ls_empty_state() {
+	# cloud_ls_empty_state <output> -> 0 表示"这不是错误，只是还没有东西"
+	#
+	# 远端目录 openclaw-backups 只在**首次上传时**才创建（见 cmd_upload 里的
+	# mkdir），所以从未上传过的设备上 ls 必然失败。这是正常的初始状态，
+	# 不该报错 —— 否则新装用户第一次打开备份页就是"读取云端列表失败"，
+	# 而且没有任何线索指向"你还没传过备份"。
+	#
+	# 判定覆盖三类形状，全部来自实测输出：
+	#   * 中文 / 英文的"不存在"
+	#   * 未登录（ls 在未登录时同样失败）
+	#   * JSON 里的 errno：百度 PCS 用 -9 表示文件/目录不存在、-3 表示路径无效
+	case "$1" in
+		'') return 0 ;;
+		*不存在*|*"not exist"*|*"does not exist"*|*"No such"*|*"no such file"*) return 0 ;;
+		*"path not found"*|*"file not found"*|*"目录无效"*|*"路径无效"*) return 0 ;;
+		*未登录*|*"not logged"*|*"login required"*|*请先登录*|*"not login"*) return 0 ;;
+		*'"errno":-9'*|*'"errno": -9'*|*'"errno":-3'*|*'"errno": -3'*) return 0 ;;
+	esac
+	return 1
+}
+
 cmd_ls() {
 	local bin tmp rc out tsv err d mt name size tab sorted display enc
 
@@ -2290,27 +2312,25 @@ cmd_ls() {
 	out="$(cat "$tmp" 2>/dev/null)"
 
 	if [ "$rc" -ne 0 ]; then
-		case "$out" in
-			*不存在*|*"not exist"*|*"No such"*|*"no such file"*|*未登录*|*"not logged"*|*"login required"*|*请先登录*)
-				rm -f "$tmp" 2>/dev/null
-				printf '{"ok":true,"data":[]}\n'
-				return 0 ;;
-		esac
+		if cloud_ls_empty_state "$out"; then
+			rm -f "$tmp" 2>/dev/null
+			printf '{"ok":true,"data":[]}\n'
+			return 0
+		fi
 		err="$(cloud_tail_err "$tmp" 8)"
 		rm -f "$tmp" 2>/dev/null
-		cloud_fail "读取网盘目录失败（rc=$rc）：${err:-无输出}"
+		cloud_fail "读取网盘目录 $OC_CLOUD_REMOTE 失败（rc=$rc）：${err:-无输出}"
 	fi
 
 	if ! tsv="$(cloud_ls_tsv "$tmp")"; then
-		case "$out" in
-			''|*不存在*|*"not exist"*|*"No such"*|*"no such file"*|*未登录*|*"not logged"*|*"login required"*|*请先登录*)
-				rm -f "$tmp" 2>/dev/null
-				printf '{"ok":true,"data":[]}\n'
-				return 0 ;;
-		esac
+		if cloud_ls_empty_state "$out"; then
+			rm -f "$tmp" 2>/dev/null
+			printf '{"ok":true,"data":[]}\n'
+			return 0
+		fi
 		err="$(cloud_tail_err "$tmp" 8)"
 		rm -f "$tmp" 2>/dev/null
-		cloud_fail "网盘目录返回内容无法解析：${err:-无输出}"
+		cloud_fail "网盘目录 $OC_CLOUD_REMOTE 返回内容无法解析：${err:-无输出}"
 	fi
 	rm -f "$tmp" 2>/dev/null
 

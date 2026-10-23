@@ -1158,7 +1158,10 @@ function clLoadList(){
     var host = $('cl-list');
     host.textContent = '';
     if (!r || !r.ok){
-      clEmptyList('读取云端列表失败' + clNet(r));
+      // 必须把服务端的 error 原样带出来：只说"失败"等于让用户猜。
+      // 常见真实原因（组件未装 / 未登录 / 远端目录还没建）都在 error 里。
+      var why = (r && r.error) ? String(r.error) : '';
+      clEmptyList('读取云端列表失败' + clNet(r) + (why ? '：' + why : ''));
       return;
     }
     var arr = (r.data && r.data.data) || [];
