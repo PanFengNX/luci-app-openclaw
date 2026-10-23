@@ -323,9 +323,7 @@ var API = {
   service: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","service")%>',
   save: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","save")%>',
   mounts: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","mounts")%>',
-  discover: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","discover")%>',
   node_existing: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","node_existing")%>',
-  migrate: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate")%>',
   doctor: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>',
   repair: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","repair")%>',
   diag_run: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_run")%>',
@@ -343,7 +341,7 @@ var state = { info:null, ocList:[], nodeList:[], logTimer:null,
   ocVersion:'', nodeVersion:'',
   // ocdirCustom：服务端当前保存的自定义程序目录（main.openclaw_dir），空串 = 默认
   // <安装目录>/openclaw。本页不提供编辑，但安装时必须原样回传 —— 否则会把 SSH
-  // 或迁移流程设置的值冲掉。
+  // 或 SSH 手工设置的值冲掉。
   ocdirCustom: '',
   // ocdirLoaded：info 是否已经回填过。save 对 openclaw_dir 是"给了就写、空串 =
   // 恢复默认"的语义，info 还没回来就提交会把服务端的自定义程序目录误清成默认。
@@ -462,7 +460,7 @@ function ocDirProblem(base, ocdir){
 function currentDirs(){
   return {
     base:  normDir($('in-dir-custom').value || $('in-dir').value),
-    // 程序目录只来自服务端（SSH / 迁移已有安装写入的 UCI），页面上没有输入框
+    // 程序目录只来自服务端（SSH 写入的 UCI），页面上没有输入框
     ocdir: normDir(state.ocdirCustom)
   };
 }

@@ -440,7 +440,7 @@ function post(url, data, cb){
     if (x.readyState == 4) { try { fin(JSON.parse(x.responseText)); } catch(e){ fin({ok:false}); } }
   };
   // 连接被重置 / 请求超时：readyState 可能根本不到 4，回调就永远不来，
-  // 发起方（例如备份、迁移）会永久卡在 disabled。用 net:true 标记，
+  // 发起方（例如备份、安装）会永久卡在 disabled。用 net:true 标记，
   // 让轮询类调用方知道"这次没拿到数据"而不是"服务端说失败了"。
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
@@ -1125,7 +1125,7 @@ function startOcUpdateFromHint(){
 // source ∈ system | plugin-global | plugin-private | mount（见 lib.sh 的说明）。
 // 「复用」走既有安装动作：install.sh 的 --node-version system（等价 --system-node，
 // USE_SYSTEM_NODE=1），不再下载 Node，直接用本机已有的运行时。
-// 与 discover 同策略：异步、失败或空结果安静隐藏，不弹错误。
+// 与 node-existing 探测同策略：异步、失败或空结果安静隐藏，不弹错误。
 
 function nodeExistingItem(e){
   return (e && e.path) ? e : null;

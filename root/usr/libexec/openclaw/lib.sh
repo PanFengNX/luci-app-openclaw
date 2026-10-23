@@ -230,7 +230,7 @@ oc_state_dir() {
 	# OpenClaw 数据根目录：openclaw.json / .env / 会话 / 工作区都在它下面。
 	# 默认 <安装目录>/home/.openclaw（历史行为）；可用 main.state_dir 覆盖 ——
 	# 例如把数据放到大容量磁盘，或者指向本机已有的 OpenClaw 数据目录
-	# （「迁移已有 OpenClaw」功能就是从这里接进去的）。
+	# （可以直接 uci set 指定，不需要搬动文件）。
 	#
 	# ⚠️ 与 oc_oc_dir() 同理，这是用户可配置路径：任何会 chown / chmod / 删除它
 	# 的地方都必须先过安全校验，不能拿 UCI 值直接递归操作。
@@ -251,7 +251,7 @@ oc_conf()      { printf '%s/openclaw.json' "$(oc_state_dir)"; }
 # 所以在这里统一导出，所有 source lib.sh 的脚本（以及 /usr/bin/openclaw 包装器）
 # 调用 CLI 时都会自动带上，不用每个调用点各写一遍。
 #
-# 若 state_dir 被覆盖（迁移已有安装、数据放大容量盘）而这里不导出，CLI 会
+# 若 state_dir 被覆盖（数据放大容量盘、手工指向已有安装）而这里不导出，CLI 会
 # 继续读写 <安装目录>/home/.openclaw，与网关和 oc_conf() 用的 state_dir 分家：
 # 表现为模型页保存成功但网关不生效、改端口重启没变、API Key 写了仍报未配置。
 #
@@ -260,7 +260,7 @@ oc_conf()      { printf '%s/openclaw.json' "$(oc_state_dir)"; }
 #
 # ⚠️ 新增调用 CLI 的地方不要再自己拼 HOME 去猜 state 路径，直接依赖这两个变量。
 # 注意这是载入时求值的快照：同一进程内修改 UCI 的 main.state_dir 后，已导出的值
-# 不会自动更新（迁移类脚本请用新进程或重新 source 本文件后再调 CLI）。
+# 不会自动更新（改完 main.state_dir 请用新进程，或重新 source 本文件后再调 CLI）。
 OC_STATE_DIR="$(oc_state_dir)"
 OC_CONF_FILE="$(oc_conf)"
 export OPENCLAW_STATE_DIR="$OC_STATE_DIR"
@@ -935,137 +935,6 @@ oc_mounts() {
 	done <"$mf" | sort -rn -k2,2
 }
 
-# ---------------------------------------------------------------- discovery
-# 「迁移本机已有 OpenClaw」的只读探测层。
-# 这里只判断"某个目录像不像 OpenClaw 安装"，不做任何 migrate 动作。
-#
-# 约定：oc_discover_existing() 的输出会被直接当成 JSON 响应体，所以这一节里的
-# 函数**只能往 stdout 写结果**，日志一律走 oc_warn / oc_err（stderr）。
-# 谁在这里加一行 oc_info，谁的 JSON 就坏掉。
-
-oc_probe_openclaw_dir() {
-	# oc_probe_openclaw_dir <dir> -> ours | istore | data ；不像时无输出并返回 1
-	#   ours   本插件布局：程序 <dir>/openclaw/bin/openclaw 或 <dir>/bin/openclaw，
-	#          且数据 <dir>/home/.openclaw/openclaw.json
-	#   istore iStoreOS luci-app-openclawmgr 布局：<dir>/data/.openclaw/openclaw.json
-	#   data   只有数据：<dir>/.openclaw/openclaw.json
-	local d="${1:-}"
-	[ -n "$d" ] || return 1
-	[ -d "$d" ] || return 1
-
-	if [ -f "$d/home/.openclaw/openclaw.json" ] &&
-		{ [ -f "$d/openclaw/bin/openclaw" ] || [ -f "$d/bin/openclaw" ]; }; then
-		printf 'ours'
-		return 0
-	fi
-	if [ -f "$d/data/.openclaw/openclaw.json" ]; then
-		printf 'istore'
-		return 0
-	fi
-	if [ -f "$d/.openclaw/openclaw.json" ]; then
-		printf 'data'
-		return 0
-	fi
-	return 1
-}
-
-oc_probe_has_program() {
-	# 程序本体（只判断存在，不判断可执行位 —— 探测结果仅供 UI 展示）
-	local d="${1:-}"
-	[ -f "$d/openclaw/bin/openclaw" ] && return 0
-	[ -f "$d/bin/openclaw" ] && return 0
-	[ -f "$d/data/openclaw/bin/openclaw" ] && return 0
-	return 1
-}
-
-oc_probe_has_node() {
-	# 私有 Node 运行时（private 模式在 <安装目录>/node；global 模式在 /usr/lib/nodejs，
-	# 不在任何候选目录里，因此这里探测不到属正常）
-	local d="${1:-}"
-	[ -f "$d/node/bin/node" ] && return 0
-	[ -f "$d/data/node/bin/node" ] && return 0
-	return 1
-}
-
-oc_probe_has_data() {
-	local d="${1:-}"
-	[ -f "$d/home/.openclaw/openclaw.json" ] && return 0
-	[ -f "$d/data/.openclaw/openclaw.json" ] && return 0
-	[ -f "$d/.openclaw/openclaw.json" ] && return 0
-	return 1
-}
-
-oc_probe_data_dir() {
-	# 已命中目录对应的数据根（用来估算体积），未知布局时无输出
-	local d="${1:-}" kind="${2:-}"
-	case "$kind" in
-		ours)   printf '%s/home/.openclaw' "$d" ;;
-		istore) printf '%s/data/.openclaw' "$d" ;;
-		data)   printf '%s/.openclaw' "$d" ;;
-	esac
-}
-
-oc_dir_size_mb() {
-	# oc_dir_size_mb <dir> -> 整数 MB（统计不了时 0）
-	# du 需要遍历整棵树，在大容量盘上可能跑很久；用 timeout 封顶，超时按 0 处理，
-	# 绝不能让"探测已有安装"把调用方（LuCI 同步请求）拖死。
-	local d="${1:-}" s
-	[ -n "$d" ] || { printf '0'; return 0; }
-	[ -d "$d" ] || { printf '0'; return 0; }
-	if command -v timeout >/dev/null 2>&1; then
-		s="$(timeout 8 du -sm "$d" 2>/dev/null | awk 'NR==1{print $1}')"
-	else
-		s="$(du -sm "$d" 2>/dev/null | awk 'NR==1{print $1}')"
-	fi
-	case "$s" in ''|*[!0-9]*) s=0 ;; esac
-	printf '%s' "$s"
-}
-
-oc_discovery_entry() {
-	# oc_discovery_entry <path> <kind> -> 单个 JSON 对象（无换行）
-	local path="$1" kind="$2" hp=false hn=false hd=false dd sz
-	oc_probe_has_program "$path" && hp=true
-	oc_probe_has_node    "$path" && hn=true
-	oc_probe_has_data    "$path" && hd=true
-	dd="$(oc_probe_data_dir "$path" "$kind")"
-	sz="$(oc_dir_size_mb "$dd")"
-	printf '{"path":"%s","kind":"%s","has_program":%s,"has_node":%s,"has_data":%s,"size_mb":%s}' \
-		"$(oc_json_str "$path")" "$kind" "$hp" "$hn" "$hd" "${sz:-0}"
-}
-
-oc_discover_existing() {
-	# 输出 JSON 数组：本机已有的 OpenClaw 安装 / 数据目录。
-	#
-	# 候选只有固定名字，**不做全盘遍历** —— 几 TB 的盘上 find / 会跑到天荒地老，
-	# 而这个函数是给 UI 同步调用的：
-	#   1. 每个挂载点下的 Configs/OpenClawMgr（iStoreOS 自带管理器）、
-	#      OpenClaw / OpenClawMgr / openclaw（常见安装目录名）
-	#   2. 挂载点根目录本身（其下若有 .openclaw，就是"只有数据"）
-	#
-	# 只往 stdout 写 JSON。日志走 stderr（oc_warn / oc_err）。
-	local m free fst path kind seen="" first=1
-	printf '['
-	while IFS="$(printf '\t')" read -r m free fst; do
-		[ -n "$m" ] || continue
-		for path in "$m" "$m/Configs/OpenClawMgr" "$m/OpenClaw" "$m/OpenClawMgr" "$m/openclaw"; do
-			[ -d "$path" ] || continue
-			kind="$(oc_probe_openclaw_dir "$path")" || continue
-			[ -n "$kind" ] || continue
-			# 同一个目录可能被多个挂载点（bind mount）枚举到，去重
-			case "$seen" in
-				*"|$path|"*) continue ;;
-			esac
-			seen="$seen|$path|"
-			[ "$first" = "1" ] || printf ','
-			first=0
-			oc_discovery_entry "$path" "$kind"
-		done
-	done <<EOF
-$(oc_mounts)
-EOF
-	printf ']'
-}
-
 # ---------------------------------------------------------------- node runtime probe
 # 「安装前先看看本机是不是已经有能用的 Node」的只读探测层。
 # 与上一节同一条约定：oc_probe_node_runtimes() 的输出会被直接当成 JSON 响应体，
@@ -1115,7 +984,7 @@ oc_node_rt_candidates() {
 	if [ -n "$bd" ]; then
 		printf 'plugin-private\t%s/node/bin/node\n' "$bd"
 	fi
-	# 挂载点范围复用 oc_mounts()（与「迁移本机已有安装」同一份口径），
+	# 挂载点范围复用 oc_mounts()（与安装目录候选同一份口径），
 	# 每个挂载点只试下面几个固定名字。
 	while IFS="$(printf '\t')" read -r m free fst; do
 		[ -n "$m" ] || continue

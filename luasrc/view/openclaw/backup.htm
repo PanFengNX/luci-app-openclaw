@@ -443,9 +443,7 @@ var API = {
   service: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","service")%>',
   save: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","save")%>',
   mounts: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","mounts")%>',
-  discover: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","discover")%>',
   node_existing: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","node_existing")%>',
-  migrate: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","migrate")%>',
   doctor: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>',
   repair: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","repair")%>',
   diag_run: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_run")%>',
@@ -497,7 +495,7 @@ function post(url, data, cb){
     if (x.readyState == 4) { try { fin(JSON.parse(x.responseText)); } catch(e){ fin({ok:false}); } }
   };
   // 连接被重置 / 请求超时：readyState 可能根本不到 4，回调就永远不来，
-  // 发起方（例如备份、迁移）会永久卡在 disabled。用 net:true 标记，
+  // 发起方（例如备份、安装）会永久卡在 disabled。用 net:true 标记，
   // 让轮询类调用方知道"这次没拿到数据"而不是"服务端说失败了"。
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
