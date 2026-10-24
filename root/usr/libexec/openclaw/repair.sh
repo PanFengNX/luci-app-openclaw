@@ -284,6 +284,18 @@ else
 	say WARN "未找到 CA 证书，HTTPS 下载可能失败：$(oc_pkg_install_hint) ca-certificates"
 fi
 
+# 12b ----------------------------------------------------------- xz
+# Node.js 官方包是 .tar.xz。没有 xz 时 install.sh 会退化成 `tar -xf`，而
+# busybox tar 多半没编进 -J，最后只报"解压失败（tar）"—— 看不出根因。
+# 这里点名检查，让"一键修复"能直接告诉用户该装什么。
+if command -v xz >/dev/null 2>&1 || command -v unxz >/dev/null 2>&1; then
+	say OK "xz 已安装（可解压 Node.js 的 .tar.xz）"
+elif tar --help 2>/dev/null | grep -q -- '-J'; then
+	say OK "tar 自带 xz 支持"
+else
+	say WARN "缺少 xz，安装 Node.js 时会解压失败：$(oc_pkg_install_hint) xz-utils"
+fi
+
 # 13 ------------------------------------------------------------ luci cache
 if [ -e /tmp/luci-indexcache ] || [ -e /tmp/luci-modulecache ]; then
 	rm -f /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null

@@ -426,6 +426,20 @@ cmd_uninstall() {
 	printf '{"ok":true}\n'
 }
 
+_reachable_flag() {
+	# JSON 字面量：true / false / null
+	#
+	# 只在「已安装 **且** 进程在跑」时才真去探测端口。
+	# 未安装或已停止时端口本来就不该应答，探测必然等到 connect 超时
+	# （实测单次 1.3-3.3 秒），而结论毫无信息量 —— 白白拖慢状态页。
+	# 这两种情况返回 null（= 未知/不适用），前端只在 === false 时才提示
+	# 「端口未应答」，所以 null 不会造成误报。
+	installed || { printf 'null'; return 0; }
+	running   || { printf 'null'; return 0; }
+	oc_gateway_reachable "$(get_port)" "$(uci_get main.bind lan)" \
+		&& printf 'true' || printf 'false'
+}
+
 oc_gateway_reachable() {
 	# oc_gateway_reachable <port> <bind> -> 0 能拿到 2xx/3xx
 	#
@@ -494,7 +508,7 @@ cmd_info() {
 	printf '{"status":"%s","installed":%s,"reachable":%s,"port":"%s","token":"%s","openclaw":"%s","node":"%s","node_mode":"%s","base_dir":"%s","openclaw_dir":"%s","oc_dir_custom":%s,"home":"%s","free_mb":"%s","arch":"%s","musl":%s,"bind":"%s","node_mirror":"%s","enabled":%s,"core_dumps":%s,"url":"http://%s:%s/"}\n' \
 		"$st" \
 		"$(installed && echo true || echo false)" \
-		"$(oc_gateway_reachable "$port" "$(uci_get main.bind lan)" && echo true || echo false)" \
+		"$(_reachable_flag)" \
 		"$(oc_json_str "$port")" "$(oc_json_str "$token")" \
 		"$(oc_json_str "${ver:-}")" "$(oc_json_str "${nver:-}")" \
 		"$(oc_node_mode)" \

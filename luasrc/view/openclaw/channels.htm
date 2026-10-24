@@ -280,7 +280,13 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   input[type=time],input[type=file]{height:auto;min-height:40px}
   .oc-copy{min-height:36px}
   .oc-switch{min-height:40px}
-  input[type=checkbox]{width:20px;height:20px}
+  /* 只放大表单行里"看得见的"复选框。
+     .oc-switch 内部的 input 是 0×0 + opacity:0 的代理元素（真正显示的是
+     .track），把它撑到 20×20 只会凭空多出一块透明可点区域、挡住相邻控件。
+     两者特异度相同时靠顺序决定胜负，太脆；这里改用 .oc-row> 子选择器
+     提高特异度（0,2,1 > 0,1,1），范围明确且不依赖 Selectors Level 4
+     的 :not(复杂选择器) —— 后者在 Safari 12 / 旧 Chromium 上会让整条规则失效。 */
+  .oc-row>input[type=checkbox]{width:20px;height:20px}
 }
 
 /* ── 卡片头部的收缩规则 ──────────────────────────────────────────

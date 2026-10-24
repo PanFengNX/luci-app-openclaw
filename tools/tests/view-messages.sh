@@ -147,6 +147,49 @@ check('.oc-card>.oc-empty' in shared2, '空状态内边距不与卡片叠加')
 check('@supports not (color: color-mix' in shared2,
       '不支持 color-mix 时有深色兜底色（否则深色主题正文只有 2.18:1）')
 
+# ---- 1.8.25 深度审计后的回归保护 ----
+# status.htm：提示只能有一个来源（renderOpen），否则先写的那句会被覆盖。
+stv = (proj / 'luasrc/view/openclaw/status.htm').read_text(encoding='utf-8')
+body_js = stv.split('<script>')[1]
+# renderOpen 里给 msg 赋值的那段，是"服务未启动/端口无效/端口未应答"的唯一出处
+check('端口未应答' in body_js, '状态页有「端口未应答」文案')
+check(body_js.count('进程在运行，但网关端口暂无应答') == 1,
+      '该文案只出现一次（多写一处就会互相覆盖）')
+
+# CSS：不能出现 Selectors Level 4 的 :not(复杂选择器) / :has() / 容器查询
+# :not(.a) 这种简单选择器是 Level 3，一直合法，不算。
+css_body = re.sub(r'(?s)/\*.*?\*/', '',
+                  re.search(r'(?s)<style>(.*?)</style>',
+                            (proj / 'luasrc/view/openclaw/setup.htm').read_text(encoding='utf-8')).group(1))
+lvl4 = [m.group(0) for m in re.finditer(r':not\([^)]*\)', css_body)
+        if re.search(r'[\s>+~]', m.group(0)[5:-1])]
+check(not lvl4, '没有 Level 4 的 :not()', str(lvl4[:2]))
+check(':has(' not in css_body, '没有 :has()')
+check('@container' not in css_body, '没有容器查询')
+
+# 滑块的可点区域不能被 pointer:coarse 的复选框规则撑开
+check('.oc-row>input[type=checkbox]' in css_body,
+      'pointer:coarse 用子选择器限定复选框（不影响滑块内部 input）')
+
+# install.htm：表单数据里不能混入非字符串的私有字段
+ins = (proj / 'luasrc/view/openclaw/install.htm').read_text(encoding='utf-8')
+# 只查代码里的赋值/取值，不查注释（注释里会解释"为什么不再这么写"）
+ins_code = '\n'.join(l.split('//', 1)[0] for l in ins.splitlines())
+check('data.__install' not in ins_code and 'data.__nm' not in ins_code,
+      '表单数据里没有 __install/__nm 私有字段')
+check('return { save: data,' in ins, 'collectEnvPayload 返回结构体')
+
+# 后端：未安装/未停止时不探测端口
+cl2 = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
+check('installed || { printf' in cl2, '未安装时 reachable 返回 null')
+check('running   || { printf' in cl2, '未运行时 reachable 返回 null')
+
+# xz 从"警告"升级为"硬前提"
+insh = (proj / 'root/usr/libexec/openclaw/install.sh').read_text(encoding='utf-8')
+check('缺少 xz，无法解压' in insh, 'install.sh 缺 xz 时直接失败并给出修复命令')
+repsh = (proj / 'root/usr/libexec/openclaw/repair.sh').read_text(encoding='utf-8')
+check('xz 已安装' in repsh or '缺少 xz' in repsh, 'repair.sh 检查 xz')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

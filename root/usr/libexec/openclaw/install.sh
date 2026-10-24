@@ -311,8 +311,17 @@ preflight() {
 	fi
 
 	command -v tar >/dev/null 2>&1 || die "缺少 tar"
-	command -v xz >/dev/null 2>&1 || command -v unxz >/dev/null 2>&1 || \
-		ilog "WARN: 未找到 xz，将尝试 busybox tar 直接解压"
+	# xz 不是可选项：Node.js 官方分发包是 .tar.xz，而 busybox 版 tar 多数
+	# 没编进 -J。缺 xz 时下面的解压会失败，报的是"解压失败（tar）"，
+	# 与真正的原因（缺命令）完全对不上 —— 用户只能猜。
+	# 因此在 preflight 就把它当成硬前提，直接给出可执行的修复命令。
+	if ! command -v xz >/dev/null 2>&1 && ! command -v unxz >/dev/null 2>&1; then
+		if tar --help 2>/dev/null | grep -q -- '-J'; then
+			ilog "tar 自带 xz 支持，无需单独安装 xz"
+		else
+			die "缺少 xz，无法解压 Node.js 的 .tar.xz。请先执行：$(oc_pkg_install_hint) xz-utils"
+		fi
+	fi
 	command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || \
 		command -v uclient-fetch >/dev/null 2>&1 || die "缺少下载工具（curl/wget/uclient-fetch）"
 }

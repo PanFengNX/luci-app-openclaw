@@ -96,7 +96,13 @@ check('rpcd reload' in build, 'postinst 会 reload rpcd（否则新 ACL 不生�
 # 网关可达性探测：进程在 ≠ 端口应答
 check('oc_gateway_reachable()' in cli, '有网关可达性探测函数')
 check('"reachable":%s' in cli, 'cmd_info 输出 reachable')
-check('oc_gateway_reachable "$port"' in cli, 'info 里真的去探测了')
+check('_reachable_flag' in cli, 'info 经由 _reachable_flag 决定是否探测')
+check('installed || { printf \'null\'' in cli.replace('"null"', "'null'"),
+      '未安装时返回 null（不探测端口，省 1-2 秒连接超时）')
+check('running   || { printf' in cli or 'running || { printf' in cli,
+      '已停止时返回 null（同样不探测）')
+check('oc_gateway_reachable "$(get_port)"' in cli,
+      '_reachable_flag 里真的调用了探测函数')
 check('oc_probe_hosts()' in cli, '按 bind 选择探测主机')
 statusview = (proj / 'luasrc/view/openclaw/status.htm').read_text(encoding='utf-8')
 check('运行中（端口未应答）' in statusview, '状态页区分「端口未应答」')

@@ -280,7 +280,13 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   input[type=time],input[type=file]{height:auto;min-height:40px}
   .oc-copy{min-height:36px}
   .oc-switch{min-height:40px}
-  input[type=checkbox]{width:20px;height:20px}
+  /* 只放大表单行里"看得见的"复选框。
+     .oc-switch 内部的 input 是 0×0 + opacity:0 的代理元素（真正显示的是
+     .track），把它撑到 20×20 只会凭空多出一块透明可点区域、挡住相邻控件。
+     两者特异度相同时靠顺序决定胜负，太脆；这里改用 .oc-row> 子选择器
+     提高特异度（0,2,1 > 0,1,1），范围明确且不依赖 Selectors Level 4
+     的 :not(复杂选择器) —— 后者在 Safari 12 / 旧 Chromium 上会让整条规则失效。 */
+  .oc-row>input[type=checkbox]{width:20px;height:20px}
 }
 
 /* ── 卡片头部的收缩规则 ──────────────────────────────────────────
@@ -1221,22 +1227,25 @@ function collectEnvPayload(){
   if (state.registryTouched) data.npm_registry = $('in-registry').value;
   var proxy = String($('in-proxy').value || '').replace(/^\s+|\s+$/g, '');
   if (proxy) data.http_proxy = proxy;
-  // 安装流程还要把目录/版本原样传给 install（它按参数走，不读 UCI）
-  data.__install = { base_dir: dir, openclaw_dir: ocdir,
-                     oc_version: oc, node_version: nd };
-  data.__nm = nm;
-  return data;
+  // 返回值分成三块，而不是往 data 里塞 __install / __nm 再让调用方 delete：
+  // 那种写法一旦漏删，post() 的 `for (var k in data)` 会把
+  // "[object Object]" 当字段值发给服务端。结构体没有这个坑。
+  //   save    -> POST 给 api/save 的表单字段
+  //   install -> POST 给 api/install 的字段（它按参数走，不读 UCI）
+  //   nm      -> 调用方要回写到 state.nodeMirrorCustom 的值
+  return { save: data,
+           install: { base_dir: dir, openclaw_dir: ocdir,
+                      oc_version: oc, node_version: nd },
+           nm: nm };
 }
 
 // 「仅保存设置」：只写 UCI，不下载、不装、不重启。
 $('btn-save-env').onclick = function(){
-  var data = collectEnvPayload();
-  if (!data) return;
-  var inst = data.__install, nm = data.__nm;
-  delete data.__install; delete data.__nm;
-  this.disabled = true;
+  var p = collectEnvPayload();
+  if (!p) return;
   var btn = this;
-  post(API.save, data, function(sr){
+  btn.disabled = true;
+  post(API.save, p.save, function(sr){
     btn.disabled = false;
     if (!sr || sr.ok === false){
       alert('保存失败：' + ((sr && (sr.data || sr.error)) || '服务无响应')
@@ -1244,7 +1253,7 @@ $('btn-save-env').onclick = function(){
         + '程序目录与安装目录冲突，或 npm 源 / 代理不是 http(s) 地址。');
       return;
     }
-    if (nm.node_mirror !== state.nodeMirrorCustom) state.nodeMirrorCustom = '';
+    if (p.nm.node_mirror !== state.nodeMirrorCustom) state.nodeMirrorCustom = '';
     // 保存后重新读一次：下一步安装要用服务端认定的值，不能只信页面控件。
     loadInfo();
   });
@@ -1305,9 +1314,7 @@ $('btn-install').onclick = function(){
   // 校验与字段收集都在 collectEnvPayload 里（与「仅保存设置」同一份逻辑）。
   var payload = collectEnvPayload();
   if (!payload) return;
-  var inst = payload.__install, nm = payload.__nm;
-  var data = payload;
-  delete data.__install; delete data.__nm;
+  var inst = payload.install, nm = payload.nm, data = payload.save;
 
   // 从这一刻起才有日志可看：直接弹出来，用户点完按钮就能看到进度，
   // 而不是先去找一个藏在页面底部的黑框。

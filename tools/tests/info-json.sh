@@ -87,9 +87,9 @@ for ln in raw_params:
 # "$([ ... ] && echo true || echo false)" 是布尔，允许
 # status 是脚本内部常量（running/stopped/not_installed 三选一），不是外部输入；
 # 其余裸变量出现在参数区都可以接受的前提是"值域受限"或"已确认过"。
-SAFE = ('echo true', 'oc_node_mode', 'oc_arch', 'oc_is_musl', '${free',
+SAFE = ('echo true', 'oc_node_mode', 'oc_arch', 'oc_is_musl', '${free}',
         'main.enabled', 'main.core_dumps', 'main.bind', 'installed &&',
-        '"$st"')
+        '"$st"', '_reachable_flag')
 suspect = [s for s in suspect if not any(k in s for k in SAFE)]
 check(not suspect, 'printf 参数区没有裸字符串（都过 oc_json_str）',
       '; '.join(x[:50] for x in suspect[:3]))
@@ -134,6 +134,8 @@ def run_info(ver, base='/mnt/data/OpenClaw', home='/mnt/data/OpenClaw/home',
         'oc_node_mode() { printf private; }',
         'oc_arch() { printf x86_64; }',
         'oc_is_musl() { return 0; }',
+        # info 现在用 _reachable_flag 输出 true/false/null 字面量；测试里不探端口
+        "_reachable_flag() { printf 'null'; }",
         "uci_get() { printf '%s' \"${2:-}\"; }",
         'uci() { printf %%s %s; }' % q(host),
         func(lib, 'oc_json_str'),

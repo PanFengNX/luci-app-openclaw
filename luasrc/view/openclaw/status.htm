@@ -280,7 +280,13 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   input[type=time],input[type=file]{height:auto;min-height:40px}
   .oc-copy{min-height:36px}
   .oc-switch{min-height:40px}
-  input[type=checkbox]{width:20px;height:20px}
+  /* 只放大表单行里"看得见的"复选框。
+     .oc-switch 内部的 input 是 0×0 + opacity:0 的代理元素（真正显示的是
+     .track），把它撑到 20×20 只会凭空多出一块透明可点区域、挡住相邻控件。
+     两者特异度相同时靠顺序决定胜负，太脆；这里改用 .oc-row> 子选择器
+     提高特异度（0,2,1 > 0,1,1），范围明确且不依赖 Selectors Level 4
+     的 :not(复杂选择器) —— 后者在 Safari 12 / 旧 Chromium 上会让整条规则失效。 */
+  .oc-row>input[type=checkbox]{width:20px;height:20px}
 }
 
 /* ── 卡片头部的收缩规则 ──────────────────────────────────────────
@@ -610,8 +616,20 @@ function renderOpen(){
   }
   var hint = $('open-hint');
   if (hint){
-    hint.textContent = cur ? '' : (running ? '端口无效，无法打开' : '服务未启动');
-    hint.style.display = cur ? 'none' : '';
+    // 提示只有一个来源。此前「端口未应答」那句写在 loadInfo 里、排在
+    // renderOpen() 之前，而这里会无条件重写 #open-hint（running 且端口
+    // 有效时清空并隐藏），于是那句提示永远看不到。
+    // 现在按"最该说的那句话"优先级取一条：
+    //   端口无效 > 端口未应答 > 服务未启动 > 无提示
+    var msg = '';
+    if (!cur) msg = running ? '端口无效，无法打开' : '服务未启动';
+    else if (running && d.reachable === false){
+      msg = '进程在运行，但网关端口暂无应答：通常是在做 schema 迁移或插件'
+          + '初始化（等 10-30 秒再刷新），也可能是启动失败 —— 可查看「日志」，'
+          + '或点「一键修复」。';
+    }
+    hint.textContent = msg;
+    hint.style.display = msg ? '' : 'none';
   }
 }
 
@@ -730,13 +748,6 @@ function loadInfo(){
     // 网关地址仍然只作为文本展示：后端给的是它认为的绑定地址（lan 下可能是
     // 0.0.0.0 / LAN IP），只用于排查，不作为导航目标。
     $('st-url').textContent = (d.status=='running') ? (d.url || '-') : '-';
-    // 端口不应答时说明"下一步该做什么"，而不是让用户盯着"运行中"发愁。
-    if (d.status=='running' && d.reachable === false && $('open-hint')){
-      $('open-hint').textContent = '进程在运行，但网关端口暂无应答：'
-        + '通常是在做 schema 迁移或插件初始化（等 10-30 秒再刷新），'
-        + '也可能是启动失败 —— 可查看「日志」，或点「一键修复」。';
-      $('open-hint').style.display = '';
-    }
     // 「打开控制台」的导航目标与两个可复制地址：用浏览器主机名现拼，见 renderOpen()。
     renderOpen();
     // 当前版本已知，结合（可能更晚到达的）版本列表决定是否提示更新 Node / OpenClaw
