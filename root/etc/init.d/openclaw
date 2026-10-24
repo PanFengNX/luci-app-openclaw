@@ -307,6 +307,14 @@ start_service() {
 	[ -n "$json_port" ] && port="$json_port"
 	[ -n "$json_bind" ] && bind="$json_bind"
 	[ -n "$json_token" ] && token="$json_token"
+	# token 可能是 SecretRef：{"source":"store","provider":"...","id":"..."}。
+	# 那是**引用**不是明文，绝不能当环境变量传下去 —— 塞进
+	# OPENCLAW_GATEWAY_TOKEN 会让 /proc/<pid>/environ 里常驻一段 JSON，
+	# 而网关拿它做认证必然失败。识别出来就清空，让网关自己走密钥库。
+	token_is_secretref=0
+	case "$token" in
+		'{'*'}') token_is_secretref=1; token="" ;;
+	esac
 
 	# --- safety: numeric, unprivileged port
 	case "$port" in
@@ -396,6 +404,18 @@ start_service() {
 	fi
 
 	env_args="$(_env_args "$state_dir/.env")"
+	# 只在拿到明文 token 时才导出 OPENCLAW_GATEWAY_TOKEN。
+	# SecretRef（{"source":"store",...}）是**引用**不是明文：塞进环境变量
+	# 会让 /proc/<pid>/environ 常驻一段 JSON，而网关拿它认证必然失败。
+	# 明文 token 里若有空白会破坏 procd 的 env 扁平列表，那种情况也不用它
+	# （网关仍会读配置文件里的值）。
+	token_env=""
+	if [ "$token_is_secretref" = "0" ] && [ -n "$token" ]; then
+		case "$token" in
+			*' '*|*'	'*) : ;;
+			*) token_env="OPENCLAW_GATEWAY_TOKEN=$token" ;;
+		esac
+	fi
 
 	procd_open_instance "gateway"
 	# The token is NOT passed as --token any more: every local user can read
@@ -418,9 +438,9 @@ start_service() {
 		OPENCLAW_CONFIG_PATH="${state_dir}/openclaw.json" \
 		OPENCLAW_GATEWAY_PORT="$port" \
 		OPENCLAW_GATEWAY_BIND="$bind" \
-		OPENCLAW_GATEWAY_TOKEN="$token" \
 		TMPDIR="$base/tmp" \
 		PATH="${nodedir}/bin:${globaldir}/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+		$token_env \
 		$env_args
 	# 无条件设置：走到这里 user_opt 必然等于 $OC_USER（上面的 fail-closed
 	# 检查已经保证该用户存在）。绝不能再加 [ -n ] 之类的条件 —— 一旦条件
@@ -432,6 +452,9 @@ start_service() {
 	# timeout=5 是首次重启延迟，逐次翻倍、封顶 threshold(3600s)，所以"永不放弃"
 	# 不会变成狂刷：退避到 1 小时才重试一次。
 	procd_set_param respawn 3600 5 0
+	# pidfile 之前**只有 stop 分支会删、没有任何写入点**，于是 running() 里
+	# `[ -f /var/run/openclaw.pid ]` 这条兜底恒不成立。交给 procd 维护。
+	procd_set_param pidfile /var/run/openclaw.pid
 	# term_timeout：给插件收尾的时间。procd 默认只有 5 秒，而插件会抓着资源
 	# 不放（实测日志："Plugin deepseek forced retirement after 5000ms: 1
 	# still-running call(s)"），5 秒必然走到 SIGKILL，留下半关闭的 sqlite。
@@ -442,7 +465,12 @@ start_service() {
 	# 注意 core_pattern 是**全局**设置，只在这个开关打开时才改：
 	# 别的程序也在用同一份内核设置，不该被插件无条件改掉。
 	if [ "$core_dumps" = "1" ]; then
-		procd_set_param limits core="unlimited unlimited"
+		# 必须是单值。procd 把 "unlimited unlimited" 按空格拆成 soft/hard，
+		# 但 soft 位只认数值或单个 unlimited，写两个 unlimited 会让 soft 退化成 0。
+		# 同机对照：unetd/hostapd/netifd 用 core="unlimited" → unlimited/unlimited；
+		# 本服务原来用双 unlimited → 0/unlimited，等于 core dump 一直没开。
+		# （双值**数值**写法是有效的，dockerd 的 nofile="1048576 1048576" 就对。）
+		procd_set_param limits core="unlimited"
 		mkdir -p "$base/logs" 2>/dev/null || true
 		chown "$OC_USER:$OC_USER" "$base/logs" 2>/dev/null || _warn_chown "$base/logs"
 		# %e 可执行名 %t 时间戳 %p pid %s 信号

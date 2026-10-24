@@ -200,7 +200,10 @@ running() {
 	#   /bin/sh /usr/libexec/openclaw/cli.sh run date    ← 终端页执行命令
 	#   /usr/bin/tail -f /var/log/openclaw.log gateway   ← 用户的 tail
 	# 后果不只是显示错误：状态页会认为服务正常，而实际操作全在对着不存在的
-	# 网关；`--force` 也不会被触发去清理真占端口的进程。
+	# 网关。
+#
+# 注意：`--force`（install.sh 的）**只控制"同版本 Node 是否重新下载"**，
+# 它不会清理占用端口的进程 —— 全仓没有这样的实现，别照这句去改。
 	# oc_gateway_pids() 只接受 argv[0] 恰为私有 node 二进制、且含 gateway
 	# 子命令的进程，与 uninstall 的强杀用的是同一套判据。
 	[ -n "$(oc_gateway_pids 2>/dev/null)" ] && return 0
@@ -225,6 +228,13 @@ get_token() {
 	[ -f "$conf" ] || return 0
 	t="$(oc_json_get "$conf" '$.gateway.auth.token')"
 	[ -n "$t" ] || t="$(sed -n 's/.*"token"[^"]*"\([^"]*\)".*/\1/p' "$conf" | head -n1)"
+	# token 可能是 SecretRef（形如 {"source":"store","provider":...,"id":...}）。
+	# 那是**引用**而不是明文，密钥库又只写不可读，取不出真值。
+	# 原样返回的后果：面板把这段 JSON 拼进 #token= URL，用户登录必然失败，
+	# 而且它会留在浏览器历史里。这里如实返回空，由前端提示「由密钥库托管」。
+	case "$t" in
+		'{'*'}') return 0 ;;
+	esac
 	printf '%s' "$t"
 }
 
@@ -566,42 +576,87 @@ cmd_versions() {
 
 cmd_log() {
 	# cmd_log [N] [source]
-	#   source = file（默认）| syslog | all
+	#   source = all（默认）| gateway | file | syslog
 	#
-	# file   : /var/log/openclaw.log —— 管理脚本自己写的（安装/启动动作）
-	# syslog : logread 里 openclaw 相关的行 —— 网关进程的 stdout/stderr 由
-	#          procd 转发到 syslog（init.d 里 procd_set_param stdout 1）。
-	#          这份日志以前完全没在界面上暴露过，用户点「启动」后
-	#          看不到任何东西，只能猜。
-	# all    : 两者合并，用分节标题隔开。
-	local n="${2:-200}" src="${3:-file}"
+	# gateway : **网关自己写的日志文件** —— $base/tmp/openclaw-<uid>/openclaw-*.log。
+	#           这是唯一包含真正启动过程、插件加载、schema 迁移、崩溃堆栈的地方，
+	#           也是排查 segfault 必须看的文件。以前界面完全读不到它：
+	#           日志页只读 /var/log/openclaw.log（管理脚本自己写的几行），
+	#           所以用户看到的几乎永远是空白。
+	# file    : /var/log/openclaw.log —— 管理脚本写的（安装 / 启动 / 修复动作）
+	# syslog  : logread 里 openclaw 相关的行 —— procd 转发的 stdout/stderr，
+	#           只有一行行摘要，细节不如 gateway 文件。
+	# all     : 三者合并，用分节标题隔开。
+	local n="${2:-200}" src="${3:-all}"
 	case "$n" in ''|*[!0-9]*) n=200 ;; esac
 	case "$src" in
-		file|syslog|all) ;;
-		*) src=file ;;
+		all|gateway|file|syslog) ;;
+		*) src=all ;;
 	esac
 
 	_log_file() {
 		[ -f "$OC_LOGFILE" ] && tail -n "$n" "$OC_LOGFILE"
 	}
+
+	# 找最新的网关日志。目录名带 uid（openclaw-998），CLI 与网关可能各有一份，
+	# 取 mtime 最新的那个；不写死 uid，否则换了运行用户就找不到。
+	_gateway_log_path() {
+		local base f newest=""
+		base="$(oc_base_dir 2>/dev/null)" || base=""
+		[ -n "$base" ] || return 0
+		for f in "$base"/tmp/openclaw-*/openclaw-*.log; do
+			[ -f "$f" ] || continue
+			if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
+		done
+		printf '%s' "$newest"
+	}
+
+	_log_gateway() {
+		local f
+		f="$(_gateway_log_path)"
+		if [ -z "$f" ]; then
+			printf '（未找到网关日志文件：%s/tmp/openclaw-*/openclaw-*.log）\n' \
+				"$(oc_base_dir 2>/dev/null)"
+			printf '网关可能尚未启动过，或安装目录不同。\n'
+			return 0
+		fi
+		printf '# %s\n' "$f"
+		tail -n "$n" "$f" 2>/dev/null
+	}
+
 	_log_syslog() {
 		# logread 不一定存在（精简固件可能没装）；匹配 openclaw 标签。
-		# -e 正则取 "openclaw" 出现在方括号标签或行内，避免漏掉
-		# "daemon.err openclaw[123]:" 这类前缀。
 		command -v logread >/dev/null 2>&1 || {
 			printf '（本机没有 logread，无法读取系统日志）'
 			return 0
 		}
-		logread 2>/dev/null | grep -i 'openclaw' | tail -n "$n"
+		# logread 必须有超时。实测某些 iStoreOS 构建上它**既不返回也不报错**
+		# （读日志环时卡住），没有超时会把 CGI 进程占死，页面永久转圈。
+		# oc_timeout 在缺 timeout applet 时自带后台 TERM/KILL 兜底。
+		local _sl _rc
+		_sl="$(oc_timeout 5 logread 2>/dev/null)"
+		_rc=$?
+		if [ "$_rc" -ne 0 ] || [ -z "$_sl" ]; then
+			# 读不到就说清去哪看真实日志，而不是留一片空白
+			printf '（系统日志不可用：logread %s）\n' \
+				"$([ "$_rc" -eq 124 ] || [ "$_rc" -eq 143 ] && echo '5 秒内未返回，已中止' || echo '无输出')"
+			printf '网关自身的日志请选「网关日志」来源，路径：%s/tmp/openclaw-*/openclaw-*.log\n' \
+				"$(oc_base_dir 2>/dev/null)"
+			return 0
+		fi
+		printf '%s\n' "$_sl" | grep -i 'openclaw' | tail -n "$n"
 	}
 
 	case "$src" in
-		file)   _log_file ;;
-		syslog) _log_syslog ;;
+		gateway) _log_gateway ;;
+		file)    _log_file ;;
+		syslog)  _log_syslog ;;
 		all)
-			printf '===== 管理脚本日志（%s）=====\n' "$OC_LOGFILE"
+			printf '===== 网关日志 =====\n'
+			_log_gateway
+			printf '\n===== 管理脚本日志（%s）=====\n' "$OC_LOGFILE"
 			_log_file
-			printf '\n===== 网关输出（logread）=====\n'
+			printf '\n===== 系统日志（logread，仅摘要）=====\n'
 			_log_syslog
 			;;
 	esac

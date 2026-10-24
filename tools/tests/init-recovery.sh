@@ -114,7 +114,11 @@ ver2 = (proj / 'root/usr/libexec/openclaw/versions.sh').read_text(encoding='utf-
 
 # 覆盖安装必须先停服务，收尾用 restart
 check('init.d/openclaw stop' in ins2, 'install.sh 覆盖安装前会停服务')
-check('init.d/openclaw restart' in ins2, '安装收尾用 restart 而不是 start')
+# 收尾必须是 stop → start，不是 restart：procd 的 restart 只给**已注册**实例
+# 发信号，不重读 initscript；而升级会换掉 init.d 里的 limits/env/respawn。
+check('init.d/openclaw stop' in ins2 and 'init.d/openclaw start' in ins2,
+      '安装收尾用 stop → start（让 procd 重读 initscript）')
+check('init.d/openclaw restart' not in ins2, '安装收尾不再用 restart')
 # 备份暂存不能在 tmpfs
 check('stage_root="$base/tmp"' in bkp2, '备份暂存目录在数据盘而不是 /tmp')
 check('cp -al "$data"' in bkp2, '备份用硬链接树而不是整份复制')
@@ -140,6 +144,62 @@ check('kill "$p"' in lib2, 'oc_kill_tree 先 TERM')
 check('[ -z "$(oc_gateway_pids)" ]' in lib2, 'oc_kill_tree 确认进程真的没了')
 # chown 优化
 check('stat -c %U "$home"' in init2, 'start 时先比对属主再决定是否递归')
+
+# ---- 外部实测报告（REPORT.md）里的修复 ----
+lib3 = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
+init3 = (proj / 'root/etc/init.d/openclaw').read_text(encoding='utf-8')
+ins3 = (proj / 'root/usr/libexec/openclaw/install.sh').read_text(encoding='utf-8')
+mdl3 = (proj / 'root/usr/libexec/openclaw/models.sh').read_text(encoding='utf-8')
+chl3 = (proj / 'root/usr/libexec/openclaw/channels.sh').read_text(encoding='utf-8')
+
+# BUG-1：网关把 process.title 改成 openclaw-gateway，argv[0] 随之被改写，
+# 所以「argv[0] == node 二进制」的判据永远不中（本机实测 cmdline 只有
+# 一个 token "openclaw-gateway"，comm 被截断成 "openclaw-gatewa"）。
+gp = lib3[lib3.index('oc_gateway_pids() {'):]
+gp = gp[:gp.index('\n}\n')]
+check('openclaw-gateway' in gp, 'oc_gateway_pids 认 process.title 改写后的 argv[0]')
+check('/proc/[0-9]*' in gp, 'oc_gateway_pids 遍历 /proc 而不是依赖 pgrep')
+_gp_code = '\n'.join(l.split('#', 1)[0] for l in gp.splitlines())
+check('pgrep' not in _gp_code, 'oc_gateway_pids 代码里不再用 pgrep（注释里提到不算）')
+
+# BUG-6：init.d running 走 ubus，某些固件没有 service 对象，恒返回未运行。
+stop_gate = ins3[ins3.index('覆盖安装前必须先停服务'):]
+stop_gate = stop_gate[:stop_gate.index('npm install -g openclaw@')]
+check('oc_gateway_pids' in stop_gate, 'install 停服门用进程表判定（不用 init.d running）')
+check('/etc/init.d/openclaw running' not in stop_gate,
+      'install 停服门不再依赖不可信的 init.d running')
+
+# BUG-2：非 root 不再拒绝，回落到自己的目录。
+check('.openclaw-run-$uid' in lib3, '非 root 时回落到 $HOME/.openclaw-run-<uid>')
+check('拒绝继续' not in lib3[:3000], '非 root 不再直接拒绝（否则 CLI 全废）')
+
+# BUG-3：SecretRef 不是明文 token，必须返回空。
+gt = cli[cli.index('get_token() {'):]
+gt = gt[:gt.index('\n}\n')]
+check("'{'*'}'" in gt, 'get_token 识别 SecretRef 并返回空')
+
+# BUG-4：logread 会挂死，必须有超时。
+check('oc_timeout 5 logread' in cli, 'logread 有 5 秒超时')
+
+# BUG-7：core="unlimited unlimited" 会让 soft 退化为 0。
+check('limits core="unlimited"' in init3, 'core limits 用单值 unlimited')
+check('limits core="unlimited unlimited"' not in init3, '不再用双 unlimited（soft 会变 0）')
+
+# BUG-8：pidfile 必须有人写。
+check('procd_set_param pidfile' in init3, 'procd 维护 pidfile')
+
+# BUG-9：SecretRef 不能进环境变量。
+check('token_is_secretref' in init3, 'init.d 识别 SecretRef')
+check('OPENCLAW_GATEWAY_TOKEN="$token" \\' not in init3,
+      '不再无条件导出 token（SecretRef 会污染 environ）')
+
+# BUG-5：tasklog 追加前必须轮转。
+check('oc_log_rotate "$OC_TASKLOG"' in chl3, 'channels.sh 写 tasklog 前轮转')
+check(mdl3.count('oc_log_rotate "$OC_TASKLOG"') >= 2,
+      'models.sh 写 tasklog 前轮转', '实际 %d 处' % mdl3.count('oc_log_rotate "$OC_TASKLOG"'))
+
+# OPT-3：/var/log 对网关用户不可写时要回落。
+check('/logs' in lib3 and 'oc_base_dir' in lib3, 'oc_log 在 /var/log 不可写时回落')
 
 check('oc_gateway_reachable()' in cli, '有网关可达性探测函数')
 check('"reachable":%s' in cli, 'cmd_info 输出 reachable')

@@ -11,6 +11,21 @@
 				],
 				"/var/log/openclaw-install.log": [
 					"read"
+				],
+				"/var/log/openclaw-task.log": [
+					"read"
+				],
+				"/var/log/openclaw-backup.log": [
+					"read"
+				],
+				"/var/log/openclaw.log.1": [
+					"read"
+				],
+				"/var/log/openclaw-task.log.1": [
+					"read"
+				],
+				"/var/log/openclaw-backup.log.1": [
+					"read"
 				]
 			}
 		}

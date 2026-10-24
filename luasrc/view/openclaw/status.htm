@@ -666,7 +666,11 @@ function openControl(){
     var target = tok ? (url + '#token=' + encodeURIComponent(tok)) : url;
     var hint = $('open-hint');
     if (!tok && hint){
-      hint.textContent = '未能获取网关 token，已打开不带 token 的地址，请手动登录';
+      // 两种情况都到这里：token 由密钥库托管（SecretRef，取不出明文），
+      // 或者读取失败。前者是正常状态，不是错误 —— 说清区别，别让用户以为坏了。
+      hint.textContent = '网关 token 由密钥库托管（不可导出），已打开不带 token 的地址；'
+        + '请在页面上用配对码登录，或在本机直接用 http://127.0.0.1:'
+        + (d.port || '18789') + '/ 访问。';
       hint.style.display = '';
     }
     // 占位窗口还在就让它导航（用户手势内打开的窗口不会被拦截）。

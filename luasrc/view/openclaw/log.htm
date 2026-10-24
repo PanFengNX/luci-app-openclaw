@@ -334,8 +334,9 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
       来源
       <select id="log-src" style="font-size:12px;padding:3px 6px">
         <option value="all">全部（推荐）</option>
+        <option value="gateway">网关日志（最详细）</option>
         <option value="file">管理脚本日志</option>
-        <option value="syslog">网关输出（logread）</option>
+        <option value="syslog">系统日志（logread）</option>
       </select>
     </span>
     <span id="log-state" style="font-size:12px;color:#888"></span>
@@ -343,9 +344,10 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   </div>
   <div style="margin-top:10px" class="oc-out" id="out">加载中…</div>
   <div class="oc-hint">
-    「管理脚本日志」是 /var/log/openclaw.log（安装 / 启动 / 修复动作）；
-    「网关输出」是网关进程的 stdout/stderr，由 procd 转进系统日志，
-    启动失败的真正原因通常在这里。
+    <b>网关日志</b>是网关自己写的 <code>&lt;安装目录&gt;/tmp/openclaw-*/openclaw-*.log</code>，
+    启动过程、插件加载、schema 迁移、崩溃堆栈都在这里（排查闪退只看它）；
+    <b>管理脚本日志</b>是 /var/log/openclaw.log（安装 / 启动 / 修复动作）；
+    <b>系统日志</b>是 procd 转进 syslog 的摘要，信息量最少。
   </div>
 </div>
 

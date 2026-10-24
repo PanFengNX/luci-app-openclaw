@@ -610,9 +610,15 @@ install_openclaw() {
 	# node_modules：旧进程继续持有已被 unlink 的模块句柄，新版本不生效
 	# （UI 却显示"已安装"），native .node 被替换/截断还可能导致段错误。
 	# procd 的 start 对已运行的实例是空操作，所以收尾也必须用 restart。
-	if [ -x /etc/init.d/openclaw ] && /etc/init.d/openclaw running >/dev/null 2>&1; then
-		ilog "检测到网关正在运行，先停止再覆盖安装"
-		/etc/init.d/openclaw stop >/dev/null 2>&1
+	# 判据是**进程表**，不是 `init.d ... running`：
+	# 后者走 rc.common → procd_running → `ubus call service list`，而某些
+	# iStoreOS 构建上 ubus 根本没有 service 对象（实测 `ubus call service
+	# list` 返回 Not found），于是 running 恒为"未运行"—— 连一个不存在的
+	# 子命令都返回 0，这个分发完全不可信。用进程表是唯一可靠的判据。
+	_gw_pids="$(oc_gateway_pids 2>/dev/null)"
+	if [ -n "$_gw_pids" ]; then
+		ilog "检测到网关正在运行（pid: $(printf '%s' "$_gw_pids" | tr '\n' ' ')），先停止再覆盖安装"
+		[ -x /etc/init.d/openclaw ] && /etc/init.d/openclaw stop >/dev/null 2>&1
 		# 等进程真的退出（最多 40 秒）：procd 的 stop 是异步的，
 		# 立刻 npm install 仍会与正在退出的进程抢同一批文件。
 		_i=0
@@ -876,8 +882,20 @@ autostart_service() {
 			uci_commit
 			# 用 restart 而不是 start：start 对 procd 里已注册的实例是空操作，
 			# 而上面刚 stop 过 —— 只有 restart 能保证装完真的起来。
-			ilog "启动服务（/etc/init.d/openclaw restart，最多等待 150s）"
-			oc_timeout 150 /etc/init.d/openclaw restart >/dev/null 2>&1
+			# 必须 stop → start，不能用 restart。procd 的 restart 只是给
+			# **已注册**的实例发信号，不会重读 initscript；而这次升级换掉了
+			# init.d 里的 limits / env / respawn。用 restart 的话新脚本
+			# 根本没被解析，改了等于没改（实测：init.d 已含 SecretRef 守卫，
+			# 但进程 environ 里仍是旧的 token JSON，limits 也还是旧的）。
+			ilog "停止后重新启动服务（stop → start，各最多 150s）"
+			oc_timeout 150 /etc/init.d/openclaw stop >/dev/null 2>&1
+			# 等进程真的退出：procd 的 stop 是异步的，立刻 start 会撞端口
+			_n=0
+			while [ -n "$(oc_gateway_pids 2>/dev/null)" ] && [ "$_n" -lt 40 ]; do
+				sleep 1
+				_n=$((_n + 1))
+			done
+			oc_timeout 150 /etc/init.d/openclaw start >/dev/null 2>&1
 			if svc_wait_running; then
 				ilog "服务已启动"
 			else

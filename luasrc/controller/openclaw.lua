@@ -20,6 +20,23 @@ local function is_post()
 	return (m or ""):upper() == "POST"
 end
 
+-- JSON 响应出口。**必须声明在 guarded() 之前**：Lua 5.1 是词法作用域，
+-- 局部变量只在声明之后可见；guarded 定义在前、out 声明在后时，guarded 体内
+-- 的 out 会被编译成全局查找，运行时是 nil。
+--
+-- 这个错误在 1.8.28 里真实发生过：所有 API 请求都经过 guarded，于是
+-- 每个接口都抛 "attempt to call a nil value (global 'out')" 并返回 500 ——
+-- 表现为页面能打开、但挂载点为空、程序位置一直「读取中」、版本列表「服务
+-- 无响应」、模型下拉为空、网盘状态读取失败。tools/tests/lua-scope.py 现在
+-- 专门检查这类前向引用。
+local function out(tbl)
+	http.prepare_content("application/json")
+	-- stringify() returns nil when a value cannot be encoded (e.g. invalid
+	-- UTF-8 straight from a helper script); writing nil produced an empty
+	-- body and the browser then failed on JSON.parse.
+	http.write(jsonc.stringify(tbl) or '{"ok":false,"error":"serialize-failed"}')
+end
+
 -- ---------------------------------------------------------------- CSRF
 -- 写操作必须 POST。此前 56 个端点里只有 13 个自己调 is_post()，其余
 -- （install / service / save / run / restore / backup_* / diag_run …）
@@ -151,14 +168,6 @@ local function run_rc(args)
 	-- action used to answer ok=true even when the helper failed.
 	-- Output is discarded so it cannot leak into the HTTP response body.
 	return sys.call(args .. " >/dev/null 2>&1") == 0
-end
-
-local function out(tbl)
-	http.prepare_content("application/json")
-	-- stringify() returns nil when a value cannot be encoded (e.g. invalid
-	-- UTF-8 straight from a helper script); writing nil produced an empty
-	-- body and the browser then failed on JSON.parse.
-	http.write(jsonc.stringify(tbl) or '{"ok":false,"error":"serialize-failed"}')
 end
 
 local function q(s)
@@ -775,10 +784,15 @@ end
 function api_log()
 	local n = tonumber(http.formvalue("lines") or "300") or 300
 	if n < 1 then n = 1 elseif n > 5000 then n = 5000 end
-	-- src：file（管理脚本日志）| syslog（网关进程输出）| all（两者）
+	-- src：gateway（网关自己的日志文件）| file（管理脚本日志）
+	--      | syslog（procd 转发的摘要）| all（默认，三者合并）
 	-- 白名单，不能把任意值拼进命令行。
-	local src = http.formvalue("src") or "file"
-	if src ~= "file" and src ~= "syslog" and src ~= "all" then src = "file" end
+	-- 默认 all 而不是 file：/var/log/openclaw.log 只有管理脚本写的几行，
+	-- 真正的启动过程、插件加载、崩溃堆栈都在网关日志文件里。
+	local src = http.formvalue("src") or "all"
+	if src ~= "gateway" and src ~= "file" and src ~= "syslog" and src ~= "all" then
+		src = "all"
+	end
 	local r = sh(SH .. " log " .. q(tostring(n)) .. " " .. q(src))
 	out({ ok = true, log = r, src = src })
 end
@@ -853,15 +867,21 @@ function api_providers()
 end
 
 function api_repair()
+	-- repair.sh 里会跑 `openclaw doctor --fix`（上限 300s），远超 uhttpd 的
+	-- CGI 超时。同步执行的结果是：浏览器先断，脚本还在后台跑，用户看到
+	-- 「服务无响应」，然后再点一次 —— 两次修复并发。
+	-- 界面上的一键修复已经走 api_diag_run 的后台范式（起任务 + 轮询），
+	-- 这里不再提供同步入口，避免任何调用方踩这个坑。
 	local j = http.formvalue("json")
-	local arg = " repair"
-	if j == "1" then arg = arg .. " --json" end
-	local r = sh(SH .. arg)
 	if j == "1" then
-		out({ ok = true, data = r })
-	else
-		out({ ok = true, output = r })
+		out({ ok = false,
+			error = "同步修复会超过 HTTP 超时，请改用 api/diag_run?name=repair 后台执行并轮询结果" })
+		return
 	end
+	out({ ok = false,
+		output = "修复耗时可能数十秒到数分钟，超出 HTTP 请求超时。\n"
+			.. "请在「状态」页点「一键修复」，它会后台执行并轮询日志；\n"
+			.. "或用 SSH 执行：/usr/libexec/openclaw/cli.sh diag repair" })
 end
 
 -- Background diagnostics. doctor / repair can run for minutes; running them

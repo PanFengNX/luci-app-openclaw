@@ -498,6 +498,7 @@ require_plugin() {
 		return 0
 	fi
 	oc_info "安装官方插件: $plugin"
+	oc_log_rotate "$OC_TASKLOG"
 	oc_run 300 plugins install "$plugin" 2>&1 | tee -a "$OC_TASKLOG"
 	# the check above already populated the `plugins list` cache, so it still
 	# describes the pre-install state; drop it before verifying the result
@@ -1006,6 +1007,7 @@ apply() {
 
 	# 4) default model
 	if [ -n "$model" ]; then
+		oc_log_rotate "$OC_TASKLOG"
 		oc_run 60 config set agents.defaults.model.primary "${provider}/${model}" 2>&1 | tee -a "$OC_TASKLOG"
 	fi
 

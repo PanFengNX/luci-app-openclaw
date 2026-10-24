@@ -267,6 +267,22 @@ else
 	fi
 fi
 
+head_ "7d2. 控制器 Lua 词法作用域（local 前向引用会让所有接口 500）"
+if [ -z "$PY" ]; then
+	skip "找不到 python"
+elif [ ! -f tools/tests/lua-scope.py ]; then
+	skip "缺少 tools/tests/lua-scope.py"
+else
+	scope_out="$("$PY" tools/tests/lua-scope.py . 2>&1)"
+	if [ $? -eq 0 ]; then
+		printf '%s\n' "$scope_out" | tail -1 | sed 's/^/    /'
+		ok "无 local 前向引用"
+	else
+		bad "存在 local 前向引用（运行时 nil）"
+		printf '%s\n' "$scope_out" | grep -E '★|行 |引用了' | head -6 | sed 's/^/        /'
+	fi
+fi
+
 head_ "7e2. 云端列表的空状态与页面提示语"
 if [ -f tools/tests/cloud-ls.sh ]; then
 	if out="$(sh tools/tests/cloud-ls.sh 2>&1)"; then

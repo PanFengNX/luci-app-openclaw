@@ -230,7 +230,11 @@ check("btn.textContent = '体检中…'" in lg, 'doctor 按钮有忙态')
 
 # ---- 后端 cmd_log 支持三来源 ----
 cl3 = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
-check('file|syslog|all' in cl3, 'cmd_log 接受 file/syslog/all')
+check('all|gateway|file|syslog' in cl3, 'cmd_log 接受 all/gateway/file/syslog')
+# gateway 来源必须存在：只读 /var/log/openclaw.log 时日志页几乎永远是空的，
+# 真正的启动过程与崩溃堆栈都在网关自己的日志文件里。
+check('openclaw-*/openclaw-*.log' in cl3, 'cmd_log 会去找网关自己的日志文件')
+check('_log_gateway' in cl3, 'cmd_log 有 gateway 来源')
 check('logread' in cl3, 'cmd_log 会读 logread')
 check('本机没有 logread' in cl3, '无 logread 时给出明确说明而不是空输出')
 

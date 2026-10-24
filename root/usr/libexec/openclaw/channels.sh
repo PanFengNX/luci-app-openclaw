@@ -314,6 +314,9 @@ oc_run_capture() {
 	fi
 	rc=$?
 	if [ -f "$tmp" ]; then
+		# 追加前先轮转：/var/log 是 tmpfs，CLI 的超长输出无限追加会吃内存。
+		# 这是本仓唯一一处漏掉轮转的写口（其它写点都在写前调了 oc_log_rotate）。
+		oc_log_rotate "$OC_TASKLOG"
 		oc_redact <"$tmp" | tee -a "$OC_TASKLOG" 2>/dev/null
 		rm -f "$tmp"
 	fi

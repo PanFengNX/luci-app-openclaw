@@ -56,14 +56,29 @@ oc_rundir() {
 		[ -d "$d" ] || return 1
 	fi
 
-	# someone else beat us to it - take it back (root) or refuse (non-root)
-	if [ "$(oc_dir_uid "$d")" != "$uid" ]; then
+	# 属主不符时的处理：root 收回来；**非 root 不能拒绝**，换到自己的目录。
+	#
+	# 原来非 root 直接 return 1，于是 uid 998（网关运行用户）下连只读命令
+	# （status / info / token / log）全部报「临时目录不属于当前用户」并失败，
+	# 锁也拿不到 —— CLI 排障与 cron 自动化全部失效。
+	# 而 /tmp/.openclaw 通常是 root（LuCI / procd）先创建的，所以这不是罕见路径，
+	# 是**默认路径**。
+	if [ "$(oc_dir_uid "$d" 2>/dev/null)" != "$uid" ]; then
 		if [ "$uid" = "0" ]; then
 			chown "$uid" "$d" 2>/dev/null || true
 		else
-			# oc_err is defined further down; this runs at load time
-			printf '%s\n' "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] 临时目录 $d 不属于当前用户，拒绝继续" >&2
-			return 1
+			# 回落到自己的目录（放在 HOME 下，同用户可写；仍强制 0700）。
+			local alt="${HOME:-/tmp}/.openclaw-run-$uid"
+			if [ -L "$alt" ] || { [ -e "$alt" ] && [ ! -d "$alt" ]; }; then
+				rm -f "$alt" 2>/dev/null || return 1
+			fi
+			[ -d "$alt" ] || mkdir -m 700 "$alt" 2>/dev/null
+			[ -d "$alt" ] || return 1
+			# 二次校验：回落目录也必须属于自己，否则等于把私有目录交给别人
+			[ "$(oc_dir_uid "$alt" 2>/dev/null)" = "$uid" ] || return 1
+			chmod 700 "$alt" 2>/dev/null || true
+			printf '%s' "$alt"
+			return 0
 		fi
 	fi
 	chmod 700 "$d" 2>/dev/null || true
@@ -101,13 +116,27 @@ oc_log_rotate() {
 oc_log() {
 	# oc_log <level> <message>
 	local lvl="$1"; shift
-	local line
+	local line dir f
 	line="$(date '+%Y-%m-%d %H:%M:%S') [$lvl] $*"
 	printf '%s\n' "$line"
 	# never let a read-only /var/log break the caller
-	if [ -d "$OC_LOGDIR" ] && [ -w "$OC_LOGDIR" ]; then
-		oc_log_rotate "$OC_LOGFILE"
-		printf '%s\n' "$line" >>"$OC_LOGFILE" 2>/dev/null || true
+	dir="$OC_LOGDIR"
+	f="$OC_LOGFILE"
+	# /var/log 在多数固件上是 755 root:root，非 root 身份（网关用户 998）
+	# 调用时 `-w` 为假，日志**静默丢弃** —— CLI 与 cron 排障时表现为
+	# "日志里什么都没有"，且没有任何提示。回落到安装目录下的 logs/
+	# （本包创建、属主正确），保证日志至少有一份落地。
+	if [ ! -d "$dir" ] || [ ! -w "$dir" ]; then
+		local alt
+		alt="$(oc_base_dir 2>/dev/null)/logs"
+		if [ -n "$alt" ] && [ -d "$alt" ] && [ -w "$alt" ]; then
+			dir="$alt"
+			f="$alt/${OC_LOGFILE##*/}"
+		fi
+	fi
+	if [ -d "$dir" ] && [ -w "$dir" ]; then
+		oc_log_rotate "$f"
+		printf '%s\n' "$line" >>"$f" 2>/dev/null || true
 	fi
 }
 
@@ -885,6 +914,26 @@ oc_is_musl() {
 	return 1
 }
 
+oc_mtime() {
+	# oc_mtime <path> -> 文件 mtime 的 epoch 秒；取不到时输出空串。
+	#
+	# 不要用 `date -r`：那是 GNU coreutils 的扩展，busybox 的 date 不支持
+	# （本机实测 `date -r f +%s` 直接报错）。带 `|| echo 0` 兜底更糟 ——
+	# 会静默变成 0，于是 age 恒等于当前时间（十几亿秒），任何 TTL 都不会命中。
+	# stat -c %Y 在 GNU 与 busybox 上都可用。
+	local f="${1:-}" v
+	[ -n "$f" ] && [ -e "$f" ] || return 0
+	v="$(stat -c %Y "$f" 2>/dev/null)"
+	case "$v" in
+		''|*[!0-9]*) v="" ;;
+	esac
+	[ -n "$v" ] || v="$(date -r "$f" +%s 2>/dev/null)"
+	case "$v" in
+		''|*[!0-9]*) v="" ;;
+	esac
+	printf '%s' "$v"
+}
+
 oc_free_mb() {
 	# free space in MB of a path
 	local p="$1"
@@ -1198,20 +1247,47 @@ oc_kill_tree() {
 }
 
 oc_gateway_pids() {
-	# pids of the real gateway process: argv[0] is exactly our private node
-	# binary and the command line contains the gateway subcommand.
-	# Matching /proc/<pid>/cmdline (NUL separated) avoids every false positive
-	# from grepping pgrep -f output.
-	local p cmd nb
-	nb="$(oc_node_bin)"
-	[ -x "$nb" ] || return 0
-	for p in $(pgrep -x node 2>/dev/null; pgrep -f 'gateway run' 2>/dev/null); do
-		[ -n "$p" ] || continue
-		cmd="$(tr '\0' ' ' </proc/"$p"/cmdline 2>/dev/null)" || continue
-		case "$cmd" in
-			"$nb "*) case "$cmd" in *" gateway "*) printf '%s\n' "$p" ;; esac ;;
-		esac
-	done | awk '!seen[$0]++'
+	# pids of the real gateway process.
+	#
+	# 判据不能只看 argv[0] 是不是 node 二进制。网关启动后 Node 会把
+	# process.title 改成 "openclaw-gateway"，Linux 上这会**直接改写 argv[0]**，
+	# 于是 /proc/<pid>/cmdline 变成只有一个 token 的 "openclaw-gateway"，
+	# 既不含 node 路径也不含 "gateway run"。同理 comm 变成 "openclaw-gatewa"
+	# （15 字符截断），所以 `pgrep -x node` 也永远不中。
+	#
+	# 实测（iStoreOS 25.12 / Node v26）：
+	#   /proc/<pid>/cmdline -> "openclaw-gateway"
+	#   ss -lntp            -> 10996/openclaw-gate
+	# 旧实现因此返回空，导致：状态页永远「已停止」、install.sh 的停服门不触发
+	# （在活进程脚下替换 node_modules）、oc_kill_tree 空转。
+	#
+	# 现在的主判据是 basename(argv[0]) == openclaw-gateway，保留
+	# "<node> ... gateway ..." 作为兼容分支（上游若改回不改 title 的启动方式）。
+	# 遍历 /proc 而不是 pgrep：comm 被截断、-f 又会误伤，直接读 cmdline 最可靠。
+	local d p a0 base nb cmd
+	nb="$(oc_node_bin 2>/dev/null)"
+	for d in /proc/[0-9]*; do
+		p="${d#/proc/}"
+		[ "$p" = "$$" ] && continue
+		# pid 可能在两次读取之间消失。重定向顺序很关键：
+		# `tr ... <file 2>/dev/null` 会先处理 <file，失败信息在 2>/dev/null
+		# 生效之前就打到 stderr 了；必须把 2>/dev/null 写在前面。
+		[ -r "$d/cmdline" ] || continue
+		cmd="$(tr '\0' '\n' 2>/dev/null <"$d/cmdline")"
+		[ -n "$cmd" ] || continue
+		a0="$(printf '%s\n' "$cmd" | head -n1)"
+		base="${a0##*/}"
+		if [ "$base" = "openclaw-gateway" ]; then
+			printf '%s\n' "$p"
+			continue
+		fi
+		# 兼容分支：仍然是 node 在跑 gateway 子命令
+		if [ -n "$nb" ] && [ "$a0" = "$nb" ]; then
+			case "$(printf '%s' "$cmd" | tr '\n' ' ')" in
+				*" gateway "*|*" gateway run"*) printf '%s\n' "$p" ;;
+			esac
+		fi
+	done
 }
 
 oc_ensure_user() {
@@ -1442,39 +1518,73 @@ oc_pid_in_ancestry() {
 	return 1
 }
 
+# 锁的持有者关系有四种：
+#   OWN    自己创建的 → 退出时删除
+#   ADOPT  祖先进程创建的（install.sh 调 cli.sh）→ **绝不删除**，只静默放行
+#   none   没有锁 → 创建后成为 OWN
+#   other  别的进程正在用 → 拒绝
+OC_LOCK_STATE=""
+
+_oc_lock_mark_own() {
+	OC_LOCK_STATE="own"
+	echo "$$" >"$OC_LOCK_DIR/pid" 2>/dev/null || true
+	# 只删自己建的锁。用 OC_LOCK_STATE 判断，而不是"trap 里无条件 rm -rf" ——
+	# 后者在 ADOPT 情形下会删掉父进程还在用的锁。
+	trap '[ "$OC_LOCK_STATE" = "own" ] && oc_rmtree "$OC_LOCK_DIR"' EXIT
+	trap '[ "$OC_LOCK_STATE" = "own" ] && oc_rmtree "$OC_LOCK_DIR"; exit 1' INT TERM HUP
+}
+
 oc_lock_acquire() {
 	# returns 0 on success, 2 when another operation holds the lock
 	if mkdir "$OC_LOCK_DIR" 2>/dev/null; then
-		echo "$$" >"$OC_LOCK_DIR/pid" 2>/dev/null || true
-		trap 'rm -rf "$OC_LOCK_DIR" 2>/dev/null || true' EXIT
-		trap 'rm -rf "$OC_LOCK_DIR" 2>/dev/null || true; exit 1' INT TERM HUP
+		_oc_lock_mark_own
 		return 0
 	fi
 
-	local pid reason
+	local pid reason steal
 	pid="$(cat "$OC_LOCK_DIR/pid" 2>/dev/null || true)"
-	if [ -n "$pid" ] && oc_pid_alive "$pid"; then
-		if oc_pid_in_ancestry "$pid"; then
-			oc_warn "检测到自身持有的陈旧锁，自动恢复：$OC_LOCK_DIR"
-		else
-			oc_err "另一个操作正在运行（锁 $OC_LOCK_DIR，pid $pid）"
-			return 2
-		fi
-	else
-		# 区分三种“死锁”原因，排查时能直接看出是退出、僵尸还是 pid 复用
-		if [ -z "$pid" ]; then
-			reason="no-pid"
-		else
-			reason="$OC_PID_REASON"
-		fi
-		oc_warn "检测到陈旧锁（pid ${pid:-未知}，$(oc_pid_reason_text "$reason")），自动清理：$OC_LOCK_DIR"
+
+	# 祖先进程持锁：install.sh 起 cli.sh 时就是这样。这里**不能**清理再重建 ——
+	# 清理会删掉父进程仍在使用的锁，而父进程的 EXIT trap 反过来又会删掉我们的，
+	# 结果两个进程都以为自己独占，锁等于不存在。正确做法是继承：放行，但不拥有。
+	if [ -n "$pid" ] && oc_pid_in_ancestry "$pid"; then
+		OC_LOCK_STATE="adopt"
+		trap - EXIT INT TERM HUP 2>/dev/null
+		return 0
 	fi
 
-	rm -rf "$OC_LOCK_DIR" 2>/dev/null || true
+	if [ -n "$pid" ] && oc_pid_alive "$pid"; then
+		oc_err "另一个操作正在运行（锁 $OC_LOCK_DIR，pid $pid）"
+		return 2
+	fi
+
+	# 区分三种“死锁”原因，排查时能直接看出是退出、僵尸还是 pid 复用
+	if [ -z "$pid" ]; then
+		reason="no-pid"
+	else
+		reason="$OC_PID_REASON"
+	fi
+	oc_warn "检测到陈旧锁（pid ${pid:-未知}，$(oc_pid_reason_text "$reason")），自动接管：$OC_LOCK_DIR"
+
+	# 抢占必须原子。原来是 `rm -rf` 再 `mkdir`：A 删锁的瞬间 B 恰好 mkdir
+	# 成功，接着 A 的 rm 把 B 的**活锁**删掉，然后 A 也 mkdir 成功 —— 两个
+	# 进程同时持锁。rename 是原子的：mv 只有一个赢家，输家的 mv 失败。
+	steal="$OC_LOCK_DIR.stale.$$"
+	oc_rmtree "$steal"
+	if ! mv "$OC_LOCK_DIR" "$steal" 2>/dev/null; then
+		# 没抢到：要么别人先接管了，要么原来那个锁自己消失了。
+		# 两种情况都回到起点重试一次，成功就说明确实空出来了。
+		if mkdir "$OC_LOCK_DIR" 2>/dev/null; then
+			_oc_lock_mark_own
+			return 0
+		fi
+		oc_err "无法获取操作锁（接管失败）：$OC_LOCK_DIR"
+		return 2
+	fi
+	oc_rmtree "$steal"
+
 	if mkdir "$OC_LOCK_DIR" 2>/dev/null; then
-		echo "$$" >"$OC_LOCK_DIR/pid" 2>/dev/null || true
-		trap 'rm -rf "$OC_LOCK_DIR" 2>/dev/null || true' EXIT
-		trap 'rm -rf "$OC_LOCK_DIR" 2>/dev/null || true; exit 1' INT TERM HUP
+		_oc_lock_mark_own
 		return 0
 	fi
 	oc_err "无法获取操作锁：$OC_LOCK_DIR"
@@ -1482,7 +1592,9 @@ oc_lock_acquire() {
 }
 
 oc_lock_release() {
-	rm -rf "$OC_LOCK_DIR" 2>/dev/null || true
+	# 只删自己建的锁；ADOPT 状态说明锁属于父进程，放手走人。
+	[ "$OC_LOCK_STATE" = "own" ] && oc_rmtree "$OC_LOCK_DIR"
+	OC_LOCK_STATE=""
 	trap - EXIT INT TERM HUP 2>/dev/null || true
 }
 

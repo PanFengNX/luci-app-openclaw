@@ -1,8 +1,76 @@
-<!-- version: 1.8.28 -->
+<!-- version: 1.8.30 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.30
+
+按设备实测报告（附 /proc、ubus、/proc/<pid>/limits 的原始输出）修复：
+
+- **网关在跑却报「已停止」**：`oc_gateway_pids` 的判据是「argv[0] 恰为私有 node
+  二进制」，但网关启动后 Node 把 `process.title` 改成 `openclaw-gateway`，Linux
+  上这会**直接改写 argv[0]** —— `/proc/<pid>/cmdline` 只剩一个 token，
+  `comm` 也被截断成 `openclaw-gatewa`，所以 `pgrep -x node` 与旧的 argv 比较
+  双双失效。主判据改为 `basename(argv[0]) == openclaw-gateway`，遍历 `/proc`
+  而不依赖 pgrep，保留 node+gateway 作为兼容分支。
+  连带修好：状态页状态、`oc_kill_tree`（原来空转，卸载会删运行中程序的目录）、
+  以及安装前的停服门。
+- **安装的停服门从未触发**：`/etc/init.d/openclaw running` 走 `procd_running` →
+  `ubus call service list`，而这台机器的 ubus 没有 `service` 对象（连不存在的
+  子命令都返回 0）。改用进程表判定，这是唯一可信来源。
+- **非 root 下 CLI 全废**：`/tmp/.openclaw` 属主是 root，非 root 调用时直接
+  「拒绝继续」，连 `status`/`info`/`token`/`log` 都跑不了，锁也拿不到。
+  改为回落到 `$HOME/.openclaw-run-<uid>`（二次校验属主），root 仍收回原目录。
+- **SecretRef 被当成明文 token**：`get_token()` 只判非空、不判形状，把
+  `{"source":"store",...}` 原样返回。面板把它拼进 `#token=` URL，用户登录必然
+  失败，而且留在浏览器历史里。现在识别该形状并如实返回空，前端提示改为
+  「由密钥库托管」而不是「获取失败」。
+  同理 init.d 不再把 SecretRef 导进 `OPENCLAW_GATEWAY_TOKEN` 环境变量。
+- **日志页会永久挂住**：`logread` 在某些 iStoreOS 构建上既不返回也不报错，
+  无超时会占死 CGI。加 5 秒超时，失败时告知真实日志路径。
+- **core dump 开关实际无效**：`procd_set_param limits core="unlimited unlimited"`
+  会被按空格拆成 soft/hard，而 soft 位只认数值或单个 `unlimited`，结果
+  `soft=0` —— 等于一直关着（同机 unetd/hostapd/netifd 用单值都正常）。
+  改为单值。
+- **pidfile 只删不写**：加 `procd_set_param pidfile`，`running()` 的兜底分支
+  从此有意义。
+- `openclaw-task.log` 追加前不轮转（全仓唯一漏掉的写口），会吃 tmpfs 内存。
+- `/var/log` 对网关用户不可写时，`oc_log` 静默丢日志；改为回落到
+  `<安装目录>/logs`。
+- rpcd ACL 补上 task / backup 日志与轮转文件的读权限（面板原来读不到）。
+- `cli.sh` 里描述 `--force` 能清理占端口进程的注释与实现不符，已改写。
+
+## 1.8.29
+
+**修复 1.8.28 引入的致命错误：所有接口 500。**
+
+- `guarded()` 里调用 `out()`，但 `out` 是 `local` 且声明在 `guarded` 之后。
+  Lua 5.1 的局部变量只在声明之后可见，于是 `guarded` 内的 `out` 编译成全局查找、
+  运行时是 nil —— 每个 API 请求都抛 `attempt to call a nil value` 并返回 500。
+  表现：页面能打开，但挂载点为空（显示「未检测到外置盘」）、程序位置一直
+  「读取中…」、版本列表「服务无响应」、模型下拉为空、网盘状态读取失败。
+  `out` 已提到 `guarded` 之前，并新增 `tools/tests/lua-scope.py` 专查此类前向引用
+  （已纳入 `verify-project.sh`，语法检查与单元测试都覆盖不到这类错误）。
+
+**其余**
+
+- 日志页读取真正的网关日志。原来只读 `/var/log/openclaw.log`（管理脚本自己写的
+  几行），而启动过程、插件加载、schema 迁移、崩溃堆栈都在
+  `<安装目录>/tmp/openclaw-*/openclaw-*.log`。新增 `gateway` 来源并设为默认；
+  排查闪退、抓 core dump 现在有地方看了。
+- `date -r` 在 busybox 上不存在，配上 `|| echo 0` 会让时间戳恒为 0：
+  版本缓存永远不命中（每次进页面都重新联网，表现为「服务无响应」）、
+  备份列表排序全乱（`br_prune` 可能留住错的"最新一份"）。统一改用 `oc_mtime`
+  （`stat -c %Y`，GNU 与 busybox 通用）。
+- 操作锁的两个竞态：陈旧锁改用 `mv` 原子抢占（原来 `rm` 后 `mkdir`，两个进程
+  可能同时持锁）；祖先进程持锁时改为继承（ADOPT）而不是清理重建，退出时只删
+  自己建的锁。
+- 云端上传：超时按体积推算（原来固定 600s，1.4G 备份在慢上行下必然超时）；
+  失败/超时会删除远端半截对象（否则轮转会把它当"最新一份"保留）；
+  成功后核对远端大小，不一致即删除并报错。加密中间产物从 tmpfs 改到数据盘。
+- `api_repair` 不再在 HTTP 请求里同步跑 `doctor --fix`（300s，必超 uhttpd 超时，
+  浏览器先断、脚本还在跑，用户会反复点）。界面走后台任务 + 轮询。
 
 ## 1.8.28
 

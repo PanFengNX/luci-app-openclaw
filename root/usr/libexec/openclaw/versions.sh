@@ -205,23 +205,30 @@ node_base_url() {
 
 cache_fresh() {
 	# cache_fresh <name> -> 0 when the cache file exists and is younger than TTL
-	# 原来两处命中判断写的是 `[ -s "$file" ]`：只看"非空"，不看 mtime，
-	# 于是 OC_CACHE_TTL=300 从来没有生效 —— 列表一旦写入就永不过期，
-	# 换了镜像源仍走旧数据，上游发了新版本也永远看不到。
-	local f="$OC_CACHE_DIR/$1" now age
+	# 原来命中判断写的是 `[ -s "$file" ]`：只看"非空"，不看 mtime，于是
+	# OC_CACHE_TTL=300 从来没有生效 —— 列表一旦写入就永不过期。
+	# 判断 mtime 用 oc_mtime（stat -c %Y），**不要用 date -r**：
+	# busybox 的 date 没有 -r，配上 `|| echo 0` 会静默得到 0，
+	# age 恒等于当前时间，缓存永远不命中 → 每次请求都重新联网。
+	local f="$OC_CACHE_DIR/$1" now age mt
 	[ -s "$f" ] || return 1
+	mt="$(oc_mtime "$f")"
+	[ -n "$mt" ] || return 1          # 取不到 mtime 就当过期，重新拉一次
 	now="$(date +%s 2>/dev/null)"
-	age=$(( now - $(date -r "$f" +%s 2>/dev/null || echo 0) ))
+	case "$now" in ''|*[!0-9]*) return 1 ;; esac
+	age=$(( now - mt ))
 	[ "$age" -lt "$OC_CACHE_TTL" ]
 }
 
 cache_get() {
 	# cache_get <name> -> prints cached file if fresh
-	local f="$OC_CACHE_DIR/$1"
+	local f="$OC_CACHE_DIR/$1" now age mt
 	[ -f "$f" ] || return 1
-	local now age
+	mt="$(oc_mtime "$f")"
+	[ -n "$mt" ] || return 1
 	now="$(date +%s)"
-	age=$(( now - $(date -r "$f" +%s 2>/dev/null || echo 0) ))
+	case "$now" in ''|*[!0-9]*) return 1 ;; esac
+	age=$(( now - mt ))
 	[ "$age" -lt "$OC_CACHE_TTL" ] || return 1
 	cat "$f"
 }

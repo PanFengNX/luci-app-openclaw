@@ -2215,7 +2215,15 @@ cloud_upload_file() {
 		remote_name="$name.enc"
 		cloud_valid_remote_name "$remote_name" || \
 			cloud_fail "远端文件名过长：加密后为 $remote_name（上限 128 字符）"
-		encdir="$OC_RUNDIR/cloud-enc.$$"
+		# 加密产物必须落在**数据盘**，不能放 $OC_RUNDIR（/tmp，tmpfs 内存盘）。
+		# 加密后的文件与原始备份同样大小（1.4G 备份 → 1.4G 密文），
+		# tmpfs 通常只有几 G 且要跟系统共享：空间不足时这里会写到一半失败，
+		# 报的还是"加密失败"，看不出是空间问题。
+		# 优先用数据盘的 tmp/，它不可写时才退回 rundir。
+		_encroot="$(oc_base_dir 2>/dev/null)/tmp"
+		mkdir -p "$_encroot" 2>/dev/null
+		[ -d "$_encroot" ] && [ -w "$_encroot" ] || _encroot="$OC_RUNDIR"
+		encdir="$_encroot/cloud-enc.$$"
 		rmdir "$encdir" 2>/dev/null || true
 		# 与 oc_rundir 同样的处理：某些文件系统上 mkdir -m 会「建成了但改权限失败」，
 		# 不能因此放弃；随后再 chmod 一次。
@@ -2274,26 +2282,55 @@ EOF
 	cloud_run 60 "$bin" mkdir "$OC_CLOUD_REMOTE" >"$tmp" 2>&1 || true
 	rm -f "$tmp" 2>/dev/null
 
-	cblog "上传 $(basename "$upload_path") -> $OC_CLOUD_REMOTE/$remote_name"
-	cloud_run 600 "$bin" upload "$upload_path" "$OC_CLOUD_REMOTE/$remote_name" >"$tmp" 2>&1
+	local up_bytes="$lsize"
+	[ "$encrypted" = "true" ] && up_bytes="${csize:-$lsize}"
+
+	# 超时不能写死。原先是固定 600 秒：1.4G 的备份在 20Mbps 上行（约 2.5MB/s）
+	# 需要 560 秒，带宽再低一点（或网盘限速）就必然超时；而超时之后远端会留下
+	# 一个**半截对象**，br_prune 会把它当成"最新一份"保留下来，下次还原才发现
+	# 是坏的。按体积推算，并留 3 倍余量 + 120 秒固定开销，下限 300 秒、上限 3 小时。
+	local up_to
+	up_to=$(( up_bytes / 120 / 1024 ))          # 保守按 ~120KB/s 估算
+	up_to=$(( up_to * 3 + 120 ))
+	[ "$up_to" -lt 300 ] && up_to=300
+	[ "$up_to" -gt 10800 ] && up_to=10800
+
+	cblog "上传 $(basename "$upload_path")（${up_bytes} 字节，超时 ${up_to}s）-> $OC_CLOUD_REMOTE/$remote_name"
+	cloud_run "$up_to" "$bin" upload "$upload_path" "$OC_CLOUD_REMOTE/$remote_name" >"$tmp" 2>&1
 	rc=$?
 	if [ "$rc" -ne 0 ]; then
 		err="$(cloud_tail_err "$tmp" 8)"
 		rm -f "$tmp" 2>/dev/null
+		# 失败/超时后必须清掉远端半截对象，否则它会冒充"最新一份备份"，
+		# 轮转还会因此删掉真正可用的旧备份。
+		if cloud_rm_remote "$remote_name" 2>/dev/null; then
+			cblog "已删除远端的未完成上传：$remote_name"
+		else
+			oc_warn "上传失败后未能删除远端残留（${OC_RM_ERR:-原因未知}）；请在网盘里手动删除 $remote_name，否则它会被当成一份有效备份"
+		fi
 		cloud_tmp_cleanup
 		cloud_fail "上传失败（rc=$rc）：${err:-无输出}"
 	fi
 	rm -f "$tmp" 2>/dev/null
 
+	# 上传成功也要核对远端大小：网盘客户端偶发"返回 0 但对象不完整"。
+	# 拿不到远端大小（ls 不支持/限流）时只告警，不判失败 —— 那种情况下
+	# 拒绝备份比留下一份可能不完整的备份更糟。
 	size="$(cloud_remote_size "$bin" "$remote_name")"
 	case "$size" in
 		''|*[!0-9]*)
-			if [ "$encrypted" = "true" ]; then
-				size="$csize"
-			else
-				size="$lsize"
-			fi
+			size="$up_bytes"
 			oc_warn "上传成功但未能从远端列表确认大小，使用本地大小 $size" ;;
+		*)
+			if [ "$size" -ne "$up_bytes" ]; then
+				# 大小不一致说明对象被截断：删掉它，别让它冒充有效备份。
+				if cloud_rm_remote "$remote_name" 2>/dev/null; then
+					cloud_tmp_cleanup
+					cloud_fail "上传后远端大小不一致（远端 $size / 本地 $up_bytes），已删除该对象"
+				fi
+				cloud_tmp_cleanup
+				cloud_fail "上传后远端大小不一致（远端 $size / 本地 $up_bytes），且未能删除；请手动删除 $remote_name"
+			fi ;;
 	esac
 	cloud_tmp_cleanup
 	printf '{"ok":true,"remote":"%s","size":%s,"encrypted":%s}\n' \

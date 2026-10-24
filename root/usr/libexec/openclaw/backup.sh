@@ -492,7 +492,7 @@ cmd_list() {
 	{
 		for f in "$dir"/openclaw-backup-*.tar.gz; do
 			if [ -f "$f" ]; then
-				printf '%s\t%s\n' "$(date -r "$f" +%s 2>/dev/null || echo 0)" "$f"
+				printf '%s\t%s\n' "$(oc_mtime "$f")" "$f"
 			fi
 		done
 	} | sort -rn 2>/dev/null | while IFS="$(printf '\t')" read -r ts f; do

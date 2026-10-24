@@ -72,6 +72,10 @@ fn = extract(src, 'cmd_list')
 lib_src = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
 json_fn = extract(lib_src, 'oc_json_str')
 check(json_fn is not None, '取到 oc_json_str（供转义用例）')
+# cmd_list 现在用 oc_mtime 取排序键（原来是 date -r，busybox 不支持）。
+# 桩里必须一并提供，否则排序键全空、列表变成 []。
+mtime_fn = extract(lib_src, 'oc_mtime')
+check(mtime_fn is not None, '取到 oc_mtime（cmd_list 的排序键来源）')
 check(fn is not None, '取到 cmd_list 函数体')
 if fn is None:
     print('    共 %s 项，%s 项失败' % (total, failed))
@@ -94,6 +98,7 @@ def run_list(dirpath, real_jstr=False):
     runner.write_text(
         '#!/bin/sh\n'
         'backup_dir() { printf "%s" "' + P(dirpath) + '"; }\n'
+        + (mtime_fn + '\n' if mtime_fn else '')
         + (json_fn + '\n' if real_jstr and json_fn else '')
         + jstr_def + fn + '\ncmd_list\n',
         encoding='utf-8', newline='\n')
