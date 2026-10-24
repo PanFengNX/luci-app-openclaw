@@ -109,6 +109,44 @@ if m:
     check("'读取云端列表失败'" in seg or '"读取云端列表失败"' in seg,
           '仍保留"读取云端列表失败"作为前缀')
 
+# ---------------------------------------------------------------- 共享样式
+# 9 个视图的共享 <style> 必须逐字节一致（本页专属样式要另开块）。
+# 这条不变量让"改一处样式九页生效"成立，也防止有人往共享块里塞单页规则。
+import hashlib
+
+sigs = {}
+for v in sorted((proj / 'luasrc/view/openclaw').glob('*.htm')):
+    mm = re.search(r'(?s)<style>(.*?)</style>', v.read_text(encoding='utf-8'))
+    if mm:
+        sigs[v.name] = hashlib.sha1(mm.group(1).encode()).hexdigest()[:12]
+check(len(set(sigs.values())) == 1, '十个视图的共享样式逐字节一致',
+      '唯一签名 %d 个' % len(set(sigs.values())))
+
+# 借鉴来的三个组件必须在共享块里（否则某些页面用不了）
+shared = (proj / 'luasrc/view/openclaw/setup.htm').read_text(encoding='utf-8')
+for cls in ('.oc-switch', '.is-copied', '.oc-skeleton'):
+    check(cls in shared, '共享样式含 %s' % cls)
+
+# 减少动画偏好要尊重（前庭功能障碍用户）
+check('prefers-reduced-motion' in shared, '共享样式尊重 prefers-reduced-motion')
+
+# 设置页的两个二值项用滑块而不是 select
+setupv = (proj / 'luasrc/view/openclaw/setup.htm').read_text(encoding='utf-8')
+check('oc-switch' in setupv, '设置页用滑块表达二值项')
+check('$(' + "'cfg-enabled').checked" in setupv, '开机自启按 checked 提交')
+
+# ---- qwen3.8-max 复审后修掉的具体问题（回归保护）----
+# 这些不是"审美建议"，而是能在浏览器里被证伪的布局/特异度缺陷。
+shared2 = (proj / 'luasrc/view/openclaw/setup.htm').read_text(encoding='utf-8')
+check(r'.oc-row .oc-copy' in shared2,
+      '.oc-copy 在 .oc-row 内保留强调色（否则被 .oc-row button 覆盖）')
+check('pointer:coarse' in shared2, '触摸设备放大命中区域')
+check('.oc-card>.oc-head:last-child' in shared2, '头部作为卡片末尾时不留分隔线')
+check('.oc-head>.oc-tag' in shared2, '卡片头部标签不被压缩')
+check('.oc-card>.oc-empty' in shared2, '空状态内边距不与卡片叠加')
+check('@supports not (color: color-mix' in shared2,
+      '不支持 color-mix 时有深色兜底色（否则深色主题正文只有 2.18:1）')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

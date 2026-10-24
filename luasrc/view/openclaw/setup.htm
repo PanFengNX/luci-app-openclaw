@@ -20,6 +20,24 @@
   --oc-accent:#5563d2;--oc-ok:#1f6b2c;--oc-warn:#c05621;--oc-err:#cc2222;
   --oc-r:12px;--oc-r-sm:8px;--oc-label:116px;}
 
+/* ── 兜底值的深色变体 ─────────────────────────────────────────────
+   :root 里那组 --oc-fg-dim / --oc-fg-mute 是按**浅色**标定的
+   （#4a4f57 在白底上是 8.24:1，很好）。但老浏览器不支持 color-mix 时会
+   一直用这组值，而深色主题下 #4a4f57 压在深色卡片上只有 2.18:1，
+   达不到 WCAG AA，正文会糊成一片。
+
+   下面用 @supports not (...) 检测"拿不到 color-mix"，此时才启用；
+   再按 prefers-color-scheme 给深色一套更亮的兜底。两层条件都不满足时
+   （支持 color-mix，或系统是浅色）保持原值不变。 */
+@supports not (color: color-mix(in srgb, red, transparent)) {
+  @media (prefers-color-scheme: dark) {
+    :root{
+      --oc-fg-dim:#c9d1dc;   /* 深色底约 11:1 */
+      --oc-fg-mute:#a8b3c2;  /* 深色底约 7:1 */
+    }
+  }
+}
+
 /* ── 卡片 ───────────────────────────────────────────────────────── */
 .oc-card{max-width:940px;box-sizing:border-box;border:1px solid var(--oc-line-soft);
   border-radius:var(--oc-r);background:var(--oc-surface);padding:18px 20px 20px;
@@ -208,6 +226,78 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
 .oc-list>li::before{content:"";position:absolute;left:2px;top:.72em;width:4px;height:4px;
   border-radius:50%;background:var(--oc-accent);opacity:.55}
 
+/* ── 开关（滑块）─────────────────────────────────────────────────
+   用于「开机自启」「崩溃转储」这类二值项：比 <select> 少一次点击，
+   且状态一眼可见。由 <input type="checkbox"> 驱动，无 JS 也能工作；
+   .oc-switch 里的 label 文字由调用方提供（可省略）。 */
+.oc-switch{display:inline-flex;align-items:center;gap:9px;cursor:pointer;
+  font-size:12.5px;user-select:none;min-height:32px}
+.oc-switch input{position:absolute;opacity:0;width:0;height:0;margin:0}
+.oc-switch .track{position:relative;flex:0 0 42px;width:42px;height:24px;
+  border-radius:999px;background:var(--oc-line);transition:background .16s ease}
+.oc-switch .track::after{content:"";position:absolute;top:3px;left:3px;width:18px;
+  height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.22);
+  transition:transform .16s ease}
+.oc-switch input:checked+.track{background:var(--oc-accent)}
+.oc-switch input:checked+.track::after{transform:translateX(18px)}
+.oc-switch input:focus-visible+.track{outline:2px solid var(--oc-accent);outline-offset:2px}
+.oc-switch input:disabled+.track{opacity:.5;cursor:not-allowed}
+.oc-switch input:disabled~.oc-switch-text{color:var(--oc-fg-mute)}
+
+/* ── 复制按钮的"已复制"反馈 ─────────────────────────────────────── */
+.oc-btn.is-copied,.oc-icon-btn.is-copied{border-color:var(--oc-ok)!important;
+  color:var(--oc-ok)!important;background:rgba(31,107,44,.10)!important}
+
+/* ── 加载骨架：等接口返回时占位，避免文字"跳"一下 ──────────────── */
+.oc-skeleton{display:inline-block;min-width:56px;height:1em;border-radius:4px;
+  background:var(--oc-surface-2);vertical-align:-2px;
+  animation:oc-pulse 1.4s ease-in-out infinite}
+@keyframes oc-pulse{0%,100%{opacity:.55}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){
+  .oc-skeleton{animation:none}
+  .oc-switch .track,.oc-switch .track::after{transition:none}
+}
+
+/* ── .oc-copy 在 .oc-row 里会被压成普通次要按钮 ───────────────────
+   `.oc-row button`（0,1,1）比 `.oc-copy`（0,1,0）特异度更高，所以状态页
+   「本机地址 / 当前访问地址」两行里的复制按钮丢掉了强调色与描边，看起来
+   和旁边的次要按钮一样。这里把容器内的形态显式补回来。 */
+.oc-row .oc-copy,.oc-rowline .oc-copy{background:transparent;
+  border-color:var(--oc-line);color:var(--oc-accent)}
+.oc-row .oc-copy:hover,.oc-rowline .oc-copy:hover{
+  background:var(--oc-surface-2);filter:none}
+
+/* 复制按钮比同行输入框矮 4px：行内基线不齐，触摸目标也偏小 */
+.oc-copy{display:inline-flex;align-items:center;justify-content:center;
+  min-height:32px;padding:0 12px;line-height:1.35;box-sizing:border-box;
+  vertical-align:middle}
+
+/* ── 触摸设备放大命中区域 ────────────────────────────────────────
+   32px 在鼠标下刚好，在手指下偏小（尤其相邻两个按钮）。只在 pointer:coarse
+   时放大，桌面端保持紧凑；不支持的浏览器忽略整段，布局不受影响。 */
+@media (pointer:coarse){
+  button,.oc-btn,select,input[type=text],input[type=password],input[type=number],
+  input[type=time],input[type=file]{height:auto;min-height:40px}
+  .oc-copy{min-height:36px}
+  .oc-switch{min-height:40px}
+  input[type=checkbox]{width:20px;height:20px}
+}
+
+/* ── 卡片头部的收缩规则 ──────────────────────────────────────────
+   空间不足时优先压缩标题文本，标签与按钮保持完整（否则窄屏下会被压成
+   两行或半个字）。 */
+.oc-head>.oc-tag,.oc-head>.oc-btn,.oc-head>button,.oc-head>label{
+  flex:0 0 auto;white-space:nowrap}
+.oc-head h3{overflow-wrap:anywhere}
+
+/* 头部作为卡片最后一个子元素时不该留着分隔线 */
+.oc-card>.oc-head:last-child{margin-bottom:0;padding-bottom:0;border-bottom:0}
+
+/* ── 空状态的内边距与卡片节奏对齐 ────────────────────────────────
+   .oc-empty 自己的 16px 水平内边距会叠在卡片的 20px 上，小屏下两侧缩进
+   合计 36px，可用宽度被吃掉一截；上下 22px 也与卡片的 18px 不一致。 */
+.oc-card>.oc-empty{padding:18px 12px;margin:2px 0}
+
 /* ── 窄屏 ─────────────────────────────────────────────────────── */
 @media (max-width:640px){
   .oc-card{padding:16px 14px}
@@ -243,13 +333,18 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
     </select>
   </div>
   <div class="oc-row"><label>开机自启</label>
-    <select id="cfg-enabled"><option value="1">启用</option><option value="0">禁用</option></select>
+    <label class="oc-switch">
+      <input type="checkbox" id="cfg-enabled">
+      <span class="track"></span>
+      <span class="oc-switch-text" id="cfg-enabled-text">启用</span>
+    </label>
   </div>
   <div class="oc-row"><label>崩溃转储</label>
-    <select id="cfg-coredump">
-      <option value="0">关闭（默认）</option>
-      <option value="1">开启</option>
-    </select>
+    <label class="oc-switch">
+      <input type="checkbox" id="cfg-coredump">
+      <span class="track"></span>
+      <span class="oc-switch-text" id="cfg-coredump-text">关闭</span>
+    </label>
   </div>
   <div class="oc-hint">
     开启后网关崩溃时会把 core 写到 <code>&lt;安装目录&gt;/logs/</code>，用于定位
@@ -311,16 +406,27 @@ function loadInfo(){
     var d = jp(r.data, {});
     $('cfg-port').value = d.port || '18789';
     $('cfg-bind').value = d.bind || 'lan';
-    // enabled / core_dumps 之前没有回填，下拉永远显示第一项（"启用"），
+    // enabled / core_dumps 之前没有回填，控件永远停在初值，
     // 与实际状态不符 —— 保存一次就会把禁用悄悄改回启用。
-    $('cfg-enabled').value = String(d.enabled == null ? 1 : d.enabled) === '0' ? '0' : '1';
-    $('cfg-coredump').value = String(d.core_dumps == null ? 0 : d.core_dumps) === '1' ? '1' : '0';
+    $('cfg-enabled').checked = String(d.enabled == null ? 1 : d.enabled) !== '0';
+    $('cfg-coredump').checked = String(d.core_dumps == null ? 0 : d.core_dumps) === '1';
+    syncSwitchText();
   });
 }
 
+// 滑块旁的文字跟着勾选状态变，不然只有一个位置色差，读不出"开/关"。
+function syncSwitchText(){
+  var e = $('cfg-enabled'), c = $('cfg-coredump');
+  if (e && $('cfg-enabled-text')) $('cfg-enabled-text').textContent = e.checked ? '启用' : '禁用';
+  if (c && $('cfg-coredump-text')) $('cfg-coredump-text').textContent = c.checked ? '开启' : '关闭';
+}
+$('cfg-enabled').onchange = syncSwitchText;
+$('cfg-coredump').onchange = syncSwitchText;
+
 $('btn-save').onclick = function(){
   var data = { port: $('cfg-port').value, bind: $('cfg-bind').value,
-    enabled: $('cfg-enabled').value, core_dumps: $('cfg-coredump').value };
+    enabled: $('cfg-enabled').checked ? '1' : '0',
+    core_dumps: $('cfg-coredump').checked ? '1' : '0' };
   post(API.save, data, function(r){
     if (!r || r.ok === false){
       alert('保存失败：' + ((r && (r.data || r.error)) || '服务无响应，请检查端口（1025-65535）后重试'));

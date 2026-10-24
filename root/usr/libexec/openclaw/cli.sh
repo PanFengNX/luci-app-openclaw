@@ -426,9 +426,61 @@ cmd_uninstall() {
 	printf '{"ok":true}\n'
 }
 
+oc_gateway_reachable() {
+	# oc_gateway_reachable <port> <bind> -> 0 能拿到 2xx/3xx
+	#
+	# 为什么要单独做这件事：procd 报 running、pgrep 也能看到进程，但网关
+	# 可能卡在启动中途（schema 迁移、插件初始化）或已半死。此时页面显示
+	# "运行中"，点「打开控制台」却是连接被拒 —— 用户没法判断到底哪一层坏了。
+	# 主动发一个 HTTP 请求就能把这两种情况分开。
+	#
+	# 与 iStoreOS 的 luci-app-openclawmgr 同一思路（它们的 status 里同时有
+	# running 和 reachable 两个字段，UI 上区分「运行中」与「运行中（未托管）」）。
+	#
+	# 顺序：bind 是 lan/auto 时先试 LAN IP，再回退 127.0.0.1；其余只试本地。
+	# 超时给得很短（连接 1 秒、总共 2 秒）：这个函数在 status 轮询路径上，
+	# 不能因为它把整个页面拖慢。
+	local port="$1" bind="${2:-lan}" code host
+	case "$port" in ''|*[!0-9]*) return 1 ;; esac
+	command -v curl >/dev/null 2>&1 || return 1
+
+	for host in $(oc_probe_hosts "$bind"); do
+		code="$(curl -s -o /dev/null --connect-timeout 1 --max-time 2 \
+			-w '%{http_code}' "http://${host}:${port}/" 2>/dev/null)"
+		case "$code" in
+			2[0-9][0-9]|3[0-9][0-9]) return 0 ;;
+		esac
+	done
+	return 1
+}
+
+oc_probe_hosts() {
+	# oc_probe_hosts <bind> -> 依次尝试的主机名
+	local bind="${1:-lan}" ip
+	case "$bind" in
+		lan|auto)
+			ip="$(uci -q get network.lan.ipaddr 2>/dev/null)"
+			case "$ip" in ''|*[!0-9.]*) ;; *) printf '%s\n' "$ip" ;; esac
+			;;
+	esac
+	# 127.0.0.1 永远试：网关默认也监听回环，
+	# 而 LAN IP 在 bind=loopback 时根本不该被访问。
+	printf '%s\n' 127.0.0.1
+}
+
 cmd_info() {
 	local st port token ver nver base free home ocdir
-	installed && st="$(running && echo running || echo stopped)" || st="not_installed"
+	if installed; then
+		if running; then
+			# 进程在，但端口未必应答：区分"真在服务"和"起来了但没通"。
+			# 此前只看 pgrep，网关卡在 schema 迁移 / 插件初始化时也报 running。
+			st="running"
+		else
+			st="stopped"
+		fi
+	else
+		st="not_installed"
+	fi
 	port="$(get_port)"
 	token="$(get_token)"
 	base="$(oc_base_dir)"
@@ -439,20 +491,23 @@ cmd_info() {
 		ver="$(HOME="$home" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" "$(oc_oc_bin)" --version 2>/dev/null | head -n1)"
 		nver="$( "$(oc_node_bin)" -v 2>/dev/null)"
 	fi
-	printf '{"status":"%s","installed":%s,"port":"%s","token":"%s","openclaw":"%s","node":"%s","node_mode":"%s","base_dir":"%s","openclaw_dir":"%s","oc_dir_custom":%s,"home":"%s","free_mb":"%s","arch":"%s","musl":%s,"bind":"%s","node_mirror":"%s","enabled":%s,"core_dumps":%s,"url":"http://%s:%s/"}\n' \
+	printf '{"status":"%s","installed":%s,"reachable":%s,"port":"%s","token":"%s","openclaw":"%s","node":"%s","node_mode":"%s","base_dir":"%s","openclaw_dir":"%s","oc_dir_custom":%s,"home":"%s","free_mb":"%s","arch":"%s","musl":%s,"bind":"%s","node_mirror":"%s","enabled":%s,"core_dumps":%s,"url":"http://%s:%s/"}\n' \
 		"$st" \
 		"$(installed && echo true || echo false)" \
-		"$port" "$token" "${ver:-}" "${nver:-}" \
+		"$(oc_gateway_reachable "$port" "$(uci_get main.bind lan)" && echo true || echo false)" \
+		"$(oc_json_str "$port")" "$(oc_json_str "$token")" \
+		"$(oc_json_str "${ver:-}")" "$(oc_json_str "${nver:-}")" \
 		"$(oc_node_mode)" \
 		"$(oc_json_str "$base")" "$(oc_json_str "$ocdir")" \
 		"$([ -n "$(uci_get main.openclaw_dir '')" ] && echo true || echo false)" \
-		"$home" "${free:-0}" \
+		"$(oc_json_str "$home")" "${free:-0}" \
 		"$(oc_arch)" "$(oc_is_musl && echo 1 || echo 0)" \
 		"$(uci_get main.bind lan)" \
 		"$(oc_json_str "$(uci_get main.node_mirror '')")" \
 		"$(uci_get main.enabled 0)" \
 		"$(uci_get main.core_dumps 0)" \
-		"$(uci -q get network.lan.ipaddr 2>/dev/null || echo 127.0.0.1)" "$port"
+		"$(oc_json_str "$(uci -q get network.lan.ipaddr 2>/dev/null || echo 127.0.0.1)")" \
+		"$(oc_json_str "$port")"
 }
 
 cmd_versions() {

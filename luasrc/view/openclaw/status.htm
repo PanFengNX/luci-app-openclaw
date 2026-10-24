@@ -20,6 +20,24 @@
   --oc-accent:#5563d2;--oc-ok:#1f6b2c;--oc-warn:#c05621;--oc-err:#cc2222;
   --oc-r:12px;--oc-r-sm:8px;--oc-label:116px;}
 
+/* ── 兜底值的深色变体 ─────────────────────────────────────────────
+   :root 里那组 --oc-fg-dim / --oc-fg-mute 是按**浅色**标定的
+   （#4a4f57 在白底上是 8.24:1，很好）。但老浏览器不支持 color-mix 时会
+   一直用这组值，而深色主题下 #4a4f57 压在深色卡片上只有 2.18:1，
+   达不到 WCAG AA，正文会糊成一片。
+
+   下面用 @supports not (...) 检测"拿不到 color-mix"，此时才启用；
+   再按 prefers-color-scheme 给深色一套更亮的兜底。两层条件都不满足时
+   （支持 color-mix，或系统是浅色）保持原值不变。 */
+@supports not (color: color-mix(in srgb, red, transparent)) {
+  @media (prefers-color-scheme: dark) {
+    :root{
+      --oc-fg-dim:#c9d1dc;   /* 深色底约 11:1 */
+      --oc-fg-mute:#a8b3c2;  /* 深色底约 7:1 */
+    }
+  }
+}
+
 /* ── 卡片 ───────────────────────────────────────────────────────── */
 .oc-card{max-width:940px;box-sizing:border-box;border:1px solid var(--oc-line-soft);
   border-radius:var(--oc-r);background:var(--oc-surface);padding:18px 20px 20px;
@@ -208,6 +226,78 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
 .oc-list>li::before{content:"";position:absolute;left:2px;top:.72em;width:4px;height:4px;
   border-radius:50%;background:var(--oc-accent);opacity:.55}
 
+/* ── 开关（滑块）─────────────────────────────────────────────────
+   用于「开机自启」「崩溃转储」这类二值项：比 <select> 少一次点击，
+   且状态一眼可见。由 <input type="checkbox"> 驱动，无 JS 也能工作；
+   .oc-switch 里的 label 文字由调用方提供（可省略）。 */
+.oc-switch{display:inline-flex;align-items:center;gap:9px;cursor:pointer;
+  font-size:12.5px;user-select:none;min-height:32px}
+.oc-switch input{position:absolute;opacity:0;width:0;height:0;margin:0}
+.oc-switch .track{position:relative;flex:0 0 42px;width:42px;height:24px;
+  border-radius:999px;background:var(--oc-line);transition:background .16s ease}
+.oc-switch .track::after{content:"";position:absolute;top:3px;left:3px;width:18px;
+  height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.22);
+  transition:transform .16s ease}
+.oc-switch input:checked+.track{background:var(--oc-accent)}
+.oc-switch input:checked+.track::after{transform:translateX(18px)}
+.oc-switch input:focus-visible+.track{outline:2px solid var(--oc-accent);outline-offset:2px}
+.oc-switch input:disabled+.track{opacity:.5;cursor:not-allowed}
+.oc-switch input:disabled~.oc-switch-text{color:var(--oc-fg-mute)}
+
+/* ── 复制按钮的"已复制"反馈 ─────────────────────────────────────── */
+.oc-btn.is-copied,.oc-icon-btn.is-copied{border-color:var(--oc-ok)!important;
+  color:var(--oc-ok)!important;background:rgba(31,107,44,.10)!important}
+
+/* ── 加载骨架：等接口返回时占位，避免文字"跳"一下 ──────────────── */
+.oc-skeleton{display:inline-block;min-width:56px;height:1em;border-radius:4px;
+  background:var(--oc-surface-2);vertical-align:-2px;
+  animation:oc-pulse 1.4s ease-in-out infinite}
+@keyframes oc-pulse{0%,100%{opacity:.55}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){
+  .oc-skeleton{animation:none}
+  .oc-switch .track,.oc-switch .track::after{transition:none}
+}
+
+/* ── .oc-copy 在 .oc-row 里会被压成普通次要按钮 ───────────────────
+   `.oc-row button`（0,1,1）比 `.oc-copy`（0,1,0）特异度更高，所以状态页
+   「本机地址 / 当前访问地址」两行里的复制按钮丢掉了强调色与描边，看起来
+   和旁边的次要按钮一样。这里把容器内的形态显式补回来。 */
+.oc-row .oc-copy,.oc-rowline .oc-copy{background:transparent;
+  border-color:var(--oc-line);color:var(--oc-accent)}
+.oc-row .oc-copy:hover,.oc-rowline .oc-copy:hover{
+  background:var(--oc-surface-2);filter:none}
+
+/* 复制按钮比同行输入框矮 4px：行内基线不齐，触摸目标也偏小 */
+.oc-copy{display:inline-flex;align-items:center;justify-content:center;
+  min-height:32px;padding:0 12px;line-height:1.35;box-sizing:border-box;
+  vertical-align:middle}
+
+/* ── 触摸设备放大命中区域 ────────────────────────────────────────
+   32px 在鼠标下刚好，在手指下偏小（尤其相邻两个按钮）。只在 pointer:coarse
+   时放大，桌面端保持紧凑；不支持的浏览器忽略整段，布局不受影响。 */
+@media (pointer:coarse){
+  button,.oc-btn,select,input[type=text],input[type=password],input[type=number],
+  input[type=time],input[type=file]{height:auto;min-height:40px}
+  .oc-copy{min-height:36px}
+  .oc-switch{min-height:40px}
+  input[type=checkbox]{width:20px;height:20px}
+}
+
+/* ── 卡片头部的收缩规则 ──────────────────────────────────────────
+   空间不足时优先压缩标题文本，标签与按钮保持完整（否则窄屏下会被压成
+   两行或半个字）。 */
+.oc-head>.oc-tag,.oc-head>.oc-btn,.oc-head>button,.oc-head>label{
+  flex:0 0 auto;white-space:nowrap}
+.oc-head h3{overflow-wrap:anywhere}
+
+/* 头部作为卡片最后一个子元素时不该留着分隔线 */
+.oc-card>.oc-head:last-child{margin-bottom:0;padding-bottom:0;border-bottom:0}
+
+/* ── 空状态的内边距与卡片节奏对齐 ────────────────────────────────
+   .oc-empty 自己的 16px 水平内边距会叠在卡片的 20px 上，小屏下两侧缩进
+   合计 36px，可用宽度被吃掉一截；上下 22px 也与卡片的 18px 不一致。 */
+.oc-card>.oc-empty{padding:18px 12px;margin:2px 0}
+
 /* ── 窄屏 ─────────────────────────────────────────────────────── */
 @media (max-width:640px){
   .oc-card{padding:16px 14px}
@@ -257,7 +347,7 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
 <div class="oc-card">
   <div class="oc-head">
     <h3>运行状态</h3>
-    <span id="st-badge">加载中…</span>
+    <span id="st-badge"><span class="oc-skeleton"></span></span>
   </div>
   <div class="oc-kpi-strip">
     <div class="oc-kpi"><span id="kpi-state" class="oc-badge oc-none">-</span>
@@ -559,10 +649,52 @@ function openControl(){
 
 function loadInfo(){
   get(API.info, function(r){
+    // 先判断"这次到底有没有读到信息"。读不到 ≠ 未安装：
+    // 曾把请求失败 / JSON 解析失败当成"未安装"，界面显示「未安装」+ 全部 '-'，
+    // 用户以为装好的运行环境被清掉了，实际只是这次没读到。
+    // 读不到时保持"未知"，并把原因显示出来，不覆盖已有状态。
+    if (!r || r.ok === false){
+      var why = r && r.error ? String(r.error) : (r && r.net ? '请求超时或连接中断' : '未知原因');
+      var b0 = $('st-badge');
+      if (b0){
+        b0.innerHTML = '';
+        var s0 = document.createElement('span');
+        s0.className = 'oc-badge oc-none';
+        s0.textContent = '状态未知';
+        b0.appendChild(s0);
+      }
+      var ks0 = $('kpi-state');
+      if (ks0){ ks0.className = 'oc-badge oc-none'; ks0.textContent = '状态未知'; }
+      var h0 = $('open-hint');
+      if (h0){ h0.textContent = '读取运行状态失败：' + why + '（不代表未安装，请点下方的刷新重试）'; h0.style.display = ''; }
+      return;
+    }
     var d = jp(r.data||'{}', {});
+    if (!d || typeof d !== 'object' || !d.status){
+      // 解析成功但没有 status 字段：同样是"读不到"，不是"未安装"。
+      var b1 = $('st-badge');
+      if (b1){
+        b1.innerHTML = '';
+        var s1 = document.createElement('span');
+        s1.className = 'oc-badge oc-none';
+        s1.textContent = '状态未知';
+        b1.appendChild(s1);
+      }
+      var ks1 = $('kpi-state');
+      if (ks1){ ks1.className = 'oc-badge oc-none'; ks1.textContent = '状态未知'; }
+      var h1 = $('open-hint');
+      if (h1){ h1.textContent = '后端返回的信息不完整（缺少 status 字段），请点刷新重试或查看日志'; h1.style.display = ''; }
+      return;
+    }
     state.info = d;
     var badge = $('st-badge'), cls='oc-none', txt='未安装';
-    if (d.status=='running'){ cls='oc-run'; txt='运行中'; }
+    if (d.status=='running'){
+      // 进程在 ≠ 端口应答。网关卡在 schema 迁移 / 插件初始化时 procd 仍报
+      // running，而「打开控制台」会直接被拒 —— 这里必须分开显示，
+      // 否则用户点了按钮只看到"连接失败"，不知道该等还是该修。
+      if (d.reachable === false){ cls='oc-none'; txt='运行中（端口未应答）'; }
+      else { cls='oc-run'; txt='运行中'; }
+    }
     else if (d.status=='stopped'){ cls='oc-stop'; txt='已停止'; }
     badge.innerHTML = '';
     var bspan = document.createElement('span');
@@ -598,6 +730,13 @@ function loadInfo(){
     // 网关地址仍然只作为文本展示：后端给的是它认为的绑定地址（lan 下可能是
     // 0.0.0.0 / LAN IP），只用于排查，不作为导航目标。
     $('st-url').textContent = (d.status=='running') ? (d.url || '-') : '-';
+    // 端口不应答时说明"下一步该做什么"，而不是让用户盯着"运行中"发愁。
+    if (d.status=='running' && d.reachable === false && $('open-hint')){
+      $('open-hint').textContent = '进程在运行，但网关端口暂无应答：'
+        + '通常是在做 schema 迁移或插件初始化（等 10-30 秒再刷新），'
+        + '也可能是启动失败 —— 可查看「日志」，或点「一键修复」。';
+      $('open-hint').style.display = '';
+    }
     // 「打开控制台」的导航目标与两个可复制地址：用浏览器主机名现拼，见 renderOpen()。
     renderOpen();
     // 当前版本已知，结合（可能更晚到达的）版本列表决定是否提示更新 Node / OpenClaw
@@ -1438,8 +1577,12 @@ function ocCopySay(btn, text){
   if (!btn.getAttribute('data-label')) btn.setAttribute('data-label', btn.textContent);
   if (btn._ocCopyTimer){ clearTimeout(btn._ocCopyTimer); btn._ocCopyTimer = null; }
   btn.textContent = text;
+  // 成功时给一个可见的绿色态，而不是只把文字换成"已复制"——
+  // 按钮很小，纯文字变化在大屏上很容易被忽略。
+  if (text === '已复制') btn.classList.add('is-copied');
   btn._ocCopyTimer = setTimeout(function(){
     btn._ocCopyTimer = null;
+    btn.classList.remove('is-copied');
     btn.textContent = btn.getAttribute('data-label') || '复制';
   }, 1200);
 }

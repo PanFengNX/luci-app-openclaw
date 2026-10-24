@@ -20,6 +20,24 @@
   --oc-accent:#5563d2;--oc-ok:#1f6b2c;--oc-warn:#c05621;--oc-err:#cc2222;
   --oc-r:12px;--oc-r-sm:8px;--oc-label:116px;}
 
+/* ── 兜底值的深色变体 ─────────────────────────────────────────────
+   :root 里那组 --oc-fg-dim / --oc-fg-mute 是按**浅色**标定的
+   （#4a4f57 在白底上是 8.24:1，很好）。但老浏览器不支持 color-mix 时会
+   一直用这组值，而深色主题下 #4a4f57 压在深色卡片上只有 2.18:1，
+   达不到 WCAG AA，正文会糊成一片。
+
+   下面用 @supports not (...) 检测"拿不到 color-mix"，此时才启用；
+   再按 prefers-color-scheme 给深色一套更亮的兜底。两层条件都不满足时
+   （支持 color-mix，或系统是浅色）保持原值不变。 */
+@supports not (color: color-mix(in srgb, red, transparent)) {
+  @media (prefers-color-scheme: dark) {
+    :root{
+      --oc-fg-dim:#c9d1dc;   /* 深色底约 11:1 */
+      --oc-fg-mute:#a8b3c2;  /* 深色底约 7:1 */
+    }
+  }
+}
+
 /* ── 卡片 ───────────────────────────────────────────────────────── */
 .oc-card{max-width:940px;box-sizing:border-box;border:1px solid var(--oc-line-soft);
   border-radius:var(--oc-r);background:var(--oc-surface);padding:18px 20px 20px;
@@ -208,6 +226,78 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
 .oc-list>li::before{content:"";position:absolute;left:2px;top:.72em;width:4px;height:4px;
   border-radius:50%;background:var(--oc-accent);opacity:.55}
 
+/* ── 开关（滑块）─────────────────────────────────────────────────
+   用于「开机自启」「崩溃转储」这类二值项：比 <select> 少一次点击，
+   且状态一眼可见。由 <input type="checkbox"> 驱动，无 JS 也能工作；
+   .oc-switch 里的 label 文字由调用方提供（可省略）。 */
+.oc-switch{display:inline-flex;align-items:center;gap:9px;cursor:pointer;
+  font-size:12.5px;user-select:none;min-height:32px}
+.oc-switch input{position:absolute;opacity:0;width:0;height:0;margin:0}
+.oc-switch .track{position:relative;flex:0 0 42px;width:42px;height:24px;
+  border-radius:999px;background:var(--oc-line);transition:background .16s ease}
+.oc-switch .track::after{content:"";position:absolute;top:3px;left:3px;width:18px;
+  height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.22);
+  transition:transform .16s ease}
+.oc-switch input:checked+.track{background:var(--oc-accent)}
+.oc-switch input:checked+.track::after{transform:translateX(18px)}
+.oc-switch input:focus-visible+.track{outline:2px solid var(--oc-accent);outline-offset:2px}
+.oc-switch input:disabled+.track{opacity:.5;cursor:not-allowed}
+.oc-switch input:disabled~.oc-switch-text{color:var(--oc-fg-mute)}
+
+/* ── 复制按钮的"已复制"反馈 ─────────────────────────────────────── */
+.oc-btn.is-copied,.oc-icon-btn.is-copied{border-color:var(--oc-ok)!important;
+  color:var(--oc-ok)!important;background:rgba(31,107,44,.10)!important}
+
+/* ── 加载骨架：等接口返回时占位，避免文字"跳"一下 ──────────────── */
+.oc-skeleton{display:inline-block;min-width:56px;height:1em;border-radius:4px;
+  background:var(--oc-surface-2);vertical-align:-2px;
+  animation:oc-pulse 1.4s ease-in-out infinite}
+@keyframes oc-pulse{0%,100%{opacity:.55}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){
+  .oc-skeleton{animation:none}
+  .oc-switch .track,.oc-switch .track::after{transition:none}
+}
+
+/* ── .oc-copy 在 .oc-row 里会被压成普通次要按钮 ───────────────────
+   `.oc-row button`（0,1,1）比 `.oc-copy`（0,1,0）特异度更高，所以状态页
+   「本机地址 / 当前访问地址」两行里的复制按钮丢掉了强调色与描边，看起来
+   和旁边的次要按钮一样。这里把容器内的形态显式补回来。 */
+.oc-row .oc-copy,.oc-rowline .oc-copy{background:transparent;
+  border-color:var(--oc-line);color:var(--oc-accent)}
+.oc-row .oc-copy:hover,.oc-rowline .oc-copy:hover{
+  background:var(--oc-surface-2);filter:none}
+
+/* 复制按钮比同行输入框矮 4px：行内基线不齐，触摸目标也偏小 */
+.oc-copy{display:inline-flex;align-items:center;justify-content:center;
+  min-height:32px;padding:0 12px;line-height:1.35;box-sizing:border-box;
+  vertical-align:middle}
+
+/* ── 触摸设备放大命中区域 ────────────────────────────────────────
+   32px 在鼠标下刚好，在手指下偏小（尤其相邻两个按钮）。只在 pointer:coarse
+   时放大，桌面端保持紧凑；不支持的浏览器忽略整段，布局不受影响。 */
+@media (pointer:coarse){
+  button,.oc-btn,select,input[type=text],input[type=password],input[type=number],
+  input[type=time],input[type=file]{height:auto;min-height:40px}
+  .oc-copy{min-height:36px}
+  .oc-switch{min-height:40px}
+  input[type=checkbox]{width:20px;height:20px}
+}
+
+/* ── 卡片头部的收缩规则 ──────────────────────────────────────────
+   空间不足时优先压缩标题文本，标签与按钮保持完整（否则窄屏下会被压成
+   两行或半个字）。 */
+.oc-head>.oc-tag,.oc-head>.oc-btn,.oc-head>button,.oc-head>label{
+  flex:0 0 auto;white-space:nowrap}
+.oc-head h3{overflow-wrap:anywhere}
+
+/* 头部作为卡片最后一个子元素时不该留着分隔线 */
+.oc-card>.oc-head:last-child{margin-bottom:0;padding-bottom:0;border-bottom:0}
+
+/* ── 空状态的内边距与卡片节奏对齐 ────────────────────────────────
+   .oc-empty 自己的 16px 水平内边距会叠在卡片的 20px 上，小屏下两侧缩进
+   合计 36px，可用宽度被吃掉一截；上下 22px 也与卡片的 18px 不一致。 */
+.oc-card>.oc-empty{padding:18px 12px;margin:2px 0}
+
 /* ── 窄屏 ─────────────────────────────────────────────────────── */
 @media (max-width:640px){
   .oc-card{padding:16px 14px}
@@ -223,6 +313,30 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   .oc-rowline{flex-wrap:wrap}
   .oc-rowline>span:last-child{text-align:left}
 }
+</style>
+
+<!-- 本页专属样式：不进共享 <style> 块。十个视图的共享块必须逐字节一致，
+     本页独有的东西（日志弹窗）单独放，避免破坏那条不变量。 -->
+<style id="oc-logmodal-style">
+/* ── 日志弹窗 ───────────────────────────────────────────────────
+   安装日志不再常驻页面底部：一个 280px 高的黑框平时只是占地方，又不美观。
+   改成按需弹出的浮层，关闭后页面回到正常高度；轮询在弹窗关闭时停止。 */
+.oc-modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9000;
+  display:flex;align-items:center;justify-content:center;padding:24px}
+.oc-modal{background:var(--oc-surface);border:1px solid var(--oc-line);
+  border-radius:var(--oc-r-sm);box-shadow:0 12px 40px rgba(0,0,0,.35);
+  width:100%;max-width:860px;max-height:82vh;display:flex;flex-direction:column;
+  box-sizing:border-box}
+.oc-modal-head{display:flex;align-items:center;gap:10px;padding:12px 16px;
+  border-bottom:1px solid var(--oc-line-soft);flex:0 0 auto}
+.oc-modal-head h4{margin:0;font-size:14px;font-weight:600;color:var(--oc-fg)}
+.oc-modal-head .oc-spacer{flex:1 1 auto}
+.oc-modal-body{padding:12px 16px;overflow:auto;flex:1 1 auto;min-height:0}
+.oc-modal-body .oc-log{height:auto;max-height:56vh;min-height:180px}
+.oc-modal-foot{padding:10px 16px;border-top:1px solid var(--oc-line-soft);
+  display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.oc-modal-foot .oc-spacer{flex:1 1 auto}
+@media (max-width:700px){ .oc-modal-mask{padding:8px} .oc-modal{max-height:92vh} }
 </style>
 
 <h2><a id="content" name="content">OpenClaw 助手 · 安装</a></h2>
@@ -270,6 +384,14 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
   <div class="oc-hint" id="in-node-hint"></div>
 
   <div id="in-ver-err" class="oc-hint oc-err" style="display:none;margin-bottom:8px"></div>
+
+  <div class="oc-actions">
+    <button id="btn-save-env" class="oc-btn ghost">保存设置</button>
+  </div>
+  <div class="oc-hint">
+    只把本页的选项（安装目录 / 程序位置 / 版本 / npm 源 / 代理）写入配置，
+    <b>不下载、不安装、不重启服务</b> —— 想先存下来、稍后再装时用它。
+  </div>
 </div>
 
 <div class="oc-card">
@@ -300,15 +422,35 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
 </div>
 
 <div class="oc-card">
-  <h3>安装与日志</h3>
+  <h3>安装与运行环境</h3>
   <div class="oc-actions" style="margin-top:0">
     <button id="btn-install">安装 / 修复运行环境</button>
+    <button id="btn-show-log" class="oc-btn ghost">查看安装日志</button>
     <button id="btn-uninstall" class="oc-btn danger">卸载运行时</button>
   </div>
+  <div class="oc-hint">
+    安装过程会弹出日志窗口实时显示进度；关闭窗口不影响后台安装，可随时点「查看安装日志」再看。
+  </div>
+</div>
 
-  <div style="margin-top:14px">
-    <div class="oc-hint">安装日志</div>
-    <div class="oc-log" id="in-log">（尚未开始）</div>
+<!-- 日志弹窗：默认隐藏。安装、卸载、保存都会按需弹出，
+     关闭时停止轮询，页面不再常驻一个黑色日志框。 -->
+<div class="oc-modal-mask" id="log-modal" style="display:none">
+  <div class="oc-modal" role="dialog" aria-modal="true" aria-labelledby="log-modal-title">
+    <div class="oc-modal-head">
+      <h4 id="log-modal-title">安装日志</h4>
+      <span class="oc-spacer"></span>
+      <span class="oc-badge oc-none" id="log-modal-state" style="display:none"></span>
+    </div>
+    <div class="oc-modal-body">
+      <div class="oc-log" id="in-log">（尚未开始）</div>
+    </div>
+    <div class="oc-modal-foot">
+      <button id="btn-log-autoscroll" class="oc-btn ghost">自动滚动：开</button>
+      <button id="btn-log-copy" class="oc-btn ghost">复制</button>
+      <span class="oc-spacer"></span>
+      <button id="btn-log-close" class="oc-btn ghost">关闭</button>
+    </div>
   </div>
 </div>
 
@@ -860,9 +1002,60 @@ function setInstallButtons(disabled){
   $('btn-install').disabled = disabled;
 }
 
+// ---- 日志弹窗控制 ----
+// openLogModal 只在"这一次确实有东西要看"时调用（开始安装 / 检测到后台在装 /
+// 用户主动点「查看安装日志」）。关闭只隐藏浮层，不影响后台轮询：
+// 轮询还负责在安装结束时恢复按钮，停掉会留下永久 disabled。
+function logModalOpen(){
+  var m = $('log-modal');
+  if (!m) return;
+  m.style.display = '';
+  // 打开时滚到底：用户想看的多半是"现在到哪一步了"
+  var b = $('in-log');
+  if (b) b.scrollTop = b.scrollHeight;
+}
+function logModalClose(){
+  var m = $('log-modal');
+  if (m) m.style.display = 'none';
+}
+
+// 自动滚动：安装日志很长，用户往上翻看历史时不该被强行拽回底部。
+var LOG_AUTOSCROLL = true;
+function syncAutoScrollBtn(){
+  var b = $('btn-log-autoscroll');
+  if (b) b.textContent = '自动滚动：' + (LOG_AUTOSCROLL ? '开' : '关');
+}
+function logScrollToEnd(){
+  if (!LOG_AUTOSCROLL) return;
+  var b = $('in-log');
+  if (b) b.scrollTop = b.scrollHeight;
+}
+
+// 弹窗标题右侧的状态药丸：running / done / failed / lost。
+// 用 className + textContent，不拼 innerHTML。
+function setLogState(st){
+  var el = $('log-modal-state');
+  if (!el) return;
+  // 只用页面已有的三个药丸色：oc-run（绿）/ oc-none（橙）/ oc-stop（灰）。
+  // 早先写了 oc-ok-run / oc-err，那两个类在样式表里不存在，结果是没底色。
+  var map = {
+    running: ['oc-run', '进行中'],
+    done:    ['oc-run', '已完成'],
+    failed:  ['oc-none', '失败'],
+    lost:    ['oc-none', '已中断']
+  };
+  var v = map[st];
+  if (!v){ el.style.display = 'none'; return; }
+  el.className = 'oc-badge ' + v[0];
+  el.textContent = v[1];
+  el.style.display = '';
+}
+
 function logSay(text){
-  $('in-log').textContent = text;
-  $('in-log').scrollTop = $('in-log').scrollHeight;
+  var b = $('in-log');
+  if (!b) return;
+  b.textContent = text;
+  logScrollToEnd();
 }
 
 // 安装结束后把「仍在进行」的接管提示从日志顶部摘掉：提示本身是页面加载时
@@ -888,10 +1081,11 @@ function startLogPoll(onDone){
   state.logTimer = setInterval(function(){
     get(API.ilog, function(r){
       $('in-log').textContent = (state.logHeader ? state.logHeader + '\n' : '') + (r.log || '（暂无输出）');
-      $('in-log').scrollTop = $('in-log').scrollHeight;
+      logScrollToEnd();
     });
     get(API.istatus, function(r){
       var d = jp(r.data||'{}', {});
+      setLogState(d.state);
       if (d.state === 'done' || d.state === 'failed'){
         clearInterval(state.logTimer); state.logTimer = null;
         // 已到终态，「仍在进行」的接管提示不应继续留在顶部。
@@ -930,6 +1124,8 @@ function checkInstallStatusOnLoad(){
     if (st === 'running'){
       // 日志每 2 秒整段重写，提示必须放进 logHeader 才会一直留在顶部。
       state.logHeader = '检测到后台安装仍在进行，已自动接管进度显示';
+      logModalOpen();
+      setLogState('running');
       logSay(state.logHeader);
       setInstallButtons(false);                       // 接管期间按钮可点，重复提交由后端拒绝
       startLogPoll();
@@ -939,6 +1135,7 @@ function checkInstallStatusOnLoad(){
     if (st !== 'done' && st !== 'failed' && st !== 'lost') return;
 
     state.logHeader = '';
+    setLogState(st);
     setInstallButtons(false);                         // 终态必须显式恢复（bfcache 会带回 disabled）
     if (st === 'done'){
       var ts = parseInt(d.done_at, 10);
@@ -991,30 +1188,27 @@ $('btn-reload-versions').onclick = function(){
   loadVersions(true);
 };
 
-$('btn-install').onclick = function(){
-  // 安装目录以页面上的控件为准；程序目录来自服务端，只做兜底检查
-  // （UCI 里的值可能是 SSH 手工写坏的），提交前就把"为什么不行"说清楚。
+// 收集本页所有需要保存的字段（目录 / 版本 / npm 源 / 代理）。
+// 安装与「仅保存设置」共用同一份逻辑：两处各写一遍迟早会漂移，
+// 而 save 对 openclaw_dir / node_mirror 是"给了就写"的语义，漏传就会冲掉。
+// 返回 null 表示校验没过（已经 alert / 写进日志）。
+function collectEnvPayload(){
   var chk = dirCheck();
   if (chk.base || chk.ocdir){
     var why = chk.base || chk.ocdir;
     alert('无法继续：' + why);
-    logSay('安装未提交：' + why + '\n');
-    return;
+    logSay('未提交：' + why + '\n');
+    return null;
   }
   var dir = chk.dirs.base;
-  if (!dir){
-    alert('请先选择或填写安装目录');
-    return;
-  }
+  if (!dir){ alert('请先选择或填写安装目录'); return null; }
   var ocdir = chk.dirs.ocdir;
   // 版本取下拉 / 手动输入框：手填为空或形状不合法时直接拦下，不提交。
   var oc = resolveVersion('in-oc', 'in-oc-manual', false, 'OpenClaw ');
-  if (oc === null) return;
+  if (oc === null) return null;
   var nd = resolveVersion('in-node', 'in-node-manual', true, 'Node.js ');
-  if (nd === null) return;
+  if (nd === null) return null;
 
-  // 先保存设置：安装按 UCI 里的目录/版本走。目录被安全校验拒绝时必须停下来
-  // 提示，否则安装会在后面以难懂的方式失败。
   var nm = nodeMirrorSave();
   var data = { base_dir: dir, oc_version: oc, node_version: nd,
     node_mirror: nm.node_mirror, node_mirror_clear: nm.clear };
@@ -1027,9 +1221,103 @@ $('btn-install').onclick = function(){
   if (state.registryTouched) data.npm_registry = $('in-registry').value;
   var proxy = String($('in-proxy').value || '').replace(/^\s+|\s+$/g, '');
   if (proxy) data.http_proxy = proxy;
+  // 安装流程还要把目录/版本原样传给 install（它按参数走，不读 UCI）
+  data.__install = { base_dir: dir, openclaw_dir: ocdir,
+                     oc_version: oc, node_version: nd };
+  data.__nm = nm;
+  return data;
+}
+
+// 「仅保存设置」：只写 UCI，不下载、不装、不重启。
+$('btn-save-env').onclick = function(){
+  var data = collectEnvPayload();
+  if (!data) return;
+  var inst = data.__install, nm = data.__nm;
+  delete data.__install; delete data.__nm;
+  this.disabled = true;
+  var btn = this;
+  post(API.save, data, function(sr){
+    btn.disabled = false;
+    if (!sr || sr.ok === false){
+      alert('保存失败：' + ((sr && (sr.data || sr.error)) || '服务无响应')
+        + '\n\n常见原因：安装目录不在数据盘上（不能是 /etc、/tmp、/var、/overlay、/rom），'
+        + '程序目录与安装目录冲突，或 npm 源 / 代理不是 http(s) 地址。');
+      return;
+    }
+    if (nm.node_mirror !== state.nodeMirrorCustom) state.nodeMirrorCustom = '';
+    // 保存后重新读一次：下一步安装要用服务端认定的值，不能只信页面控件。
+    loadInfo();
+  });
+};
+
+// 「查看安装日志」：有历史就显示，没有也打开（让用户看到"尚未开始"而不是无反应）。
+$('btn-show-log').onclick = function(){
+  logModalOpen();
+};
+
+$('btn-log-close').onclick = logModalClose;
+// 点遮罩空白处关闭（点弹窗内部不关）
+$('log-modal').onclick = function(e){
+  if (e.target === this) logModalClose();
+};
+// Esc 关闭
+document.addEventListener('keydown', function(e){
+  if (e.key === 'Escape' || e.keyCode === 27){
+    var m = $('log-modal');
+    if (m && m.style.display !== 'none') logModalClose();
+  }
+});
+$('btn-log-autoscroll').onclick = function(){
+  LOG_AUTOSCROLL = !LOG_AUTOSCROLL;
+  syncAutoScrollBtn();
+  logScrollToEnd();
+};
+$('btn-log-copy').onclick = function(){
+  var b = $('in-log');
+  if (!b) return;
+  var txt = b.textContent || '';
+  var btn = this, old = btn.textContent;
+  var done = function(ok){
+    btn.textContent = ok ? '已复制' : '复制失败';
+    setTimeout(function(){ btn.textContent = old; }, 1500);
+  };
+  // navigator.clipboard 只在 https / localhost 可用，路由器的 http 页面
+  // 一定拿不到，所以要留 execCommand 的退路。
+  if (navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(function(){ done(true); }, function(){ done(false); });
+    return;
+  }
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = txt;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    done(ok);
+  } catch(e){ done(false); }
+};
+syncAutoScrollBtn();
+
+$('btn-install').onclick = function(){
+  // 校验与字段收集都在 collectEnvPayload 里（与「仅保存设置」同一份逻辑）。
+  var payload = collectEnvPayload();
+  if (!payload) return;
+  var inst = payload.__install, nm = payload.__nm;
+  var data = payload;
+  delete data.__install; delete data.__nm;
+
+  // 从这一刻起才有日志可看：直接弹出来，用户点完按钮就能看到进度，
+  // 而不是先去找一个藏在页面底部的黑框。
+  logModalOpen();
+  setLogState('running');
+  syncAutoScrollBtn();
 
   post(API.save, data, function(sr){
     if (sr && sr.ok === false){
+      setLogState('failed');
       logSay('设置保存失败：服务端拒绝了本次配置。请按下面的提示检查对应输入框：\n'
         + '· 安装目录（本页第一行）：必须是数据盘上的绝对路径（如 /mnt/<磁盘>/OpenClaw），\n'
         + '  不能是 /etc、/tmp、/var、/overlay、/rom 等系统路径，也不能是符号链接；\n'
@@ -1045,14 +1333,15 @@ $('btn-install').onclick = function(){
     // 本次是用户主动发起的安装：作废页面初始化时那次状态查询（迟到的响应
     // 不能覆盖下面的「安装已提交」），并清掉可能残留的接管提示。
     state.istatSeq++; state.logHeader = '';
-    $('in-log').textContent = '安装已提交，正在准备…\n';
-    post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: nd }, function(r){
+    logSay('安装已提交，正在准备…\n');
+    post(API.install, inst, function(r){
       if (!r || r.ok === false){
         $('btn-install').disabled = false;
-        $('in-log').textContent = '安装启动失败：' + ((r && (r.data || r.error)) || '服务无响应，请重试') + '\n';
+        setLogState('failed');
+        logSay('安装启动失败：' + ((r && (r.data || r.error)) || '服务无响应，请重试') + '\n');
         return;
       }
-      $('in-log').textContent = '安装已启动，日志如下：\n';
+      logSay('安装已启动，日志如下：\n');
       startLogPoll();
     });
   });
@@ -1060,6 +1349,9 @@ $('btn-install').onclick = function(){
 
 $('btn-uninstall').onclick = function(){
   if (!confirm('将删除 OpenClaw 与 Node.js 运行时（保留配置数据），继续？')) return;
+  logModalOpen();
+  setLogState('running');
+  logSay('正在停止服务并删除运行时…\n（卸载过程没有实时日志，完成后会自动刷新状态）\n');
   post(API.service, { action: 'stop' }, function(){});
   var x = new XMLHttpRequest();
   x.open('POST', '<%=luci.dispatcher.build_url("admin","services","openclaw","api","run")%>', true);
@@ -1067,7 +1359,11 @@ $('btn-uninstall').onclick = function(){
   // 卸载要删目录，可能很慢。
   x.timeout = 900000;
   x.send('cmd=uninstall');
-  setTimeout(function(){ loadInfo(); }, 3000);
+  setTimeout(function(){
+    setLogState('done');
+    logSay('卸载请求已提交，正在刷新状态…\n');
+    loadInfo();
+  }, 3000);
 };
 
 // 先把目录控件画出来（此时 info 还没回来，程序位置显示「读取中」），

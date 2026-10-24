@@ -86,6 +86,21 @@ cli = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
 ctrl = (proj / 'luasrc/controller/openclaw.lua').read_text(encoding='utf-8')
 setup = (proj / 'luasrc/view/openclaw/setup.htm').read_text(encoding='utf-8')
 
+# 依赖清单必须覆盖代码真的会调用的命令（经验来自 iStoreOS 的 openclawmgr：
+# 它们把 xz-utils / ca-bundle 写进 Depends，而本包漏了）
+build = (proj / 'scripts/build_apk.py').read_text(encoding='utf-8')
+check('"xz-utils"' in build, 'DEPEND 含 xz-utils（tar -xJf 需要）')
+check('"ca-bundle"' in build, 'DEPEND 含 ca-bundle（https 下载需要）')
+check('rpcd reload' in build, 'postinst 会 reload rpcd（否则新 ACL 不生效）')
+
+# 网关可达性探测：进程在 ≠ 端口应答
+check('oc_gateway_reachable()' in cli, '有网关可达性探测函数')
+check('"reachable":%s' in cli, 'cmd_info 输出 reachable')
+check('oc_gateway_reachable "$port"' in cli, 'info 里真的去探测了')
+check('oc_probe_hosts()' in cli, '按 bind 选择探测主机')
+statusview = (proj / 'luasrc/view/openclaw/status.htm').read_text(encoding='utf-8')
+check('运行中（端口未应答）' in statusview, '状态页区分「端口未应答」')
+
 check('--core-dumps' in cli, 'cmd_save 接受 --core-dumps')
 check(re.search(r'--core-dumps\).*?0\|1', cli, re.S) is not None,
       '--core-dumps 只接受 0/1')
@@ -93,8 +108,8 @@ check('"core_dumps":%s' in cli, 'cmd_info 输出 core_dumps')
 check('"core_dumps"' in ctrl, '控制器 save 白名单含 core_dumps')
 check('id="cfg-coredump"' in setup, '设置·基础页有崩溃转储下拉')
 check('core_dumps: $(' in setup, '保存时提交 core_dumps')
-check("$('cfg-enabled').value = String" in setup,
-      '开机自启下拉会按服务端状态回填（原先不回填，保存一次就把禁用改回启用）')
+check("$('cfg-enabled').checked = String" in setup,
+      '开机自启开关会按服务端状态回填（原先不回填，保存一次就把禁用改回启用）')
 
 # ---------------------------------------------------------------- 行为断言
 def func(name):

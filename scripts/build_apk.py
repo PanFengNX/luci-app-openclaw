@@ -45,12 +45,26 @@ PKG_LICENSE = "MIT"
 PKG_ARCH = "noarch"
 # luci-lua-runtime / luci-compat are mandatory on OpenWrt 25.12: the Lua
 # controller bridge was split out of luci-base there.
+# 依赖必须覆盖"代码里真的会调用"的东西，而不能只列最常用的那几个。
+# 这两条是从 iStoreOS 的 luci-app-openclawmgr 学来的（它们把 xz-utils / ca-bundle
+# 显式写进 Depends），对照本包发现自己漏了：
+#
+#   xz-utils   Node.js 官方包是 .tar.xz。install.sh 里 `tar -xJf` 需要 xz；
+#              没有 xz 时它退化成 `tar -xf`，而 busybox tar 多半没编进 -J，
+#              结果是"解压失败（tar）"—— 一个完全看不出根因的错误。
+#              之前的 preflight 只是 oc_warn 一句"将尝试 busybox tar 直接解压"，
+#              等于把可能的失败留给用户。
+#   ca-bundle  nodejs.org / registry.npmjs.org / 百度网盘 CDN 全是 https。
+#              缺 CA 证书时 curl 报 "SSL certificate problem"，repair.sh 也只是
+#              给一句提示。这是本包功能的硬前提，该由包管理器装好。
 DEPEND = [
     "luci-base",
     "luci-lua-runtime",
     "luci-compat",
     "curl",
     "tar",
+    "xz-utils",
+    "ca-bundle",
     "jsonfilter",
 ]
 
@@ -77,6 +91,11 @@ chmod +x /usr/libexec/openclaw/cli.sh 2>/dev/null
 chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null
 chmod +x /usr/bin/openclaw 2>/dev/null
 rm -f /tmp/luci-indexcache /tmp/luci-modulecache
+# 本包发自己的 ACL 文件（/usr/share/rpcd/acl.d/luci-app-openclaw.json）。
+# rpcd 只在启动时读 ACL，装完不 reload 的话新会话仍按旧权限表判定，
+# 表现为"页面能打开、接口一律 403"，而清 LuCI 缓存治不了这个。
+# iStoreOS 的 luci-app-openclawmgr 在 postinst 里做了同样的事。
+[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd reload >/dev/null 2>&1
 # 上面的 chmod 都带 2>/dev/null：只读 /usr、overlay 写满时它们会静默失败，
 # 用户看到的是"命令不存在"而不是安装失败。这里统一复核一次可执行位，
 # 缺了就报错退出，让包管理器把这次安装标成失败。
@@ -312,7 +331,10 @@ def build_ipk(items, version, release, sde: int, out: Path):
     control = "\n".join([
         f"Package: {PKG_NAME}",
         f"Version: {version}-r{release}",
-        "Depends: libc, luci-base, luci-lua-runtime, luci-compat, curl, tar, jsonfilter",
+        # 从 DEPEND 派生：依赖只有一处定义，改 DEPEND 就够。
+        # 曾经在这里另写一份字符串，改 DEPEND 后包里的 Depends 没变，
+        # 而构建输出一切正常 —— 只有解包才能发现。
+        "Depends: libc, " + ", ".join(DEPEND),
         "Source: %s" % PKG_URL,
         "Section: luci",
         "Maintainer: openclaw",
