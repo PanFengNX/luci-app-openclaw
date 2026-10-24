@@ -190,6 +190,19 @@ check('缺少 xz，无法解压' in insh, 'install.sh 缺 xz 时直接失败并�
 repsh = (proj / 'root/usr/libexec/openclaw/repair.sh').read_text(encoding='utf-8')
 check('xz 已安装' in repsh or '缺少 xz' in repsh, 'repair.sh 检查 xz')
 
+# ---- README 的历史版本引用不能被升版时的盲替换改掉 ----
+readme = (proj / 'README.md').read_text(encoding='utf-8')
+check('（1.8.16 移除' in readme,
+      'README 保留「迁移功能 1.8.16 移除」这一历史事实（曾被盲替换成最新版号）')
+
+# ---- .run 的安装路径也要 reload rpcd（与 postinst 对齐）----
+bap = (proj / 'scripts/build_apk.py').read_text(encoding='utf-8')
+_ri = bap.index('tar -xzf')
+_rj = bap.index('"""', _ri)
+check('rpcd reload' in bap[_ri:_rj], '.run 安装器会 reload rpcd')
+check(bap.count('rpcd reload') == 2, 'postinst 与 .run 各一处 rpcd reload',
+      '实际 %d 处' % bap.count('rpcd reload'))
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

@@ -404,6 +404,10 @@ chmod +x /usr/libexec/openclaw/*.sh 2>/dev/null || true
 chmod +x /usr/bin/openclaw 2>/dev/null || true
 [ -x /etc/uci-defaults/99-openclaw ] && /etc/uci-defaults/99-openclaw
 rm -f /tmp/luci-indexcache
+# 与包管理器的 postinst 保持一致：本包发自己的 ACL 文件，rpcd 只在启动时
+# 读 ACL，装完不 reload 的话新会话仍按旧权限表判定（表现为接口 403）。
+# .run 路径没有包管理器代跑 postinst，所以这段必须在这里重复一次。
+[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd reload >/dev/null 2>&1
 echo "installed {PKG_NAME} {version}"
 echo "LuCI: 服务 -> OpenClaw 助手"
 """

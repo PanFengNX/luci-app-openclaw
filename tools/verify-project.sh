@@ -147,9 +147,12 @@ scan_forbid() {
 	local desc="$1" pat="$2"
 	local hit
 	# grep 输出形如 "文件:行号:内容"，注释行必须按"内容"部分判断，
-	# 直接在整行上过滤 ^# 是无效的（那会把所有命中都漏掉）
+	# 直接在整行上过滤 ^# 是无效的（那会把所有命中都漏掉）。
+	# .md 一律跳过：CHANGELOG / README 会引用被禁止的写法来解释
+	# "为什么不能这么写"，那是文档，不是代码。
 	hit="$(grep -rnE "$pat" root/ luasrc/ 2>/dev/null \
 		| grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' \
+		| grep -vE '^[^:]*\.(md|MD):' \
 		| head -5)"
 	if [ -n "$hit" ]; then
 		bad "$desc"
@@ -159,6 +162,11 @@ scan_forbid() {
 	fi
 }
 scan_forbid "无 pgrep -f 模糊强杀"          "pgrep -f '?openclaw'?[^)]*kill|kill -9 \\\$\\(pgrep"
+# 存在性判定同样不能用 pgrep -f：`pgrep -f 'openclaw.*(gateway|run)'` 会命中
+# 终端页的 `cli.sh run xxx` 和用户的 `tail -f ...openclaw.log gateway`，
+# 于是状态页谎报"运行中"、`--force` 不触发、后续操作全对着不存在的网关。
+# 判定进程要用 /proc/<pid>/cmdline 比对 argv（见 lib.sh 的 oc_gateway_pids）。
+scan_forbid "无 pgrep -f 做进程存在性判定"    "pgrep -f '[^']*openclaw[^']*\(gateway\|run\)"
 # 只挡**固定名**的临时文件（可预测名字 + 写入 = 符号链接攻击面）。
 # 名字里带 * 的是只读 glob（例如扫网关日志目录），不可能被预置链接，不算。
 # 原来的模式 /tmp/openclaw- 会把 "$base"/tmp/openclaw-*/openclaw-*.log 这种

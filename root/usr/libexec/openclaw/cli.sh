@@ -194,7 +194,19 @@ cmd_diag_poll() {
 }
 
 running() {
-	pgrep -f 'openclaw.*(gateway|run)' >/dev/null 2>&1 && return 0
+	# 「网关在跑」必须由 argv 判定，不能用 `pgrep -f 'openclaw.*(gateway|run)'`。
+	# 那个模式（本项目安全基线明令禁止）实测会把下面这些**不是网关**的进程
+	# 判成运行中：
+	#   /bin/sh /usr/libexec/openclaw/cli.sh run date    ← 终端页执行命令
+	#   /usr/bin/tail -f /var/log/openclaw.log gateway   ← 用户的 tail
+	# 后果不只是显示错误：状态页会认为服务正常，而实际操作全在对着不存在的
+	# 网关；`--force` 也不会被触发去清理真占端口的进程。
+	# oc_gateway_pids() 只接受 argv[0] 恰为私有 node 二进制、且含 gateway
+	# 子命令的进程，与 uninstall 的强杀用的是同一套判据。
+	[ -n "$(oc_gateway_pids 2>/dev/null)" ] && return 0
+	# pid 文件这条分支保留：procd 之外的启动方式（手工 nohup）可能没有
+	# 可识别的 argv。但文件目前只有 init.d 的 stop 会删、没有任何地方写，
+	# 所以它在标准路径上恒不成立，只作为兜底。
 	[ -f /var/run/openclaw.pid ] && \
 		kill -0 "$(cat /var/run/openclaw.pid 2>/dev/null)" 2>/dev/null && return 0
 	return 1

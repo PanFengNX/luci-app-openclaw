@@ -94,6 +94,16 @@ check('"ca-bundle"' in build, 'DEPEND 含 ca-bundle（https 下载需要）')
 check('rpcd reload' in build, 'postinst 会 reload rpcd（否则新 ACL 不生效）')
 
 # 网关可达性探测：进程在 ≠ 端口应答
+# running() 必须用 argv 判定，不能用 pgrep -f 模糊匹配。
+# 实测 `pgrep -f 'openclaw.*(gateway|run)'` 会把 `cli.sh run date`（终端页）
+# 和 `tail -f ...openclaw.log gateway` 都判成"网关在跑"。
+_i = cli.index('running() {')
+_j = cli.index('\n}\n', _i)
+runfn = cli[_i:_j]
+runfn_code = '\n'.join(l.split('#')[0] for l in runfn.splitlines())
+check('oc_gateway_pids' in runfn_code, 'running() 用 oc_gateway_pids 精确判定')
+check('pgrep -f' not in runfn_code, 'running() 里没有 pgrep -f 模糊匹配')
+
 check('oc_gateway_reachable()' in cli, '有网关可达性探测函数')
 check('"reachable":%s' in cli, 'cmd_info 输出 reachable')
 check('_reachable_flag' in cli, 'info 经由 _reachable_flag 决定是否探测')
