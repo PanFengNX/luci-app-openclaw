@@ -724,8 +724,12 @@ end
 function api_log()
 	local n = tonumber(http.formvalue("lines") or "300") or 300
 	if n < 1 then n = 1 elseif n > 5000 then n = 5000 end
-	local r = sh(SH .. " log " .. q(tostring(n)))
-	out({ ok = true, log = r })
+	-- src：file（管理脚本日志）| syslog（网关进程输出）| all（两者）
+	-- 白名单，不能把任意值拼进命令行。
+	local src = http.formvalue("src") or "file"
+	if src ~= "file" and src ~= "syslog" and src ~= "all" then src = "file" end
+	local r = sh(SH .. " log " .. q(tostring(n)) .. " " .. q(src))
+	out({ ok = true, log = r, src = src })
 end
 
 function api_mounts()

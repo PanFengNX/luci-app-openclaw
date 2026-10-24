@@ -203,6 +203,37 @@ check('rpcd reload' in bap[_ri:_rj], '.run 安装器会 reload rpcd')
 check(bap.count('rpcd reload') == 2, 'postinst 与 .run 各一处 rpcd reload',
       '实际 %d 处' % bap.count('rpcd reload'))
 
+# ---- 按钮点下去必须有可见反馈（用户报告"点了没反应，不知道生效没"）----
+stv2 = (proj / 'luasrc/view/openclaw/status.htm').read_text(encoding='utf-8')
+# 服务控制四个按钮不能再是"只发 POST 然后静默 setTimeout"
+for bid in ('btn-start', 'btn-stop', 'btn-restart'):
+    check(("$('%s').onclick" % bid) in stv2 and 'svcAction(' in stv2,
+          '%s 走 svcAction（有忙态与结果提示）' % bid)
+check("$('btn-start').onclick   = function(){ svcAction('start'); };" in stv2,
+      'btn-start 确实调用 svcAction')
+check('svcSay(' in stv2, '有统一的反馈出口 svcSay')
+check('svcBusy(' in stv2, '操作期间禁用同组按钮')
+check("svcSay('「' + label + '」失败" in stv2, '失败会说明原因而不是静默')
+
+# ---- 启动能看到日志 ----
+check('svcLogWatch' in stv2, '状态页有服务日志轮询')
+check("API.log + '?lines=200&src=all'" in stv2, '状态页取日志时带 src=all')
+check("if (action === 'start' || action === 'restart') svcLogWatch();" in stv2,
+      '点启动/重启自动展开日志')
+
+# ---- 日志页能切来源，且失败不再伪装成"无日志" ----
+lg = (proj / 'luasrc/view/openclaw/log.htm').read_text(encoding='utf-8')
+check('id="log-src"' in lg, '日志页有来源下拉')
+check("'?lines=400&src='" in lg, '日志页请求带 src')
+check('读取日志失败' in lg, '日志页失败时说清原因（原来显示"(无日志)"）')
+check("btn.textContent = '体检中…'" in lg, 'doctor 按钮有忙态')
+
+# ---- 后端 cmd_log 支持三来源 ----
+cl3 = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
+check('file|syslog|all' in cl3, 'cmd_log 接受 file/syslog/all')
+check('logread' in cl3, 'cmd_log 会读 logread')
+check('本机没有 logread' in cl3, '无 logread 时给出明确说明而不是空输出')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

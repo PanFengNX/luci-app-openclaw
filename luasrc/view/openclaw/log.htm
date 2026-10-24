@@ -330,10 +330,23 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
     <button id="btn-auto" class="oc-btn ghost">自动刷新：关</button>
     <button id="btn-doctor" class="oc-btn ghost">运行 doctor 体检</button>
     <button id="btn-export" class="oc-btn ghost">导出诊断包</button>
+    <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#888">
+      来源
+      <select id="log-src" style="font-size:12px;padding:3px 6px">
+        <option value="all">全部（推荐）</option>
+        <option value="file">管理脚本日志</option>
+        <option value="syslog">网关输出（logread）</option>
+      </select>
+    </span>
+    <span id="log-state" style="font-size:12px;color:#888"></span>
     <span id="export-hint" style="font-size:12px;color:#888"></span>
   </div>
   <div style="margin-top:10px" class="oc-out" id="out">加载中…</div>
-  <div class="oc-hint">日志来源于 /var/log/openclaw.log（管理脚本）与 procd 标准输出（可用 logread 查看）。</div>
+  <div class="oc-hint">
+    「管理脚本日志」是 /var/log/openclaw.log（安装 / 启动 / 修复动作）；
+    「网关输出」是网关进程的 stdout/stderr，由 procd 转进系统日志，
+    启动失败的真正原因通常在这里。
+  </div>
 </div>
 
 <script>
@@ -342,17 +355,55 @@ var DOC = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doc
 var timer = null;
 function $(id){ return document.getElementById(id); }
 function get(url, cb){ var x=new XMLHttpRequest(); x.open('GET',url,true); x.onreadystatechange=function(){ if(x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({});} } }; x.send(); }
-function refresh(){
-  get(LOG + '?lines=400', function(r){ $('out').textContent = r.log || '(无日志)'; $('out').scrollTop = $('out').scrollHeight; });
+function curSrc(){
+  var s = $('log-src');
+  return (s && s.value) ? s.value : 'all';
 }
+
+function refresh(){
+  var src = curSrc();
+  get(LOG + '?lines=400&src=' + encodeURIComponent(src), function(r){
+    var out = $('out');
+    // 失败必须说清：以前这里 `r.log || '(无日志)'` 会把"请求失败"渲染成
+    // "(无日志)"，用户以为真的没有日志。
+    if (!r || r.ok === false){
+      out.textContent = '读取日志失败：' + ((r && (r.data || r.error)) || '服务无响应，请重试');
+    } else {
+      out.textContent = r.log || '（该来源暂无日志）';
+    }
+    out.scrollTop = out.scrollHeight;
+    var st = $('log-state');
+    if (st) st.textContent = '更新于 ' + new Date().toLocaleTimeString();
+  });
+}
+
+$('log-src').onchange = function(){
+  $('out').textContent = '加载中…';
+  refresh();
+};
 $('btn-refresh').onclick = refresh;
 $('btn-auto').onclick = function(){
   if (timer){ clearInterval(timer); timer=null; $('btn-auto').textContent='自动刷新：关'; }
   else { timer = setInterval(refresh, 3000); $('btn-auto').textContent='自动刷新：开'; }
 };
 $('btn-doctor').onclick = function(){
-  $('out').textContent = '运行 openclaw doctor …\n';
-  get(DOC, function(r){ $('out').textContent += (r.output || '(无输出)'); });
+  var btn = this;
+  if (btn.disabled) return;
+  var label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '体检中…';
+  $('out').textContent = '运行 openclaw doctor …（可能需要 10-30 秒）\n';
+  if ($('log-state')) $('log-state').textContent = '体检中…';
+  get(DOC, function(r){
+    btn.disabled = false;
+    btn.textContent = label;
+    if (!r || r.ok === false){
+      $('out').textContent += '体检失败：' + ((r && (r.error || r.data)) || '服务无响应');
+    } else {
+      $('out').textContent += (r.output || '（无输出）');
+    }
+    if ($('log-state')) $('log-state').textContent = '体检结束 ' + new Date().toLocaleTimeString();
+  });
 };
 var EXPORT_URL = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","export")%>';
 function exportDone(btn, label, msg){

@@ -545,8 +545,46 @@ cmd_versions() {
 }
 
 cmd_log() {
-	local n="${2:-200}"
-	[ -f "$OC_LOGFILE" ] && tail -n "$n" "$OC_LOGFILE"
+	# cmd_log [N] [source]
+	#   source = file（默认）| syslog | all
+	#
+	# file   : /var/log/openclaw.log —— 管理脚本自己写的（安装/启动动作）
+	# syslog : logread 里 openclaw 相关的行 —— 网关进程的 stdout/stderr 由
+	#          procd 转发到 syslog（init.d 里 procd_set_param stdout 1）。
+	#          这份日志以前完全没在界面上暴露过，用户点「启动」后
+	#          看不到任何东西，只能猜。
+	# all    : 两者合并，用分节标题隔开。
+	local n="${2:-200}" src="${3:-file}"
+	case "$n" in ''|*[!0-9]*) n=200 ;; esac
+	case "$src" in
+		file|syslog|all) ;;
+		*) src=file ;;
+	esac
+
+	_log_file() {
+		[ -f "$OC_LOGFILE" ] && tail -n "$n" "$OC_LOGFILE"
+	}
+	_log_syslog() {
+		# logread 不一定存在（精简固件可能没装）；匹配 openclaw 标签。
+		# -e 正则取 "openclaw" 出现在方括号标签或行内，避免漏掉
+		# "daemon.err openclaw[123]:" 这类前缀。
+		command -v logread >/dev/null 2>&1 || {
+			printf '（本机没有 logread，无法读取系统日志）'
+			return 0
+		}
+		logread 2>/dev/null | grep -i 'openclaw' | tail -n "$n"
+	}
+
+	case "$src" in
+		file)   _log_file ;;
+		syslog) _log_syslog ;;
+		all)
+			printf '===== 管理脚本日志（%s）=====\n' "$OC_LOGFILE"
+			_log_file
+			printf '\n===== 网关输出（logread）=====\n'
+			_log_syslog
+			;;
+	esac
 }
 
 cmd_tasklog() {
