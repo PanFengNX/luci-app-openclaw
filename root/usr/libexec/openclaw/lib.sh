@@ -1137,19 +1137,64 @@ oc_rand_hex() {
 	fi
 }
 
+oc_rmtree() {
+	# oc_rmtree <path> -> 删除目录内容与目录本身；不存在时静默成功。
+	#
+	# 用 find -depth -delete 而不是 rm -rf：
+	#   * 不跟随符号链接（-delete 隐含 -depth，且 find 默认不解引用）；
+	#   * 递归删除的动作范围能一眼看懂；
+	#   * 与 install.sh 清理 node 目录的写法一致。
+	# 这是本项目对"删目录"的统一做法，新增代码请用它。
+	local d="${1:-}"
+	[ -n "$d" ] || return 0
+	[ -e "$d" ] || return 0
+	# 拒绝危险目标：这些目录删了会毁系统。调用方本不该传进来，
+	# 但删目录是不可逆操作，多一道闸不值钱。
+	case "$d" in
+		/|/tmp|/var|/etc|/usr|/root|/overlay|/rom|/proc|/sys|/dev|/run|/mnt|/bin|/sbin|/lib)
+			oc_err "拒绝删除系统路径：$d"
+			return 1 ;;
+	esac
+	find "$d" -depth -delete 2>/dev/null
+	return 0
+}
+
 oc_kill_tree() {
 	# Kill ONLY the actual gateway process (and its direct children).
 	# The old form was `pgrep -f openclaw | kill -9`: it matched *anything* with
 	# "openclaw" in the command line - including this very script and a user's
 	# `tail -f openclaw.log` - and the uninstall would kill itself halfway.
-	local p kids
+	#
+	# 先 TERM 再等，最后才 KILL：直接 SIGKILL 会让 sqlite 的 -wal 留在热状态，
+	# 而且进程还没释放 18789 时下一步 start 就撞端口。调用方（uninstall）
+	# 在这之后会 rm -rf 程序目录，所以必须确认进程真的没了。
+	local p kids i
+	# 第一轮：TERM，给 30 秒（与 init.d 的 term_timeout 对齐）
+	for p in $(oc_gateway_pids); do
+		kids="$(pgrep -P "$p" 2>/dev/null)"
+		# shellcheck disable=SC2086
+		[ -n "$kids" ] && kill $kids 2>/dev/null
+		kill "$p" 2>/dev/null
+	done
+	i=0
+	while [ -n "$(oc_gateway_pids)" ] && [ "$i" -lt 30 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	# 第二轮：仍在的才 KILL
 	for p in $(oc_gateway_pids); do
 		kids="$(pgrep -P "$p" 2>/dev/null)"
 		# shellcheck disable=SC2086
 		[ -n "$kids" ] && kill -9 $kids 2>/dev/null
 		kill -9 "$p" 2>/dev/null
 	done
-	return 0
+	# 再等 5 秒确认；还有残留就返回失败，让调用方别急着 rm -rf
+	i=0
+	while [ -n "$(oc_gateway_pids)" ] && [ "$i" -lt 5 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	[ -z "$(oc_gateway_pids)" ]
 }
 
 oc_gateway_pids() {

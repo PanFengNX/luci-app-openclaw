@@ -12,6 +12,52 @@ local jsonc = require "luci.jsonc"
 local SH     = "/usr/libexec/openclaw/cli.sh"
 local MODELS = "/usr/libexec/openclaw/models.sh"
 
+local function is_post()
+	-- http.getenv 在 luci-compat 里一直存在，但取不到时按「不是 POST」处理，
+	-- 宁可拒绝也不要把敏感参数当成查询串接受。
+	local m = nil
+	if http.getenv then m = http.getenv("REQUEST_METHOD") end
+	return (m or ""):upper() == "POST"
+end
+
+-- ---------------------------------------------------------------- CSRF
+-- 写操作必须 POST。此前 56 个端点里只有 13 个自己调 is_post()，其余
+-- （install / service / save / run / restore / backup_* / diag_run …）
+-- 用 GET 就能触发：管理员登录着 LuCI 时，任意第三方页面一个 <img src> 或
+-- 表单就能让设备还原备份、装任意 npm 包。
+--
+-- 这里在**入口层**一次性做，而不是逐个函数补 —— 逐个补必然漏。
+-- 白名单只列真正只读的端点；新增端点若忘记登记，会被默认要求 POST。
+-- 漏登记的**安全方向**是安全的（不会静默放行写操作），但**功能会坏**：
+-- 前端用 GET 调的只读端点会直接报「请使用 POST」。所以新增端点时：
+--   * 前端用 post() 调的 → 不必登记；
+--   * 前端用 get() / window.open() 调的 → 必须登记进 READ_ONLY，
+--     否则该功能立刻失效（历史上 backup_download 就踩过）。
+-- 改前端调用方式时也要回来核对这张表。
+local READ_ONLY = {
+	info = true, versions = true, check = true, istatus = true, ilog = true,
+	-- backup_download 前端用 window.open 触发（浏览器下载只能 GET），
+	-- 且它只是把已有归档回传，不修改任何状态 —— 属于只读。
+	backup_download = true,
+	changelog = true, presets = true, models = true, model_current = true,
+	models_url = true, log = true, mounts = true, node_existing = true,
+	providers = true, backups = true, backup_log = true,
+	devices_pending = true,
+	cloud_status = true, cloud_install_poll = true, cloud_ls = true,
+	cloud_pass_status = true, cloud_encrypt_status = true,
+	cloud_schedule_status = true, cloud_cli_check = true, export = true,
+}
+
+local function guarded(name, fn)
+	return function()
+		if not READ_ONLY[name] and not is_post() then
+			out({ ok = false, error = "请使用 POST 提交（" .. name .. "）" })
+			return
+		end
+		return fn()
+	end
+end
+
 function index()
 	entry({"admin", "services", "openclaw"}, firstchild(), _("OpenClaw 助手"), 60).dependent = false
 	entry({"admin", "services", "openclaw", "status"},   template("openclaw/status"),   _("状态"),      10)
@@ -28,67 +74,68 @@ function index()
 	entry({"admin", "services", "openclaw", "log"},      template("openclaw/log"),      _("日志"),      50)
 
 	-- JSON API
-	entry({"admin", "services", "openclaw", "api", "info"},      call("api_info")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "info"},      call(guarded("info", api_info))).leaf = true
 	-- 完整网关 token 只走这个端点（POST）；info 里只有掩码。
-	entry({"admin", "services", "openclaw", "api", "token"},     call("api_token")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "versions"},  call("api_versions")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "check"},     call("api_check")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "install"},   call("api_install")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "istatus"},   call("api_istatus")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "ilog"},      call("api_ilog")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "changelog"}, call("api_changelog")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "service"},   call("api_service")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "save"},      call("api_save")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "presets"},   call("api_presets")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "models"},    call("api_models")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "model_current"}, call("api_model_current")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "models_url"}, call("api_models_url")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "apply"},     call("api_apply")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "run"},       call("api_run")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "channels"},  call("api_channels")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "log"},       call("api_log")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "mounts"},    call("api_mounts")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "node_existing"}, call("api_node_existing")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "devices_pending"}, call("api_devices_pending")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "devices_approve"}, call("api_devices_approve")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "doctor"},    call("api_doctor")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "providers"}, call("api_providers")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "repair"},    call("api_repair")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "token"},     call(guarded("token", api_token))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "versions"},  call(guarded("versions", api_versions))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "check"},     call(guarded("check", api_check))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "install"},   call(guarded("install", api_install))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "uninstall"}, call(guarded("uninstall", api_uninstall))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "istatus"},   call(guarded("istatus", api_istatus))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "ilog"},      call(guarded("ilog", api_ilog))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "changelog"}, call(guarded("changelog", api_changelog))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "service"},   call(guarded("service", api_service))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "save"},      call(guarded("save", api_save))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "presets"},   call(guarded("presets", api_presets))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "models"},    call(guarded("models", api_models))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "model_current"}, call(guarded("model_current", api_model_current))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "models_url"}, call(guarded("models_url", api_models_url))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "apply"},     call(guarded("apply", api_apply))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "run"},       call(guarded("run", api_run))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "channels"},  call(guarded("channels", api_channels))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "log"},       call(guarded("log", api_log))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "mounts"},    call(guarded("mounts", api_mounts))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "node_existing"}, call(guarded("node_existing", api_node_existing))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "devices_pending"}, call(guarded("devices_pending", api_devices_pending))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "devices_approve"}, call(guarded("devices_approve", api_devices_approve))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "doctor"},    call(guarded("doctor", api_doctor))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "providers"}, call(guarded("providers", api_providers))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "repair"},    call(guarded("repair", api_repair))).leaf = true
 	-- async diagnostics: start in background, poll for output (no request timeout)
-	entry({"admin", "services", "openclaw", "api", "diag_run"},  call("api_diag_run")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "diag_poll"}, call("api_diag_poll")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "backups"},   call("api_backups")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "backup_create"}, call("api_backup_create")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "backup_verify"}, call("api_backup_verify")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "backup_delete"}, call("api_backup_delete")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "backup_log"}, call("api_backup_log")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "backup_upload"}, call("api_backup_upload")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "backup_download"}, call("api_backup_download")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "restore"}, call("api_restore")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "diag_run"},  call(guarded("diag_run", api_diag_run))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "diag_poll"}, call(guarded("diag_poll", api_diag_poll))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "backups"},   call(guarded("backups", api_backups))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "backup_create"}, call(guarded("backup_create", api_backup_create))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "backup_verify"}, call(guarded("backup_verify", api_backup_verify))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "backup_delete"}, call(guarded("backup_delete", api_backup_delete))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "backup_log"}, call(guarded("backup_log", api_backup_log))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "backup_upload"}, call(guarded("backup_upload", api_backup_upload))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "backup_download"}, call(guarded("backup_download", api_backup_download))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "restore"}, call(guarded("restore", api_restore))).leaf = true
 	-- 百度网盘云备份：业务全部在 cloud.sh 里，这里只做参数校验与透传
-	entry({"admin", "services", "openclaw", "api", "cloud_status"},  call("api_cloud_status")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_install"}, call("api_cloud_install")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_status"},  call(guarded("cloud_status", api_cloud_status))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_install"}, call(guarded("cloud_install", api_cloud_install))).leaf = true
 	-- 后台安装 + 轮询：请求只负责启动 worker，进度从 cloud.sh 的日志文件读
-	entry({"admin", "services", "openclaw", "api", "cloud_install_bg"}, call("api_cloud_install_bg")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_install_poll"}, call("api_cloud_install_poll")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_login_url"},  call("api_cloud_login_url")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_login_code"}, call("api_cloud_login_code")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_logout"}, call("api_cloud_logout")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_upload"}, call("api_cloud_upload")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_ls"},     call("api_cloud_ls")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_download"}, call("api_cloud_download")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_rm"},     call("api_cloud_rm")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_pass_status"}, call("api_cloud_pass_status")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_pass_set"},    call("api_cloud_pass_set")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_pass_clear"},  call("api_cloud_pass_clear")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_encrypt_status"}, call("api_cloud_encrypt_status")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_encrypt_set"},    call("api_cloud_encrypt_set")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_schedule_status"}, call("api_cloud_schedule_status")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_schedule_set"},    call("api_cloud_schedule_set")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_cli_check"},      call("api_cloud_cli_check")).leaf = true
-	entry({"admin", "services", "openclaw", "api", "cloud_cli_update"},     call("api_cloud_cli_update")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_install_bg"}, call(guarded("cloud_install_bg", api_cloud_install_bg))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_install_poll"}, call(guarded("cloud_install_poll", api_cloud_install_poll))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_login_url"},  call(guarded("cloud_login_url", api_cloud_login_url))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_login_code"}, call(guarded("cloud_login_code", api_cloud_login_code))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_logout"}, call(guarded("cloud_logout", api_cloud_logout))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_upload"}, call(guarded("cloud_upload", api_cloud_upload))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_ls"},     call(guarded("cloud_ls", api_cloud_ls))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_download"}, call(guarded("cloud_download", api_cloud_download))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_rm"},     call(guarded("cloud_rm", api_cloud_rm))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_pass_status"}, call(guarded("cloud_pass_status", api_cloud_pass_status))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_pass_set"},    call(guarded("cloud_pass_set", api_cloud_pass_set))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_pass_clear"},  call(guarded("cloud_pass_clear", api_cloud_pass_clear))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_encrypt_status"}, call(guarded("cloud_encrypt_status", api_cloud_encrypt_status))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_encrypt_set"},    call(guarded("cloud_encrypt_set", api_cloud_encrypt_set))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_schedule_status"}, call(guarded("cloud_schedule_status", api_cloud_schedule_status))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_schedule_set"},    call(guarded("cloud_schedule_set", api_cloud_schedule_set))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_cli_check"},      call(guarded("cloud_cli_check", api_cloud_cli_check))).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_cli_update"},     call(guarded("cloud_cli_update", api_cloud_cli_update))).leaf = true
 	-- 诊断包下载（openclaw.sh export）：生成后立刻作为附件回传
-	entry({"admin", "services", "openclaw", "api", "export"}, call("api_export")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "export"}, call(guarded("export", api_export))).leaf = true
 end
 
 local function sh(args)
@@ -142,13 +189,6 @@ end
 -- 解析成全局查找（nil），一调就 "attempt to call a nil value"，整个端点 500。
 -- 这个坑本项目已经踩过一次（RUNDIR 声明晚于 api_apply 的使用）。
 --
-local function is_post()
-	-- http.getenv 在 luci-compat 里一直存在，但取不到时按「不是 POST」处理，
-	-- 宁可拒绝也不要把敏感参数当成查询串接受。
-	local m = nil
-	if http.getenv then m = http.getenv("REQUEST_METHOD") end
-	return (m or ""):upper() == "POST"
-end
 
 -- 光强制 POST 还不够：http.formvalue() 同时查 POST body 与 URL query，
 -- 所以 `POST /api/apply?apikey=...` 依然能生效，而 uhttpd 记录的是完整 URL。
@@ -258,6 +298,17 @@ function api_check()
 	local r = sh("/usr/libexec/openclaw/versions.sh check " .. q(ocv) .. " " .. q(nv))
 	local ok = r:find('"ok":true') ~= nil
 	out({ ok = ok, data = r })
+end
+
+function api_uninstall()
+	-- 专用端点，而不是塞进 api/run 的白名单：
+	--   * api/run 的 RUN_CMDS 语义是"openclaw CLI 的子命令"，uninstall 不是；
+	--   * 卸载会 rm -rf 程序目录，必须能返回真实的退出码给前端。
+	-- 同步执行：删的是程序目录与 node 运行时（不含数据），几十秒量级；
+	-- 前端给了长超时。返回 run_rc 的结果，前端据此显示成功/失败。
+	if not is_post() then out({ ok = false, error = "请使用 POST 提交" }); return end
+	local ok = run_rc(SH .. " uninstall")
+	out({ ok = ok })
 end
 
 function api_install()

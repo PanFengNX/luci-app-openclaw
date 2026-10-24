@@ -66,6 +66,18 @@ export HOME
 PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 
+# TMPDIR / STATE_DIR 必须与 init.d 一致，否则 CLI 和网关跑在两套目录里：
+#   * CLI 的临时与锁目录会落到 /tmp/openclaw-<uid>，网关落在
+#     <安装目录>/tmp/openclaw-<uid> —— 这正是历史上
+#     "device identity coordinator directory belongs to another user"
+#     那类问题的土壤；
+#   * CLI 每天十几 MB 的日志写进 tmpfs（内存盘），重启就没、也永不清理。
+# init.d 里已经有这三个变量，这里补齐同样的值。
+TMPDIR="$(oc_base_dir)/tmp"
+OPENCLAW_STATE_DIR="$(oc_state_dir)"
+OPENCLAW_CONFIG_PATH="$(oc_state_dir)/openclaw.json"
+export TMPDIR OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH
+
 # ---------------------------------------------------------------- 降权
 # CLI 会在 $HOME/.openclaw 下写配置、凭据和会话文件。这些文件必须属于网关
 # 服务的运行用户，否则 SSH 里改完配置后 LuCI / 服务读不到，devices approve

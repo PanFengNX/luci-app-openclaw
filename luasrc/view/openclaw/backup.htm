@@ -609,8 +609,11 @@ function get(url, cb, timeoutMs){
   x.onreadystatechange = function(){ if (x.readyState==4){ try{fin(JSON.parse(x.responseText));}catch(e){fin({ok:false});} } };
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
-  // 状态与轮询：20 秒拿不到就当这次失败，让调用方重试。
-  x.timeout = 20000;
+  // 这里必须 send()，不能再写 x.timeout —— 上面已经按调用方传入的
+  // timeoutMs 设好了（默认 30 秒）。原先这里无条件写 20000，把
+  // 调用方要的 30000/900000 全部覆盖掉：备份、恢复、云端上传都属于
+  // 分钟级操作，20 秒必然超时被误判为失败。
+  // status.htm 修过同一个 bug，这里当时漏了。
   x.send();
 }
 function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }

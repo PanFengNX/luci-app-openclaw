@@ -97,6 +97,10 @@ OC_DIR="${OC_DIR_ARG:-$(uci_get main.openclaw_dir '')}"
 OC_DIR="${OC_DIR%/}"
 HOME_DIR="$BASE_DIR/home"
 
+# 上一轮的日志先留一份再清空：直接 `: >` 会把它抹掉。
+# 这台机器的 syslog 是 128KB 环形缓冲、被 netifd 的 DHCPv6 刷得很勤
+# （只存约 30 秒），事后根本翻不到安装现场 —— 这份 .1 是唯一线索。
+[ -s "${OC_INSTALLLOG:-}" ] && mv -f "$OC_INSTALLLOG" "$OC_INSTALLLOG.1" 2>/dev/null
 : >"$OC_INSTALLLOG" 2>/dev/null || OC_INSTALLLOG="${OC_RUNDIR:-/tmp/.openclaw}/install.log"
 : >"$OC_INSTALLLOG" 2>/dev/null || true
 # 只写一次。install-bg 会把本进程的 stdout 也重定向到 $OC_INSTALLLOG，
@@ -601,6 +605,32 @@ install_openclaw() {
 	export npm_config_tmp="$OC_DL"
 	export npm_config_prefix="$OC_DIR"
 
+	# ---- 覆盖安装前必须先停服务 ----------------------------------------
+	# 整份脚本原先没有一处 init.d stop，直接在运行中的网关脚下替换
+	# node_modules：旧进程继续持有已被 unlink 的模块句柄，新版本不生效
+	# （UI 却显示"已安装"），native .node 被替换/截断还可能导致段错误。
+	# procd 的 start 对已运行的实例是空操作，所以收尾也必须用 restart。
+	if [ -x /etc/init.d/openclaw ] && /etc/init.d/openclaw running >/dev/null 2>&1; then
+		ilog "检测到网关正在运行，先停止再覆盖安装"
+		/etc/init.d/openclaw stop >/dev/null 2>&1
+		# 等进程真的退出（最多 40 秒）：procd 的 stop 是异步的，
+		# 立刻 npm install 仍会与正在退出的进程抢同一批文件。
+		_i=0
+		while [ -n "$(oc_gateway_pids 2>/dev/null)" ] && [ "$_i" -lt 40 ]; do
+			sleep 1
+			_i=$((_i + 1))
+		done
+		if [ -n "$(oc_gateway_pids 2>/dev/null)" ]; then
+			ilog "WARN: 进程未在 40s 内退出，强制清理"
+			# oc_kill_tree 现在先 TERM 再 KILL，并返回"是否真的清空了"。
+			# 没清空就继续 npm install，等于在活进程脚下改 node_modules ——
+			# 正是这次要修的问题本身。所以这里必须检查返回值并中止。
+			if ! oc_kill_tree; then
+				die "仍有网关进程无法终止，已中止安装（在运行中的进程上覆盖 node_modules 会损坏安装）。请手动检查后重试：ps | grep openclaw"
+			fi
+		fi
+	fi
+
 	ilog "npm install -g openclaw@$OCV  (registry=$reg)"
 	# npm 的输出写到独立文件：$OC_INSTALLLOG 由 ilog 的 tee -a 追加，
 	# 两个写入者（外加调用方的 stdout 重定向）同时写一个文件会产生半截行。
@@ -784,14 +814,44 @@ svc_running() {
 }
 
 svc_wait_running() {
-	# 最多等 15 秒：procd 的 start 是异步的，返回 0 不代表网关进程已经起来。
-	local i=0
-	while [ "$i" -lt 15 ]; do
-		svc_running && return 0
+	# 等网关真的可用，不只是"进程存在"。
+	#
+	# 原来等 15 秒 —— 而这台机器的实测冷启动是 28s，历史上有过 60-90s。
+	# 于是安装日志一稳定写「WARN: 服务启动失败」，用户照提示去点「一键修复」，
+	# 实际服务只是还在初始化。这里改成：
+	#   1) 先等进程出现（procd 的 start 异步返回，进程可能要几秒才 fork 出来）
+	#   2) 再等端口能应答（curl 200 才算"起来了"）
+	# 上限 120 秒，期间每秒探一次；超过上限返回失败。
+	local i=0 port
+	port="$(uci_get main.port 18789)"
+	case "$port" in ''|*[!0-9]*) port=18789 ;; esac
+
+	while [ "$i" -lt 120 ]; do
+		if svc_running; then
+			# 进程有了，再看端口。网关初始化要几十秒，这里不再额外加超时，
+			# 由外层 120 秒总上限兜住。
+			if command -v curl >/dev/null 2>&1; then
+				if curl -s -o /dev/null --connect-timeout 1 --max-time 2 \
+					-w '%{http_code}' "http://127.0.0.1:${port}/" 2>/dev/null \
+					| grep -qE '^[23]'; then   # 2xx/3xx 都算应答；连不上时 curl 输出 000
+					return 0
+				fi
+			else
+				# 没有 curl：无法验端口。退一步 —— 等 5 秒后**再确认进程还活着**。
+				# 单纯 sleep 5 后 return 0 只是把"刚 fork 就算起来"推迟了 5 秒：
+				# 网关在初始化阶段崩溃时仍会报"已启动"。
+				# 这里至少能排除"起来后又退了"这种最常见的失败。
+				sleep 5
+				if svc_running; then
+					return 0
+				fi
+				# 进程没了 → 不返回，交给外层循环继续等（直到 120 秒上限）。
+			fi
+		fi
 		sleep 1
 		i=$((i + 1))
 	done
-	svc_running
+	return 1
 }
 
 autostart_service() {
@@ -814,8 +874,10 @@ autostart_service() {
 				|| ilog "WARN: 开机自启设置失败（不影响安装，可在状态页手动处理）"
 			uci_set main.enabled 1
 			uci_commit
-			ilog "启动服务（/etc/init.d/openclaw start，最多等待 60s）"
-			oc_timeout 60 /etc/init.d/openclaw start >/dev/null 2>&1
+			# 用 restart 而不是 start：start 对 procd 里已注册的实例是空操作，
+			# 而上面刚 stop 过 —— 只有 restart 能保证装完真的起来。
+			ilog "启动服务（/etc/init.d/openclaw restart，最多等待 150s）"
+			oc_timeout 150 /etc/init.d/openclaw restart >/dev/null 2>&1
 			if svc_wait_running; then
 				ilog "服务已启动"
 			else

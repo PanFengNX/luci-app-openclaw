@@ -353,8 +353,36 @@ start_service() {
 		force_opt="--force"
 	fi
 
-	chown -R "$OC_USER:$OC_USER" "$home" 2>/dev/null || _warn_chown "$home"
-	chmod -R u+rwX "$home" 2>/dev/null || _warn_chmod "$home"
+	# 递归 chown/chmod 只在需要时才做 —— 但判定不能只看顶层。
+	# $home 下 7.8G（agents 4.5G / extensions 1.4G / workspace 620M），
+	# 每次启动遍历几万文件要几十秒到分钟级，正好叠加在冷启动的 28-90s 上。
+	#
+	# 只看顶层属主是不够的：顶层正确、内部却被 root 写过（比如 doctor 以 root
+	# 跑过、或手工 cp 过文件）时，网关仍会因 EACCES 失败，而这里永远跳过修复。
+	# 折中：顶层正确时**只查一层**（网关直接读写的几个关键目录 + $home 自身），
+	# 发现任何一个不对就退回完整递归。查一层是几十次 stat，代价可忽略。
+	_need_recursive=0
+	if [ "$(stat -c %U "$home" 2>/dev/null)" != "$OC_USER" ]; then
+		_need_recursive=1
+	else
+		for _d in "$home/.openclaw" "$home/.openclaw/workspace" \
+			"$home/.openclaw/agents" "$home/.openclaw/extensions" \
+			"$home/.openclaw/logs" "$home/.openclaw/tmp"; do
+			[ -e "$_d" ] || continue
+			[ "$(stat -c %U "$_d" 2>/dev/null)" = "$OC_USER" ] || {
+				_need_recursive=1
+				logger -t openclaw "属主不一致：$_d（将执行完整 chown）"
+				break
+			}
+		done
+	fi
+	if [ "$_need_recursive" = "1" ]; then
+		chown -R "$OC_USER:$OC_USER" "$home" 2>/dev/null || _warn_chown "$home"
+		chmod -R u+rwX "$home" 2>/dev/null || _warn_chmod "$home"
+	else
+		# 关键目录都对，只补顶层权限位（可能有目录被改过 mode），不做递归。
+		chmod u+rwX "$home" 2>/dev/null || true
+	fi
 	# state_dir 在 $home 之外时（迁移已有安装），上面的 chown 覆盖不到它，
 	# 服务用户对网关要写的 openclaw.json / 会话 / 工作区没有权限。
 	# 但这是用户可配置路径：先校验再递归操作，不安全的只告警、继续启动。

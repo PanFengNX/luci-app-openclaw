@@ -895,7 +895,14 @@ apply() {
 		--key-file) kf="${2:-}"; shift 2 ;;
 		-)          key="${OC_APPLY_KEY:-}"; shift ;;
 		'')         shift ;;
-		*)          key="$1"; shift ;;
+		*)
+			# 曾经允许 `models.sh apply <provider> <key>` 直接取位置参数，
+			# 但那样 key 会进 argv（ps / shell history / /proc/<pid>/cmdline）。
+			# 安全通道只有两条：--key-file（0600 临时文件）与 $OC_APPLY_KEY
+			# 环境变量。这里显式拒绝，而不是静默退回不安全路径。
+			oc_err "拒绝从命令行参数读取 API Key（会暴露在进程列表与 shell 历史里）"
+			oc_err "请改用 --key-file <600 文件>，或通过环境变量 OC_APPLY_KEY 传入"
+			return 2 ;;
 	esac
 	model="${1:-}"; base="${2:-}"
 	if [ -n "$kf" ]; then
@@ -977,9 +984,14 @@ apply() {
 		if ! oc_run 60 config set "models.providers.${provider}.apiKey" \
 			--ref-provider default --ref-source env --ref-id "$envname" >/dev/null 2>&1
 		then
-			oc_warn "当前 OpenClaw 版本不支持 SecretRef，密钥只能以明文写入配置（已写入 .env，建议升级 OpenClaw 后重跑本步）"
-			oc_run 60 config set "models.providers.${provider}.apiKey" "$key" >/dev/null 2>&1 \
-				|| oc_warn "API Key 写入配置失败：$provider（已写入 .env，可稍后重试）"
+			# 不回退到明文字段。原因：`config set ... "$key"` 会把密钥放进
+			# argv，而 oc_run 是 exec CLI —— /proc/<pid>/cmdline 全局可读，
+			# 命令运行期间任何本机用户都能看到。本项目安全基线明确要求
+			# 密钥不进 argv（参考 lib.sh 的 models.sh --key-file 约定）。
+			# 密钥已经写进 0600 的 .env，OpenClaw 启动时会读它；
+			# 旧版本读不到 SecretRef 时以 .env 为准，功能不受影响。
+			oc_warn "当前 OpenClaw 版本不支持 SecretRef，未写入配置里的 apiKey 字段"
+			oc_warn "密钥已保存在 $(oc_data_dir)/.env（权限 600），请升级 OpenClaw 后重跑本步以生成 SecretRef"
 		fi
 	fi
 	if [ -n "$base" ]; then

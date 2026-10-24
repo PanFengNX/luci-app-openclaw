@@ -469,6 +469,7 @@ var API = {
   istatus: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","istatus")%>',
   ilog: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","ilog")%>',
   service: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","service")%>',
+  uninstall: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","uninstall")%>',
   save: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","save")%>',
   mounts: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","mounts")%>',
   node_existing: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","node_existing")%>',
@@ -1358,19 +1359,25 @@ $('btn-uninstall').onclick = function(){
   if (!confirm('将删除 OpenClaw 与 Node.js 运行时（保留配置数据），继续？')) return;
   logModalOpen();
   setLogState('running');
-  logSay('正在停止服务并删除运行时…\n（卸载过程没有实时日志，完成后会自动刷新状态）\n');
-  post(API.service, { action: 'stop' }, function(){});
-  var x = new XMLHttpRequest();
-  x.open('POST', '<%=luci.dispatcher.build_url("admin","services","openclaw","api","run")%>', true);
-  x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
-  // 卸载要删目录，可能很慢。
-  x.timeout = 900000;
-  x.send('cmd=uninstall');
-  setTimeout(function(){
+  logSay('正在停止服务并删除运行时…\n');
+  var btn = this;
+  btn.disabled = true;
+  // 不再先独立 stop 一次：cmd_uninstall 内部自己会 stop + disable + 杀进程。
+  // 之前先 stop 再发一个**后端不认识**的 cmd=uninstall（不在 RUN_CMDS 白名单里），
+  // 结果服务停了、运行时没删、前端还无条件说"已提交"—— 一个必失败按钮。
+  post(API.uninstall, {}, function(r){
+    btn.disabled = false;
+    if (!r || r.ok === false){
+      setLogState('failed');
+      logSay('卸载失败：' + ((r && (r.data || r.error)) || '服务无响应')
+        + '\n可到「日志」页查看原因，或用 SSH 执行 /usr/libexec/openclaw/cli.sh uninstall。');
+      loadInfo();
+      return;
+    }
     setLogState('done');
-    logSay('卸载请求已提交，正在刷新状态…\n');
+    logSay('卸载完成：程序目录与 Node 运行时已删除，配置数据保留。\n');
     loadInfo();
-  }, 3000);
+  });
 };
 
 // 先把目录控件画出来（此时 info 还没回来，程序位置显示「读取中」），

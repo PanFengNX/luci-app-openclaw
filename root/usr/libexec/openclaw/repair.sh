@@ -170,7 +170,10 @@ if [ -f "$CONF" ]; then
   }
 }
 EOF
-			say FIX "配置文件损坏，已备份并重建（旧文件 $CONF.bak.*）"
+			# 重建用的是最小可用配置：provider / channel / 模型选择都不在里面。
+			# 这一点必须说清，否则用户以为"修复"是无损的，回头发现模型和渠道全没了。
+			say FIX "配置文件损坏，已备份并重建为最小可用配置（旧文件 $CONF.bak.*）"
+			say WARN "重建后需要重新配置模型与渠道（原文件已备份，可从中提取 apiKey/baseUrl）"
 		fi
 	else
 		say WARN "缺少 jsonfilter，跳过配置文件格式校验"

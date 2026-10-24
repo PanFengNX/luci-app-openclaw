@@ -203,6 +203,18 @@ node_base_url() {
 	node_base_default
 }
 
+cache_fresh() {
+	# cache_fresh <name> -> 0 when the cache file exists and is younger than TTL
+	# 原来两处命中判断写的是 `[ -s "$file" ]`：只看"非空"，不看 mtime，
+	# 于是 OC_CACHE_TTL=300 从来没有生效 —— 列表一旦写入就永不过期，
+	# 换了镜像源仍走旧数据，上游发了新版本也永远看不到。
+	local f="$OC_CACHE_DIR/$1" now age
+	[ -s "$f" ] || return 1
+	now="$(date +%s 2>/dev/null)"
+	age=$(( now - $(date -r "$f" +%s 2>/dev/null || echo 0) ))
+	[ "$age" -lt "$OC_CACHE_TTL" ]
+}
+
 cache_get() {
 	# cache_get <name> -> prints cached file if fresh
 	local f="$OC_CACHE_DIR/$1"
@@ -439,7 +451,7 @@ oc_versions_json() {
 	mkdir -p "$OC_CACHE_DIR" 2>/dev/null || true
 	url="$(npm_registry)/openclaw"
 
-	if [ "${1:-}" != "refresh" ] && [ -s "$OC_CACHE_DIR/oc-versions.tsv" ]; then
+	if [ "${1:-}" != "refresh" ] && cache_fresh oc-versions.tsv; then
 		OC_V_CACHED=1
 		# 缓存里没有来源记录（旧版本写下的缓存）时留空，前端按普通情况处理。
 		OC_V_SOURCE="$(oc_source_saved)"
@@ -622,7 +634,7 @@ node_versions_json() {
 	OC_V_TMP=""; OC_V_URL=""; OC_V_R1=""; OC_V_R2=""; OC_NODE_BASE_OK=""
 	mkdir -p "$OC_CACHE_DIR" 2>/dev/null || true
 
-	if [ "${1:-}" != "refresh" ] && [ -s "$OC_CACHE_DIR/node-versions.tsv" ]; then
+	if [ "${1:-}" != "refresh" ] && cache_fresh node-versions.tsv; then
 		OC_V_CACHED=1
 		OC_V_SOURCE="$(node_source_saved)"
 	else

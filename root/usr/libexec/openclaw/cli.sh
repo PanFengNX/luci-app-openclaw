@@ -430,7 +430,15 @@ cmd_uninstall() {
 
 	"$INITD" stop >/dev/null 2>&1
 	"$INITD" disable >/dev/null 2>&1
-	oc_kill_tree
+	# oc_kill_tree 现在先 TERM 再 KILL，并返回"进程是否真的没了"。
+	# 没清干净就 rm -rf 程序目录，会删掉一个仍在运行的进程的 node_modules
+	# （它随后会以奇怪的错误崩溃）。
+	if ! oc_kill_tree; then
+		oc_err "仍有网关进程未退出，已中止卸载（避免删除运行中程序的目录）"
+		oc_err "请稍后重试；若反复出现，可用 SSH 检查进程后手动 kill"
+		printf '{"ok":false,"error":"仍有网关进程未退出，已中止卸载"}\n'
+		return 1
+	fi
 	oc_info "删除 $ocdir 与 $base/node（保留 $base/home 配置数据）"
 	rm -rf "$ocdir" "$base/node" "$base/npm-cache" "$base/cache"
 	uci_set main.installed 0
@@ -514,8 +522,20 @@ cmd_info() {
 	free="$(oc_free_mb "$base")"
 	home="$(oc_home_dir)"
 	if installed; then
-		ver="$(HOME="$home" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" "$(oc_oc_bin)" --version 2>/dev/null | head -n1)"
-		nver="$( "$(oc_node_bin)" -v 2>/dev/null)"
+		# 优先读 package.json 里的 version：纯文件读，毫秒级。
+		# 原来每次都起一个完整的 Node 进程跑 `openclaw --version`，
+		# 而这个进程模型 RSS 上 GB —— 状态页每次刷新都要付一次这个代价。
+		_pkg="$(oc_oc_dir)/lib/node_modules/openclaw/package.json"
+		if [ -f "$_pkg" ]; then
+			ver="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_pkg" 2>/dev/null | head -n1)"
+		fi
+		# 读不到（布局变了）才回退到 CLI，并且加超时兜底：
+		# 以前没有 timeout，CLI 卡住会把整个 info 请求拖死。
+		if [ -z "${ver:-}" ]; then
+			ver="$(HOME="$home" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+				oc_timeout 10 "$(oc_oc_bin)" --version 2>/dev/null | head -n1)"
+		fi
+		nver="$(oc_timeout 10 "$(oc_node_bin)" -v 2>/dev/null)"
 	fi
 	printf '{"status":"%s","installed":%s,"reachable":%s,"port":"%s","token":"%s","openclaw":"%s","node":"%s","node_mode":"%s","base_dir":"%s","openclaw_dir":"%s","oc_dir_custom":%s,"home":"%s","free_mb":"%s","arch":"%s","musl":%s,"bind":"%s","node_mirror":"%s","enabled":%s,"core_dumps":%s,"url":"http://%s:%s/"}\n' \
 		"$st" \
@@ -659,10 +679,15 @@ cmd_doctor() {
 		oc_env_doctor
 		printf '\n===== openclaw doctor --fix =====\n'
 		if installed; then
-			HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-				oc_timeout 300 "$(oc_oc_bin)" doctor --fix 2>&1 | tail -n 60
+			# 先取输出再截尾：管道给 tail 时 $? 恒为 0，
+			# diag 会永远报「完成（退出码 0）」，哪怕 doctor --fix 失败。
+			local _o
+			_o="$(HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+				oc_timeout 300 "$(oc_oc_bin)" doctor --fix 2>&1)"
+			printf '%s\n' "$_o" | tail -n 60
+			[ -z "$_o" ] || printf '\n'
 		fi
-		printf '\n===== 一键修复 =====\n'
+		printf '===== 一键修复 =====\n'
 		sh "$OC_REPAIR"
 	else
 		oc_env_doctor
@@ -690,8 +715,15 @@ cmd_run() {
 		esac
 	done
 
-	HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-		oc_timeout 120 "$(oc_oc_bin)" "$@" 2>&1 | tail -n 200
+	# 先捕获输出与退出码，再截尾 —— 直接管道给 tail 时 $? 是 tail 的，
+	# 恒为 0，openclaw 的真实失败被吞掉（终端页里失败的 config set /
+	# doctor 都显示成功）。
+	local _out _rc
+	_out="$(HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+		oc_timeout 120 "$(oc_oc_bin)" "$@" 2>&1)"
+	_rc=$?
+	printf '%s\n' "$_out" | tail -n 200
+	return $_rc
 }
 
 cmd_mounts() {

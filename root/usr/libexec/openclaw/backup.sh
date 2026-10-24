@@ -342,29 +342,71 @@ cmd_create() {
 	if [ "$need" -gt 0 ] && [ "$free" -lt $((need + 8)) ]; then
 		die_json "备份空间不足：需要约 ${need}MB，可用 ${free}MB"
 	fi
-	# 归档不是直接从 $data 生成的：先 cp -a 到 $OC_RUNDIR 下的暂存目录，
-	# 而 $OC_RUNDIR 在 OpenWrt 上通常是 tmpfs。上面那次检查查的是 $dir 所在
-	# 文件系统，漏掉了真正会被写满的暂存目标，这里补上。
-	local stage_free
-	stage_free="$(oc_free_mb "$OC_RUNDIR")"
+	# 暂存目录不能再放 $OC_RUNDIR：OpenWrt 上它在 /tmp（tmpfs，内存盘）。
+	# 实测这台机器数据目录 7.8G、tmpfs 只有 5.8G 可用 4.2G，于是
+	# 「复制数据目录需要约 10018MB，/tmp/.openclaw 可用 4257MB」每天必失败。
+	# 改放数据盘：<安装目录>/tmp 与数据同盘，容量由磁盘决定。
+	#
+	# 而且不再整份 cp -a：7.8G 数据复制一份再打包，等于临时占用 15G+，
+	# 慢且容易撑爆。现在直接从数据目录打包（见下面的 tar），暂存目录只放
+	# BACKUP-INFO 与 UCI 配置这两个小文件。
+	local stage_root stage_free
+	stage_root="$base/tmp"
+	mkdir -p "$stage_root" 2>/dev/null
+	[ -d "$stage_root" ] || stage_root="$dir"
+	stage_free="$(oc_free_mb "$stage_root")"
 	case "$stage_free" in ''|*[!0-9]*) stage_free=0 ;; esac
-	if [ "$need" -gt 0 ] && [ "$stage_free" -gt 0 ] && [ "$stage_free" -lt $((need + 8)) ]; then
-		die_json "暂存空间不足：复制数据目录需要约 ${need}MB，$OC_RUNDIR 可用 ${stage_free}MB"
+	# 打包是流式的，落盘的是压缩后的归档（通常远小于原数据），
+	# 但 tar 需要一点余量；这里只要求不小于数据量的 1/4 且至少 256MB，
+	# 真正不够时 tar 自己会报错。
+	local need_stage=0
+	if [ "$need" -gt 0 ]; then
+		need_stage=$((need / 4))
+		[ "$need_stage" -ge 256 ] || need_stage=256
+	fi
+	if [ "$need_stage" -gt 0 ] && [ "$stage_free" -gt 0 ] \
+		&& [ "$stage_free" -lt $((need_stage + 8)) ]; then
+		die_json "打包空间不足：$stage_root 可用 ${stage_free}MB，至少需要 ${need_stage}MB"
 	fi
 
-	stage="$OC_RUNDIR/bkstage.$$"
+	stage="$stage_root/bkstage.$$"
 	# 只回收 60 分钟以上的陈旧残留。无差别 rm -rf 会连另一个并发实例正在
 	# 使用的暂存目录一起删掉（restore 的安全快照就是通过 create 并发跑起来的）。
-	find "$OC_RUNDIR" -maxdepth 1 -name 'bkstage.*' -mmin +60 -exec rm -rf {} \; 2>/dev/null
+	find "$stage_root" -maxdepth 1 -name 'bkstage.*' -mmin +60 -exec rm -rf {} \; 2>/dev/null
 	rm -rf "$stage"
 	mkdir -p "$stage/etc/config" "$stage/home" || die_json "无法创建暂存目录"
-	# 被打断也要清掉（/tmp 是 tmpfs，残留会一直占内存）
 	trap 'rm -rf "${stage:-}" 2>/dev/null' EXIT INT TERM HUP
 
 	cp /etc/config/openclaw "$stage/etc/config/openclaw" 2>/dev/null
-	cp -a "$data" "$stage/home/.openclaw" 2>/dev/null || {
-		rm -rf "$stage"; die_json "复制数据目录失败"
-	}
+
+	# 数据目录用**硬链接树**进暂存区，而不是 cp -a 复制。
+	# 暂存目录现在和数据同盘（都在 <安装目录> 下），硬链接合法：
+	#   * 不额外占空间（7.8G 数据不再变成 15G）
+	#   * 元数据操作，秒级完成（cp -a 要读满 7.8G）
+	#   * tar 读的是同样的内容，归档布局与老版本完全一致
+	# 跨文件系统时 cp -al 会失败，退回 cp -a（慢但正确）。
+	if ! cp -al "$data" "$stage/home/.openclaw" 2>/dev/null; then
+		oc_rmtree "$stage/home/.openclaw"
+		cp -a "$data" "$stage/home/.openclaw" 2>/dev/null || {
+			oc_rmtree "$stage"; die_json "暂存数据目录失败（硬链接与复制都不可用）"
+		}
+	fi
+	# cp 也可能"部分成功"（磁盘满、某个文件权限不够）却返回非 0 之外的
+	# 情况，或者被信号打断。打包一棵残缺的树会产出看起来正常的备份 ——
+	# 还原时才发现少了文件。这里用条目数粗校验一次（只读元数据，很快）。
+	if [ -d "$data" ]; then
+		_src_n="$(find "$data" 2>/dev/null | wc -l)"
+		_stg_n="$(find "$stage/home/.openclaw" 2>/dev/null | wc -l)"
+		case "$_src_n:$_stg_n" in
+			*[!0-9:]*|'') : ;;
+			*)
+				if [ "$_stg_n" -lt "$_src_n" ]; then
+					oc_rmtree "$stage"
+					die_json "暂存数据不完整（源 $_src_n 项，暂存 $_stg_n 项），已中止备份以免产出残缺归档"
+				fi
+				;;
+		esac
+	fi
 
 	# 清单：还原时用它确认"这是我们自己的备份"
 	{
@@ -383,11 +425,18 @@ cmd_create() {
 	# 排除运行时产物：日志、缓存、临时文件、锁。
 	# 用 set -- 逐个传参而不是拼成一个字符串：拼字符串时 *.log 可能先被
 	# shell 做 glob 展开，tar 就会收到错误的排除模式。
-	set -- --exclude='*.log' --exclude='logs' --exclude='log' \
-		--exclude='cache' --exclude='tmp' --exclude='*.tmp' \
+	#
+	# 路径必须是**相对归档根的精确路径**。原来写的是裸名字
+	# （--exclude='logs' / 'cache' / 'tmp'），tar 会匹配任意层级 ——
+	# 实测 workspace/logs 这样的用户真实数据也被一并排除，备份悄悄少东西。
+	# 现在只排数据根下那一层，workspace 里的同名目录保留。
+	_data_rel='./home/.openclaw'
+	set -- --exclude="${_data_rel}/logs" --exclude="${_data_rel}/log" \
+		--exclude="${_data_rel}/cache" --exclude="${_data_rel}/tmp" \
+		--exclude='*.log' --exclude='*.tmp' \
 		--exclude='*.lock' --exclude='*.pid' --exclude='*.sock' \
 		--exclude='node_modules'
-	[ "$ws" = "1" ] || set -- "$@" --exclude='workspace'
+	[ "$ws" = "1" ] || set -- "$@" --exclude="${_data_rel}/workspace"
 
 	if ! tar -czf "$out" -C "$stage" "$@" . 2>"$OC_RUNDIR/bk-tar.err"; then
 		rm -rf "$stage"
@@ -558,9 +607,24 @@ cmd_restore() {
 	rm -f "$terr"
 
 	# 5) UCI 配置
+	# 不能整份覆盖：备份来自另一台机器 / 另一个安装目录时，base_dir、
+	# state_dir、openclaw_dir 都指向本机不存在的路径，随后 oc_fix_perms
+	# 会按这些错路径去 chown（等于白做），新数据仍归 root，网关 EACCES 起不来。
+	# 只搬"与路径无关"的设置，路径一律保留本机当前值。
 	if [ -f "$stage/etc/config/openclaw" ]; then
-		cp "$stage/etc/config/openclaw" /etc/config/openclaw 2>/dev/null \
-			|| oc_warn "写入 /etc/config/openclaw 失败"
+		local _k _v
+		for _k in port bind auto_start core_dumps npm_registry node_mirror \
+			cloud_enabled cloud_period cloud_weekday cloud_hour cloud_minute \
+			cloud_keep cloud_encrypt preinstall_providers; do
+			_v="$(uci -q -c "$stage/etc/config" get "openclaw.main.$_k" 2>/dev/null)" || continue
+			[ -n "$_v" ] || continue
+			uci -q set "openclaw.main.$_k=$_v" 2>/dev/null || true
+		done
+		# commit 失败 = 设置没落盘。不能静默：用户会以为还原成功了。
+		if ! uci -q commit openclaw 2>/dev/null; then
+			oc_warn "UCI 设置写入失败（commit 返回非 0），端口/镜像源等设置可能未生效"
+		fi
+		oc_info "已还原非路径类设置（端口/绑定/自启/镜像源/云备份计划）"
 	fi
 
 	# 6) 数据目录（整体替换，先移到一边以便失败回滚）
@@ -586,9 +650,8 @@ cmd_restore() {
 			rm -rf "$stage"
 			die_json "写入数据目录失败，已回滚到还原前状态"
 		fi
-		# 只有确实搬走了原数据才删，否则会把"没搬动的原目录"误删
-		[ "$moved" = "1" ] && rm -rf "$old" 2>/dev/null
-		moved=0
+		# 这里**不能**删 $old：还原出来的可能是不兼容的旧 schema，
+		# 网关起不来时这份旧数据是唯一的退路。等下面确认服务真的起来了再删。
 	else
 		oc_warn "备份里没有 home/.openclaw，数据目录保持不变"
 	fi
@@ -599,10 +662,57 @@ cmd_restore() {
 	[ -f "$data/.env" ] && chmod 600 "$data/.env" 2>/dev/null
 	oc_fix_perms >/dev/null 2>&1
 
-	# 8) 起网关
-	local started=0
+	# 8) 起网关，并**等到端口真的应答**才算成功。
+	# 原来只判断 start 的返回值：procd 的 start 是异步的，立刻返回 0，
+	# 于是无论网关能不能起来都报「重启成功」。冷启动实测 28-90 秒。
+	local started=0 port
+	port="$(uci_get main.port 18789)"
+	case "$port" in ''|*[!0-9]*) port=18789 ;; esac
 	if [ -x /etc/init.d/openclaw ]; then
-		/etc/init.d/openclaw start >/dev/null 2>&1 && started=1
+		/etc/init.d/openclaw start >/dev/null 2>&1
+		local _i=0
+		while [ "$_i" -lt 120 ]; do
+			if oc_gateway_pids >/dev/null 2>&1 && [ -n "$(oc_gateway_pids)" ]; then
+				if command -v curl >/dev/null 2>&1; then
+					if curl -s -o /dev/null --connect-timeout 1 --max-time 2 \
+						-w '%{http_code}' "http://127.0.0.1:${port}/" 2>/dev/null \
+						| grep -qE '^[23]'; then   # 2xx/3xx 都算应答；连不上时 curl 输出 000
+						started=1; break
+					fi
+				else
+					# 没有 curl：无法验端口。等 5 秒再确认进程仍在，
+					# 否则"起来后又崩"会被误判为还原成功、随后删掉旧数据。
+					sleep 5
+					if [ -n "$(oc_gateway_pids)" ]; then
+						started=1; break
+					fi
+				fi
+			fi
+			sleep 1
+			_i=$((_i + 1))
+		done
+	fi
+
+	if [ "$started" != "1" ] && [ "$moved" = "1" ]; then
+		# 起不来 + 有旧数据：自动回滚，别把用户留在"数据是新的、服务是死的"状态。
+		oc_warn "还原后网关未能启动，正在回滚到还原前状态"
+		oc_rmtree "$data"
+		if mv "$old" "$data" 2>/dev/null; then
+			moved=0
+			oc_fix_perms >/dev/null 2>&1
+			/etc/init.d/openclaw restart >/dev/null 2>&1
+			bk_detail "$(basename "$p")"
+			die_json "还原后网关未能启动（可能是不兼容的旧 schema），已自动回滚到还原前数据。还原前安全快照：${safety_file:-无}"
+		fi
+		oc_warn "回滚失败，原数据仍在 $old，请手动处理"
+		bk_detail "$(basename "$p")"
+		die_json "还原后网关未能启动，且自动回滚失败；原数据保留在 $old（安全快照：${safety_file:-无}）"
+	fi
+
+	# 确认起来了才删旧数据
+	if [ "$moved" = "1" ]; then
+		oc_rmtree "$old"
+		moved=0
 	fi
 
 	blog "已从备份还原：$(basename "$p")"

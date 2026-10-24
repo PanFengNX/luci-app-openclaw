@@ -104,6 +104,43 @@ runfn_code = '\n'.join(l.split('#')[0] for l in runfn.splitlines())
 check('oc_gateway_pids' in runfn_code, 'running() 用 oc_gateway_pids 精确判定')
 check('pgrep -f' not in runfn_code, 'running() 里没有 pgrep -f 模糊匹配')
 
+# ---- 1.8.28：实际运行复核后的一批修复 ----
+ins2 = (proj / 'root/usr/libexec/openclaw/install.sh').read_text(encoding='utf-8')
+bkp2 = (proj / 'root/usr/libexec/openclaw/backup.sh').read_text(encoding='utf-8')
+lib2 = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
+init2 = (proj / 'root/etc/init.d/openclaw').read_text(encoding='utf-8')
+mdl2 = (proj / 'root/usr/libexec/openclaw/models.sh').read_text(encoding='utf-8')
+ver2 = (proj / 'root/usr/libexec/openclaw/versions.sh').read_text(encoding='utf-8')
+
+# 覆盖安装必须先停服务，收尾用 restart
+check('init.d/openclaw stop' in ins2, 'install.sh 覆盖安装前会停服务')
+check('init.d/openclaw restart' in ins2, '安装收尾用 restart 而不是 start')
+# 备份暂存不能在 tmpfs
+check('stage_root="$base/tmp"' in bkp2, '备份暂存目录在数据盘而不是 /tmp')
+check('cp -al "$data"' in bkp2, '备份用硬链接树而不是整份复制')
+# 备份排除路径必须精确
+_bkp_code = '\n'.join(l.split('#', 1)[0] for l in bkp2.splitlines())
+check("--exclude='logs'" not in _bkp_code,
+      '排除规则不再用裸名字（会误伤 workspace/logs）')
+check('_data_rel' in bkp2, '排除规则改用相对归档根的精确路径')
+# 还原：白名单 + 回滚
+check('uci -q -c "$stage/etc/config"' in bkp2, '还原只取非路径类 UCI 键')
+check('已自动回滚到还原前数据' in bkp2, '还原后起不来会自动回滚')
+# 等待窗口
+check('while [ "$i" -lt 120 ]' in ins2, '启动等待上限 120 秒（原 15 秒）')
+# 缓存 TTL
+check('cache_fresh()' in ver2, '有 cache_fresh（TTL 真正生效）')
+check('cache_fresh oc-versions.tsv' in ver2, 'oc-versions 走 TTL 判断')
+# 密钥不进 argv
+check('拒绝从命令行参数读取 API Key' in mdl2, 'models.sh 拒绝位置参数传 key')
+check('config set "models.providers.${provider}.apiKey" "$key"' not in mdl2,
+      '不再把明文 key 写进配置（会进 argv）')
+# 进程终止
+check('kill "$p"' in lib2, 'oc_kill_tree 先 TERM')
+check('[ -z "$(oc_gateway_pids)" ]' in lib2, 'oc_kill_tree 确认进程真的没了')
+# chown 优化
+check('stat -c %U "$home"' in init2, 'start 时先比对属主再决定是否递归')
+
 check('oc_gateway_reachable()' in cli, '有网关可达性探测函数')
 check('"reachable":%s' in cli, 'cmd_info 输出 reachable')
 check('_reachable_flag' in cli, 'info 经由 _reachable_flag 决定是否探测')

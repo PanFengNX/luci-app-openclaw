@@ -1881,9 +1881,13 @@ function resumeInstallIfRunning(){
 }
 
 loadInfo();
-// 进入页面就检查一次更新：带 refresh=1 绕过后端 60 秒的失败缓存，
-// 否则刚失败过的设备要等一分钟才可能看到新结果。
-loadVersions(true);
+// 进入页面只读缓存，不联网。
+// 原来这里带 refresh=1：后端会串行跑 4 次网络请求（npm 官方 / npmmirror /
+// Node 官方 / Node 镜像，单次 max-time 20s），一次页面加载最多占住 CGI
+// 80 秒。开几个标签页、或几个人同时刷，就是出站连接风暴 + uhttpd worker
+// 占满 —— 「页面一直转圈」有一半来自这里。
+// 现在：首屏读本地缓存（毫秒级），要强制联网请点「重新获取版本」。
+loadVersions(false);
 // node-existing 要逐个候选跑 node -v，放到首屏之后发起，
 // 慢探测不会阻塞主信息渲染。
 setTimeout(loadNodeExisting, 900);

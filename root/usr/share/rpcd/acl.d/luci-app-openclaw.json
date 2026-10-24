@@ -1,16 +1,17 @@
 {
 	"luci-app-openclaw": {
-		"description": "Grant access to OpenClaw 助手 (openclaw) configuration",
+		"description": "Grant read access to OpenClaw 助手 (openclaw) logs and configuration. Writes go through cli.sh, which validates paths; no ubus write grant is needed.",
 		"read": {
 			"file": {
-				"/etc/config/openclaw": [ "read" ],
-				"/var/log/openclaw.log": [ "read" ],
-				"/var/log/openclaw-install.log": [ "read" ]
-			}
-		},
-		"write": {
-			"file": {
-				"/etc/config/openclaw": [ "write" ]
+				"/etc/config/openclaw": [
+					"read"
+				],
+				"/var/log/openclaw.log": [
+					"read"
+				],
+				"/var/log/openclaw-install.log": [
+					"read"
+				]
 			}
 		}
 	}
