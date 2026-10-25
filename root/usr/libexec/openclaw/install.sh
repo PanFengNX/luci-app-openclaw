@@ -103,6 +103,11 @@ HOME_DIR="$BASE_DIR/home"
 [ -s "${OC_INSTALLLOG:-}" ] && mv -f "$OC_INSTALLLOG" "$OC_INSTALLLOG.1" 2>/dev/null
 : >"$OC_INSTALLLOG" 2>/dev/null || OC_INSTALLLOG="${OC_RUNDIR:-/tmp/.openclaw}/install.log"
 : >"$OC_INSTALLLOG" 2>/dev/null || true
+# 把**实际使用**的日志路径写到标记文件，让 install-status 与 api_ilog 能拿到。
+# 上面那句回退只改本进程的变量：cli.sh 是另一个进程，它报告给面板的仍是
+# /var/log/... 那个（可能根本写不进去的）路径，于是"日志在哪"有三个进程
+# 各猜各的。这里落一个单一真相来源。
+printf '%s' "$OC_INSTALLLOG" >"${OC_RUNDIR:-/tmp/.openclaw}/install.logpath" 2>/dev/null || true
 # 只写一次。install-bg 会把本进程的 stdout 也重定向到 $OC_INSTALLLOG，
 # 原来的 `| tee -a` 于是成了第二个写者：两个描述符各有一个文件偏移，
 # 日志里会出现重复行和被覆盖的半截行。这里只追加到日志文件；

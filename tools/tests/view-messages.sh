@@ -315,6 +315,17 @@ check("openVerLog(true, 'lost')" in stv5, '中断时按 lost 状态打开弹窗'
 bkp5 = (proj / 'root/usr/libexec/openclaw/backup.sh').read_text(encoding='utf-8')
 check('${_data_rel}/diagnostics' in bkp5, '备份排除 diagnostics（可重建产物）')
 
+# ---- 安装日志路径必须跨进程一致 ----
+# install.sh 在 /var/log 不可写时会回退到 rundir，但那是它自己进程内的变量；
+# cli.sh（另一个进程）若仍报 /var/log，面板就会一直显示空日志。
+ins6 = (proj / 'root/usr/libexec/openclaw/install.sh').read_text(encoding='utf-8')
+cli6 = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
+check('install.logpath' in ins6, 'install.sh 把实际日志路径写成标记文件')
+check('OC_INST_LOGPATH' in cli6, 'cli.sh 定义 logpath 标记路径')
+st6 = cli6[cli6.index('cmd_install_status() {'):]
+st6 = st6[:st6.index('\n}\n')]
+check('OC_INST_LOGPATH' in st6, 'install-status 读标记文件而不是硬编码路径')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

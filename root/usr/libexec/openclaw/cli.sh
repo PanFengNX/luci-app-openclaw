@@ -36,6 +36,8 @@ OC_INST_DONE="${OC_RUNDIR:-/tmp/.openclaw}/install.done"
 # milliseconds the pid is alive but its cmdline does not mention install.sh yet,
 # and without it a status poll right after install-bg would report "lost".
 OC_INST_PID="${OC_RUNDIR:-/tmp/.openclaw}/install.pid"
+# install.sh 写在这里的实际日志路径（它可能回退到 rundir）
+OC_INST_LOGPATH="${OC_RUNDIR:-/tmp/.openclaw}/install.logpath"
 OC_INST_START="${OC_RUNDIR:-/tmp/.openclaw}/install.start"
 OC_INST_START_GRACE=15
 
@@ -288,7 +290,8 @@ cmd_install_bg() {
 		oc_err "已有安装进程在运行，请稍后再试"
 		exit 2
 	fi
-	rm -f "$OC_INSTALLLOG" "$OC_INST_DONE" "$OC_INST_RC" "$OC_INST_PID" 2>/dev/null || true
+	rm -f "$OC_INSTALLLOG" "$OC_INST_DONE" "$OC_INST_RC" "$OC_INST_PID" \
+		"$OC_INST_LOGPATH" 2>/dev/null || true
 	mkdir -p "$OC_LOGDIR" "$(dirname "$OC_INST_RC")" 2>/dev/null || true
 	date +%s >"$OC_INST_START" 2>/dev/null || true
 	# 子 shell 的 stdio 必须离开 LuCI 请求的管道（同 diag）：内层已经
@@ -402,8 +405,20 @@ cmd_install_status() {
 			msg="后台安装进程已退出，但没有留下完成标记，可能被系统杀死或磁盘写满；请重试安装。"
 		fi
 	fi
+	# 报告 install.sh **实际在用**的日志路径。它会因 /var/log 不可写而回退到
+	# rundir，而那是另一个进程内的变量 —— 不读标记文件的话，这里报的路径
+	# 可能与真正在写的文件不是同一个，面板就会一直显示空日志。
+	local logp
+	logp=""
+	if [ -r "$OC_INST_LOGPATH" ]; then
+		logp="$(cat "$OC_INST_LOGPATH" 2>/dev/null)"
+	fi
+	case "$logp" in
+		/*) ;;
+		*) logp="$OC_INSTALLLOG" ;;
+	esac
 	printf '{"state":"%s","rc":"%s","log":"%s","msg":"%s","done_at":"%s"}\n' \
-		"$state" "${rc:-}" "$(oc_json_str "$OC_INSTALLLOG")" "$(oc_json_str "$msg")" "$done_at"
+		"$state" "${rc:-}" "$(oc_json_str "$logp")" "$(oc_json_str "$msg")" "$done_at"
 }
 
 cmd_update() {
