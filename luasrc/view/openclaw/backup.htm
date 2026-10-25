@@ -2028,17 +2028,28 @@ function clBackup(){
   // 先弹进度框：用户点完立刻有反馈，而不是等第一个请求回来。
   clOut('正在启动备份任务…');
   post(API.cloud_backup_bg, { workspace: ws }, function(r){
-    if (!r || r.ok === false){
-      CL.busy = false;
-      clRender();
-      var msg = (r && (r.data && r.data.error || r.error)) || '启动失败';
-      clErr('cl-err3', '无法启动备份：' + msg + clNet(r));
-      clOut('无法启动备份任务。');
-      clPhaseFail('local', msg);
+    var d = (r && r.data) || {};
+    if (r && r.ok !== false){
+      clOut('备份任务已启动，正在打包…');
+      clPollBackup();
       return;
     }
-    clOut('备份任务已启动，正在打包…');
-    clPollBackup();
+    // 已经在跑：不要报错了事 —— 那会让用户以为失败，而他其实只需要看进度。
+    // 接入正在运行的那个任务（与升级弹窗同一处理方式）。
+    if (d.busy){
+      clOut('已有备份任务在运行，正在接入它的进度…');
+      clErr('cl-err3', '');
+      clPollBackup();
+      return;
+    }
+    // 真的启动失败。注意**不要**把阶段标成"失败"：任务压根没开始，
+    // 标失败会让用户以为打包/上传出了问题（截图里就是这个误导）。
+    CL.busy = false;
+    clRender();
+    var msg = d.error || (r && r.error) || '启动失败';
+    clErr('cl-err3', '无法启动备份：' + msg + clNet(r));
+    clOut('无法启动备份任务。');
+    clPhaseReset();
   });
 }
 
@@ -2088,9 +2099,6 @@ function clPhaseSet(k, cls, text){
   if (!el) return;
   el.className = 'oc-badge ' + cls;
   el.textContent = text;
-}
-function clPhaseFail(k, msg){
-  clPhaseSet(k, 'oc-none', msg ? '失败' : '失败');
 }
 function clPhaseFromLog(log, d){
   var has = function(s){ return log.indexOf(s) >= 0; };
@@ -2218,6 +2226,24 @@ $('btn-cl-sch-save').onclick   = clSchSave;
 // 初始渲染 + 只读查询（不会触发任何上传 / 下载）
 clRender();
 clStatus();
+// 上次的备份可能还在跑（用户刷新了页面 / 从别的标签页回来）。
+// 加载时先问一次：running 就接着显示进度，不要让用户对着一个
+// 什么都不知道的页面等。
+clResumeBackup();
+
+function clResumeBackup(){
+  get(API.cloud_backup_poll, function(r){
+    var d = jp((r && r.data) || '{}', {});
+    if (!d.running) return;          // 没在跑：保持初始状态，不打扰
+    CL.busy = true;
+    clRender();
+    clPhaseReset();
+    clOutSet(String(d.log || '（正在读取进度…）'));
+    clPhaseFromLog(String(d.log || ''), d);
+    clErr('cl-err3', '');
+    clPollBackup();
+  });
+}
 clEncryptStatus();
 clSchStatus();
 

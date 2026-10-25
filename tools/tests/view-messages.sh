@@ -507,6 +507,27 @@ check('_fix_owner_tree' in rep11, 'owner-fix 会修属主树')
 # DIAG 域
 check('$base/dumps' in init11, 'core 落 DIAG 域 dumps/')
 
+# ---- 备份 busy 误报（截图：已有备份任务在运行，但其实没有）----
+cs12 = (proj / 'root/usr/libexec/openclaw/cloud.sh').read_text(encoding='utf-8')
+bh12 = (proj / 'luasrc/view/openclaw/backup.htm').read_text(encoding='utf-8')
+
+# 宽松判据会把 backup-poll（本身也是 cloud.sh）当成在跑的任务 → 永久 busy
+check('bk_pid_alive()' in cs12, '有 bk_pid_alive 精确判据')
+_bk = cs12[cs12.index('bk_pid_alive() {'):]
+_bk = _bk[:_bk.index(chr(10) + '}' + chr(10))]
+check('backup-bg' in _bk, '判据要求 cmdline 含 backup-bg（不只 cloud.sh）')
+check('oc_pid_alive "$pid"' in _bk, '仍先过通用存活检查（挡僵尸/已退出）')
+# 两处 busy 判定都必须用它
+check('bk_pid_alive "$_p"' in cs12, 'backup-bg 的 busy 判定用精确判据')
+check('bk_pid_alive "$pid"' in cs12, 'backup-poll 的 running 判定用精确判据')
+
+# 前端：busy 要接入进度，而不是报错；启动失败不能把阶段标成"失败"
+check('d.busy' in bh12, '前端识别 busy 并接入进度')
+check('正在接入它的进度' in bh12, 'busy 时提示接入而不是报错')
+check('function clPhaseFail(' not in bh12, '不再有 clPhaseFail（会误标阶段失败）')
+check('function clResumeBackup(' in bh12, '页面加载时接续正在跑的任务')
+check('clResumeBackup();' in bh12, '加载时调用接续')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

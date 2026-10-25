@@ -3458,6 +3458,26 @@ bk_log() {
 	return 0
 }
 
+bk_pid_alive() {
+	# bk_pid_alive <pid> -> 0 当且仅当该 pid 是**本次手动备份的 worker**
+	#
+	# 为什么不能直接用 oc_pid_alive：它把任何 openclaw/cloud.sh 进程都算作
+	# "我们的进程"。而 backup-poll 本身就是 cloud.sh —— 一旦 pid 文件里的
+	# 陈旧 pid 被复用到一个轮询请求上，busy 判定就永久为真，用户再也无法
+	# 启动备份（只能手工删 pid 文件）。这里要求 cmdline 里出现 backup-bg，
+	# 精确到"就是那个后台任务"。
+	local pid="${1:-}" cmd
+	case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+	[ -d "/proc/$pid" ] || return 1
+	# 先过一遍通用的存活检查（挡僵尸与已退出）
+	oc_pid_alive "$pid" || return 1
+	cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
+	case "$cmd" in
+		*backup-bg*) return 0 ;;
+	esac
+	return 1
+}
+
 cmd_backup_bg() {
 	# backup-bg [--no-workspace]
 	#
@@ -3487,7 +3507,7 @@ cmd_backup_bg() {
 	if [ -f "$CLOUD_BK_PID" ]; then
 		local _p
 		_p="$(head -n1 "$CLOUD_BK_PID" 2>/dev/null | tr -d ' \r\n')"
-		if [ -n "$_p" ] && oc_pid_alive "$_p"; then
+		if [ -n "$_p" ] && bk_pid_alive "$_p"; then
 			printf '{"ok":false,"busy":true,"error":"%s"}\n' \
 				"$(jstr "已有备份任务在运行，请等它结束")"
 			return 0
@@ -3598,7 +3618,9 @@ cmd_backup_poll() {
 	fi
 
 	pid="$(head -n1 "$CLOUD_BK_PID" 2>/dev/null | tr -d ' \r\n')"
-	if [ -n "$pid" ] && oc_pid_alive "$pid"; then
+	# 与 cmd_backup_bg 用同一个精确判据：宽松判据会把轮询请求本身
+	# （也是 cloud.sh）误判成"任务在跑"，于是 running 永远为 true。
+	if [ -n "$pid" ] && bk_pid_alive "$pid"; then
 		running=true
 	fi
 
