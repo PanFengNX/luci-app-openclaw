@@ -73,10 +73,24 @@ export PATH
 #     那类问题的土壤；
 #   * CLI 每天十几 MB 的日志写进 tmpfs（内存盘），重启就没、也永不清理。
 # init.d 里已经有这三个变量，这里补齐同样的值。
-TMPDIR="$(oc_base_dir)/tmp"
 OPENCLAW_STATE_DIR="$(oc_state_dir)"
 OPENCLAW_CONFIG_PATH="$(oc_state_dir)/openclaw.json"
-export TMPDIR OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH
+export OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH
+
+# TMPDIR 只在**以服务用户运行**时设。这是硬规则：
+# OpenClaw 的临时根解析顺序是 /tmp/openclaw（要求属主==当前 uid 且 0700）
+# → 回退 $TMPDIR/openclaw-<uid>。若在这里给 root 上下文设成 $base/tmp，
+# root 的 fallback 就落在 VAR 域内部（$base/tmp/openclaw-0）；此后任何一次
+# chown -R VAR 都会把它翻成服务用户，root 再跑就报
+#   "has owner uid 998, expected uid 0"  → 永久被拒。
+# 所以 root 上下文一律不设 TMPDIR（默认 /tmp 即可，配合 /tmp/openclaw
+# 已被钉成 root:root 0700，root 永远命中 preferred，不在 VAR 里造目录）。
+if [ "$(id -u 2>/dev/null)" = "0" ]; then
+	unset TMPDIR
+else
+	TMPDIR="$(oc_base_dir)/tmp"
+	export TMPDIR
+fi
 
 # ---------------------------------------------------------------- 降权
 # CLI 会在 $HOME/.openclaw 下写配置、凭据和会话文件。这些文件必须属于网关
@@ -114,7 +128,11 @@ if [ "$(id -u 2>/dev/null)" = "0" ] &&
 	# HOME / PATH 显式写在命令里：su 会按目标用户重设环境，而 CLI 必须看到
 	# 与网关一致的值。每个参数单独 quote_arg，绝不用 "$*" 拼——含空格的
 	# 参数会被拆开，含 shell 元字符的参数会被当成代码执行。
-	oc_cmd="HOME=$(quote_arg "$HOME") PATH=$(quote_arg "$PATH") exec $(quote_arg "$BIN")"
+	# cd 不能省：root 从 /root(0700) 执行时，su 之后 cwd 仍是 /root，
+	# 子进程在 spawn 阶段 chdir 失败，只报一句与权限无关的
+	# "Command failed during launch or output capture (EACCES)"。
+	# 同时 TMPDIR 在服务用户上下文里要显式给出（root 的那个已被 unset）。
+	oc_cmd="cd $(quote_arg "$HOME") 2>/dev/null || cd /tmp; TMPDIR=$(quote_arg "$(oc_base_dir)/tmp") HOME=$(quote_arg "$HOME") PATH=$(quote_arg "$PATH") exec $(quote_arg "$BIN")"
 	for oc_arg in "$@"; do
 		oc_cmd="$oc_cmd $(quote_arg "$oc_arg")"
 	done

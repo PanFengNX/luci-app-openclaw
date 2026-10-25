@@ -78,8 +78,12 @@ core_line = [l for l in init.splitlines()
 check(len(core_line) == 1, 'core_pattern 只在开关分支里写一次', 'hits=%d' % len(core_line))
 if core_line:
     idx = init.index(core_line[0])
-    before = init[max(0, idx - 600):idx]
+    # 取该 if 语句本身之前的足够窗口：DIAG 域的 mkdir/chown/chmod 也在分支内，
+    # 窗口要给够（600 会假失败）。
+    before = init[max(0, idx - 1200):idx]
     check('if [ "$core_dumps" = "1" ]' in before, 'core_pattern 写在 core_dumps 分支内')
+    # 顺带验证落点是 DIAG 域而不是 VAR 域（core 属主取决于崩溃进程，不该进用户域）
+    check('"$base/dumps"' in before, 'core 落在 DIAG 域（dumps/），不落 VAR 域')
 
 # ---- core_dumps 的读写链路：能存、能读、界面能提交 ----
 cli = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')

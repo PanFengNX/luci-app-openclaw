@@ -1,8 +1,87 @@
-<!-- version: 1.8.39 -->
+<!-- version: 1.8.40 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.40
+
+**临时根身份错位：按 Hermes 的实机验证修复。**
+
+### 机制（读 OpenClaw 源码 + 实机验证，不是我猜的）
+
+`resolvePreferredOpenClawTmpDir()` 的解析顺序：
+
+1. 试 `/tmp/openclaw` —— 合格判据两条：属主 == 当前 uid，且 `mode & 0o022 == 0`
+2. 不合格 → 回退 `$TMPDIR/openclaw-<uid>`，同样要求属主 == 当前 uid
+3. 再不合格 → **硬失败**，一切需要状态的操作被拒
+
+于是现场那个故障的完整链条是：
+
+1. wrapper 给 **root 上下文**设了 `TMPDIR=$BASE/tmp`（VAR 域内）；
+2. root 的 fallback 临时根就生在 `$BASE/tmp/openclaw-0` —— **VAR 域内部**；
+3. 此后任何一次 `chown -R VAR` 把它翻成服务用户；
+4. root 再跑 → `has owner uid 998, expected uid 0` → **永久被拒**。
+
+### 三处修复
+
+**① `/tmp/openclaw` 钉成 `root:root 0700`**（`oc_pin_system_tmp_root`）。
+
+属主与权限位要一起钉 —— 判据含 `mode & 0o022 == 0`，光改属主不够。
+放在**服务启动路径**（`procd_open_instance` 之前），因为 `/tmp` 是 tmpfs，
+重启即失，只在装包时做一次没用。
+
+钉好之后：root 永远命中 preferred（**不在 VAR 里造目录**），服务用户走自己的
+`$TMPDIR/openclaw-<uid>`（落在磁盘，日志因此持久，而不是留在 tmpfs 里重启丢失）。
+
+**② root 上下文不再设 `TMPDIR`**（wrapper）。这是故障的起点，必须断掉。
+`TMPDIR=$BASE/tmp` 只允许出现在**以服务用户运行**的命令串里。
+
+**③ 清理判据改为「basename 必须是 `openclaw-<纯数字>`」。**
+
+我 1.8.37 写的清理用的是 `openclaw-*` —— Hermes 实测**误删了 9 个目录**
+（`openclaw-update-report-*`、`openclaw-update-run-handoff-*`、
+`openclaw-<date>.log` 都在同一层）。
+
+先改成 `openclaw-[0-9]*`，但实测发现它**仍然会命中 `openclaw-2026-10-25.log`**
+（日期也以数字开头）。靠 `[ -d ]` 挡掉文件不够 —— 判据要独立成立，
+不能依赖"它恰好是文件"。现在用 `oc_is_tmp_root()`：拆出前缀与后缀，
+后缀必须非空且全为数字。实测判定：
+
+```
+openclaw-0                ✓ 是临时根
+openclaw-998              ✓ 是临时根
+openclaw-2026-10-25.log   ✗ 不是
+openclaw-update-report-x  ✗ 不是
+openclaw-                 ✗ 不是
+```
+
+### 结构性改动：启动路径不再做 `chown -R`（I4）
+
+这条是「修了反而起不来」的根治。原来启动时会「属主探测 + 条件 `chown -R`」，
+两个问题：
+
+- 判据是 **root 视角**（`stat -c %U`）。root 对被 root 拥有的 0755 目录永远可写，
+  所以这类判据只能看出「属主名字不对」，看不出「**服务用户实际打不开**」。
+- 判据只看**顶层**属主。内部被 root 写过的文件（doctor 以 root 跑就会产生）
+  不会被发现；一旦发现就退回全树 `chown -R` —— 7~8G、几万文件、几十秒，
+  还可能与正在运行中的网关抢同一批文件。
+
+现在启动只做 O(1) 断言，并以**服务用户身份**跑真实写入探针；
+失败就 fail closed（不启动），并打印一条可直接复制的修复命令。
+真正的属主修正只发生在显式维护路径：**`repair.sh owner-fix`**（新增）。
+
+### 顺带
+
+- `core_pattern` 从 `$base/logs`（VAR 域）改到 `$base/dumps`（DIAG 域，
+  `root:root 0700`）：core 的属主取决于崩溃进程，留在用户域里会制造
+  「非服务用户属主的文件」，清理还得动用户域。
+- 启动日志固定打印 `user=... base=... state=... tmp_root=...`，现场一眼可查。
+- 安装收尾以服务用户身份自检，失败即判安装失败 —— 与其「装完了但网关起不来」，
+  不如装不上并说清原因。
+- `oc_as_user` 的命令串内补 `cd $HOME`：root 从 `/root`（0700）调用时，
+  su 之后 cwd 仍是 `/root`，子进程 chdir 失败，只报一句与权限无关的
+  `Command failed during launch or output capture (EACCES)`。
 
 ## 1.8.39
 

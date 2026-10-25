@@ -20,12 +20,45 @@ FAILS=0
 OUT=""
 
 [ "${1:-}" = "--json" ] && JSON=1
+OWNER_FIX=0
 for a in "$@"; do
 	case "$a" in
 		--json) JSON=1 ;;
 		--no-restart) RESTART=0 ;;
+		# owner-fix：只修属主，不做其它检查。init 的断言失败时会提示这条命令，
+		# 所以它必须存在 —— 提示里给一条不存在的命令等于没给。
+		owner-fix) OWNER_FIX=1 ;;
 	esac
 done
+
+if [ "$OWNER_FIX" = "1" ]; then
+	# 显式维护路径：允许递归修正（这是 I4 的例外）。
+	# 启动路径只断言不修，修只能由用户显式触发 —— 这样"改错了"永远是
+	# 用户主动选择的结果，而不是启动时静默发生的副作用。
+	_fix_owner_tree() {
+		local d="$1"
+		[ -d "$d" ] || return 0
+		if grep -q "^${OC_USER}:" /etc/passwd 2>/dev/null; then
+			chown -R "$OC_USER:$OC_USER" "$d" 2>/dev/null || \
+				printf '警告：%s 属主修正未完全成功\n' "$d" >&2
+		fi
+		chmod -R u+rwX "$d" 2>/dev/null || true
+		printf '已修正属主：%s\n' "$d"
+	}
+	_fix_owner_tree "$HOME_DIR"
+	_fix_owner_tree "$DATA"
+	_fix_owner_tree "$BASE/logs"
+	_fix_owner_tree "$BASE/tmp"
+	# 顺手清掉别的身份留下的临时根（只匹配 openclaw-<数字>）
+	if command -v oc_sweep_stale_tmp >/dev/null 2>&1; then
+		oc_sweep_stale_tmp
+	fi
+	if command -v oc_pin_system_tmp_root >/dev/null 2>&1; then
+		oc_pin_system_tmp_root
+	fi
+	printf '属主修正完成。请重启服务：/etc/init.d/openclaw restart\n'
+	exit 0
+fi
 
 finish() {
 	if [ "$JSON" = "1" ]; then

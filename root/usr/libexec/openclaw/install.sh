@@ -1008,6 +1008,21 @@ finish() {
 	uci_commit
 	chmod +x /etc/init.d/openclaw 2>/dev/null
 	autostart_service
+	# 临时根与残留：装完立刻做一次，之后每次服务启动也会做（/tmp 是 tmpfs）。
+	oc_pin_system_tmp_root
+	oc_sweep_stale_tmp
+
+	# 以**服务用户身份**验证核心路径可访问。这是唯一可信的判据 ——
+	# root 视角看不出服务用户能否读写。失败即判安装失败：
+	# 与其"装完了但网关 EACCES 起不来"，不如装不上并说清原因。
+	if command -v oc_probe_user_access >/dev/null 2>&1; then
+		if oc_probe_user_access "$(oc_state_dir)"; then
+			ilog "权限自检通过：服务用户可写 $(oc_state_dir)"
+		else
+			die "权限自检失败：服务用户无法写入 $(oc_state_dir)。请执行 /usr/libexec/openclaw/repair.sh owner-fix 后重试"
+		fi
+	fi
+
 	ilog "== 部署完成 =="
 	ilog "OpenClaw $OCV  |  Node.js $NODE_V  |  目录 $BASE_DIR"
 }
@@ -1093,13 +1108,21 @@ main() {
 	#   expected uid 0
 	# 并拒绝 doctor / gateway status / 插件安装。
 	# 它们只是缓存，删掉无害，正确 uid 下次运行会重建。
-	_cache_dir="$HOME_DIR/.cache"
-	if [ -d "$_cache_dir" ]; then
-		for _d in "$_cache_dir"/openclaw-*; do
+	# 只清 openclaw-<数字>：同层还有 openclaw-update-report-*、
+	# openclaw-update-run-handoff-*、openclaw-<date>.log，
+	# 用 openclaw-* 会把它们一起删掉（Hermes 实测误删 9 个目录）。
+	# 两个位置都要清：$base/tmp（网关 TMPDIR，root 的 fallback 落在这里）
+	#   与 $HOME_DIR/.cache（OpenClaw 自己的 cache 目录）。
+	for _root in "$BASE_DIR/tmp" "$HOME_DIR/.cache"; do
+		[ -d "$_root" ] || continue
+		for _d in "$_root"/openclaw-*; do
 			[ -d "$_d" ] || continue
+			# 必须是 openclaw-<纯数字>：同层还有 openclaw-<date>.log，
+			# 它同样以数字开头，只靠 glob 挡不干净。
+			oc_is_tmp_root "$_d" || continue
 			rm -rf "$_d" 2>/dev/null || true
 		done
-	fi
+	done
 	run_doctor_after_upgrade
 	stage_end
 

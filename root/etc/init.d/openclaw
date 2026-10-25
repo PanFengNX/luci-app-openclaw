@@ -304,6 +304,76 @@ oc_schema_heal() {
 	return 0
 }
 
+# ── 临时根：与 lib.sh 的 oc_pin_system_tmp_root / oc_sweep_stale_tmp 一致 ──
+# 本文件不 source lib.sh，只能各留一份（同 oc_state_dir() 的做法）。
+# 这两处必须在**服务启动路径**里跑：/tmp 是 tmpfs，重启即失。
+_probe_user_write() {
+	# 以**服务用户身份**验证目录可写 —— 唯一可信的判据。
+	#
+	# root 的 [ -w ] / stat -c %U 只能看出"属主名字对不对"，看不出服务用户
+	# 能否访问（root 对被 root 拥有的 0755 目录永远可写）。这正是
+	# "权限看着正常却 EACCES" 的根源。
+	#
+	# 实现：把探测脚本写进一个变量，用 su -c 执行；避免在 su 命令串里
+	# 嵌套引号（那是上一版写法的问题，可读性差且容易错）。
+	local d="${1:-}" probe rc
+	[ -d "$d" ] || return 1
+	# 用固定文件名 + $$，与调用进程绑定；写在目标目录里才能真正验证可写性。
+	probe="$d/.oc-write-probe.$$"
+	su -s /bin/sh "$OC_USER" -c "touch '$probe' 2>/dev/null" 2>/dev/null
+	rc=$?
+	if [ "$rc" -eq 0 ] && [ -f "$probe" ]; then
+		rm -f "$probe" 2>/dev/null || true
+		return 0
+	fi
+	rm -f "$probe" 2>/dev/null || true
+	return 1
+}
+
+_is_tmp_root() {
+	# _is_tmp_root <path> -> 0 当且仅当 basename 是 openclaw-<纯数字>
+	#
+	# 为什么不能只靠 glob openclaw-[0-9]*：那一层还有 openclaw-<date>.log
+	# （形如 openclaw-2026-10-25.log，以数字开头，会被 glob 命中）。
+	# 靠 [ -d ] 挡掉文件是不够的 —— 判据要独立成立，不依赖"它恰好是文件"。
+	local n suf
+	n="${1##*/}"
+	case "$n" in openclaw-*) ;; *) return 1 ;; esac
+	suf="${n#openclaw-}"
+	case "$suf" in ''|*[!0-9]*) return 1 ;; esac
+	return 0
+}
+
+_pin_system_tmp_root() {
+	mkdir -p /tmp/openclaw 2>/dev/null || return 0
+	chown root:root /tmp/openclaw 2>/dev/null || true
+	chmod 700 /tmp/openclaw 2>/dev/null || true
+	return 0
+}
+
+_sweep_stale_tmp() {
+	# 只匹配 openclaw-[0-9]：同层还有 openclaw-update-report-*、
+	# openclaw-update-run-handoff-*、openclaw-<date>.log，用 openclaw-*
+	# 会把它们一起删掉。
+	local uid d root o name
+	uid="$(id -u "$OC_USER" 2>/dev/null)"
+	case "${uid:-}" in ''|*[!0-9]*) return 0 ;; esac
+	for root in "$base/tmp" "$state_dir/tmp" /tmp; do
+		[ -d "$root" ] || continue
+		for d in "$root"/openclaw-*; do
+			[ -d "$d" ] || continue
+			# 必须是 openclaw-<纯数字>（同层还有 openclaw-<date>.log）
+			_is_tmp_root "$d" || continue
+			name="${d##*/}"
+			[ "${name#openclaw-}" = "$uid" ] && continue
+			o="$(stat -c %u "$d" 2>/dev/null)"
+			rm -rf "$d" 2>/dev/null && \
+				logger -t openclaw "已清理残留临时根 $d（原属主 uid=${o:-未知}）"
+		done
+	done
+	return 0
+}
+
 start_service() {
 	local base nodedir globaldir home state_dir entry node_bin
 	local port bind token json_port json_bind json_token cfg envfile
@@ -397,53 +467,39 @@ start_service() {
 		force_opt="--force"
 	fi
 
-	# 递归 chown/chmod 只在需要时才做 —— 但判定不能只看顶层。
-	# $home 下 7.8G（agents 4.5G / extensions 1.4G / workspace 620M），
-	# 每次启动遍历几万文件要几十秒到分钟级，正好叠加在冷启动的 28-90s 上。
+	# ── VAR 域可访问性：只断言，不修 ─────────────────────────────────
 	#
-	# 只看顶层属主是不够的：顶层正确、内部却被 root 写过（比如 doctor 以 root
-	# 跑过、或手工 cp 过文件）时，网关仍会因 EACCES 失败，而这里永远跳过修复。
-	# 折中：顶层正确时**只查一层**（网关直接读写的几个关键目录 + $home 自身），
-	# 发现任何一个不对就退回完整递归。查一层是几十次 stat，代价可忽略。
-	_need_recursive=0
+	# 这里以前做「属主探测 + 条件 chown -R」。三个问题：
+	#   1. 判据是 root 视角（stat -c %U）。root 对被 root 拥有的 0755 目录
+	#      永远可写，所以这类判据只能看出"属主名字不对"，看不出"服务用户
+	#      实际打不开" —— 表现为改完网关仍然 EACCES。
+	#   2. 判据只看顶层属主。内部被 root 写过的文件（doctor 以 root 跑就会
+	#      产生）不会被发现；一旦发现就退回全树 chown -R，7~8G、几万文件、
+	#      几十秒，还可能与正在运行的网关抢同一批文件。
+	#   3. "修了反而起不来"正是这类事后修正的产物。
+	# 现在只做 O(1) 断言，并以**服务用户身份**验证真的能写；
+	# 失败就 fail closed（不启动），给出可直接复制的修复命令。
+	# 真正的属主修正在显式维护命令里（repair / adopt），不在启动路径。
+	_var_problem=""
 	if [ "$(stat -c %U "$home" 2>/dev/null)" != "$OC_USER" ]; then
-		_need_recursive=1
-	else
-		for _d in "$home/.openclaw" "$home/.openclaw/workspace" \
-			"$home/.openclaw/agents" "$home/.openclaw/extensions" \
-			"$home/.openclaw/logs" "$home/.openclaw/tmp"; do
-			[ -e "$_d" ] || continue
-			[ "$(stat -c %U "$_d" 2>/dev/null)" = "$OC_USER" ] || {
-				_need_recursive=1
-				logger -t openclaw "属主不一致：$_d（将执行完整 chown）"
-				break
-			}
-		done
+		_var_problem="$home 属主不是 $OC_USER"
 	fi
-	if [ "$_need_recursive" = "1" ]; then
-		# 文件系统不支持属主时，chown -R 除了遍历几万文件、全部失败、
-		# 再刷一条告警之外没有任何作用。直接跳过，只做 chmod。
-		if oc_fs_supports_fowner "$home"; then
-			_fix_owner "$home"
-		else
-			logger -t openclaw "说明：$home 所在文件系统不支持设置属主，跳过 chown（只修权限位）"
-		fi
-		chmod -R u+rwX "$home" 2>/dev/null || _warn_chmod "$home"
-	else
-		# 关键目录都对，只补顶层权限位（可能有目录被改过 mode），不做递归。
-		chmod u+rwX "$home" 2>/dev/null || true
+	if [ -z "$_var_problem" ] && [ "$(stat -c %U "$state_dir" 2>/dev/null)" != "$OC_USER" ]; then
+		_var_problem="$state_dir 属主不是 $OC_USER"
 	fi
-	# state_dir 在 $home 之外时（迁移已有安装），上面的 chown 覆盖不到它，
-	# 服务用户对网关要写的 openclaw.json / 会话 / 工作区没有权限。
-	# 但这是用户可配置路径：先校验再递归操作，不安全的只告警、继续启动。
-	if [ "$state_dir" != "$home/.openclaw" ]; then
-		if _state_dir_safe "$state_dir"; then
-			_fix_owner "$state_dir"
-			chmod -R u+rwX "$state_dir" 2>/dev/null || _warn_chmod "$state_dir"
-		else
-			logger -t openclaw "state_dir 不在允许清理的范围内，跳过属主修正：$state_dir"
-		fi
+	# 用户视角探针：这是唯一可信的"服务用户能不能写"判据。
+	if [ -z "$_var_problem" ] && ! _probe_user_write "$state_dir"; then
+		_var_problem="$state_dir 对 $OC_USER 不可写（root 视角可能显示正常）"
 	fi
+
+	if [ -n "$_var_problem" ]; then
+		logger -t openclaw "拒绝启动：$_var_problem"
+		logger -t openclaw "修复：/usr/libexec/openclaw/repair.sh owner-fix   （或 LuCI「一键修复」）"
+		return 1
+	fi
+
+	# 顶层权限位补一次（防 mode 被改），不递归。
+	chmod u+rwX "$home" 2>/dev/null || true
 
 	env_args="$(_env_args "$state_dir/.env")"
 	# 只在拿到明文 token 时才导出 OPENCLAW_GATEWAY_TOKEN。
@@ -458,6 +514,17 @@ start_service() {
 			*) token_env="OPENCLAW_GATEWAY_TOKEN=$token" ;;
 		esac
 	fi
+
+	# 临时根必须在 procd 起网关**之前**钉好：
+	#  - 钉成 root:root 0700 后，root 永远命中 preferred /tmp/openclaw，
+	#    不会在 VAR 域（$base/tmp）里造 openclaw-0 被后续 chown 翻属主；
+	#  - 服务用户因此走自己的 $TMPDIR/openclaw-<uid>，日志落在磁盘而不是
+	#    tmpfs（重启不再丢）。
+	_pin_system_tmp_root
+	_sweep_stale_tmp
+
+	# 身份一眼可查：排查时不用再猜"这次是谁在跑"
+	logger -t openclaw "启动：user=$OC_USER(uid=$(id -u "$OC_USER" 2>/dev/null)) base=$base state=$state tmp_root=$(stat -c '%U:%a' /tmp/openclaw 2>/dev/null)"
 
 	procd_open_instance "gateway"
 	# The token is NOT passed as --token any more: every local user can read
@@ -516,7 +583,12 @@ start_service() {
 		mkdir -p "$base/logs" 2>/dev/null || true
 		chown "$OC_USER:$OC_USER" "$base/logs" 2>/dev/null || _warn_chown "$base/logs"
 		# %e 可执行名 %t 时间戳 %p pid %s 信号
-		printf '%s/core.%%e.%%t.%%p.%%s\n' "$base/logs" >/proc/sys/kernel/core_pattern 2>/dev/null \
+		# 落 DIAG 域（根属主 0700），不落 VAR 域：core 的属主取决于崩溃进程，
+		# 混进用户域会制造"非服务用户属主的文件"，清理还得动用户域。
+		mkdir -p "$base/dumps" 2>/dev/null || true
+		chown root:root "$base/dumps" 2>/dev/null || true
+		chmod 700 "$base/dumps" 2>/dev/null || true
+		printf '%s/core.%%e.%%t.%%p.%%s\n' "$base/dumps" >/proc/sys/kernel/core_pattern 2>/dev/null \
 			|| logger -t openclaw "无法写入 core_pattern，core 可能落到默认位置"
 		logger -t openclaw "core dump 已开启：$base/logs"
 	fi

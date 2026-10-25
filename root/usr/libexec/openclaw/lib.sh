@@ -1351,6 +1351,99 @@ oc_fs_supports_fowner() {
 	esac
 }
 
+oc_probe_user_access() {
+	# 以服务用户身份验证目录可写（供 install / repair / selftest 共用）。
+	# root 的 [ -w ] 对被 root 拥有的 0755 目录永远为真，不能作为判据。
+	local d="${1:-}" probe rc
+	[ -d "$d" ] || return 1
+	probe="$d/.oc-write-probe.$$"
+	su -s /bin/sh "${OC_USER:-openclaw}" -c "touch '$probe' 2>/dev/null" 2>/dev/null
+	rc=$?
+	# 判 rc 之外还要确认文件真的建出来了：某些文件系统上 touch 不报错但
+	# 没有创建（或创建在别处）。两者都满足才算"可写"。
+	if [ "$rc" -eq 0 ] && [ -f "$probe" ]; then
+		rm -f "$probe" 2>/dev/null || true
+		return 0
+	fi
+	rm -f "$probe" 2>/dev/null || true
+	return 1
+}
+
+oc_is_tmp_root() {
+	# oc_is_tmp_root <path> -> 0 当且仅当 basename 是 openclaw-<纯数字>
+	#
+	# 为什么不能只靠 glob openclaw-[0-9]*：那一层还有 openclaw-<date>.log
+	# （形如 openclaw-2026-10-25.log，以数字开头，会被 glob 命中）。
+	# 靠 [ -d ] 挡掉文件是不够的 —— 判据要独立成立，不依赖"它恰好是文件"。
+	local n suf
+	n="${1##*/}"
+	case "$n" in openclaw-*) ;; *) return 1 ;; esac
+	suf="${n#openclaw-}"
+	case "$suf" in ''|*[!0-9]*) return 1 ;; esac
+	return 0
+}
+
+oc_pin_system_tmp_root() {
+	# /tmp/openclaw 钉成 root:root 0700 —— 这是消除"临时根身份错位"的关键。
+	#
+	# 机制（读 OpenClaw 源码 + Hermes 实机验证）：
+	#   resolvePreferredOpenClawTmpDir() 先试 /tmp/openclaw，
+	#   合格判据两条：属主 == 当前 uid，且 mode & 0o022 == 0。
+	#   不合格就回退 os.tmpdir()/openclaw-<uid>（即 $TMPDIR/openclaw-<uid>），
+	#   同样要求属主 == 当前 uid；再不合格则**硬失败**，一切需要状态的操作被拒。
+	#
+	# 后果链条（就是现场那个故障）：
+	#   1. root 的 TMPDIR 是 $BASE/tmp（procd 之外我们自己设的）→
+	#      root 的 fallback 落在 **VAR 域内部** $BASE/tmp/openclaw-0；
+	#   2. 此后任何一次 chown -R VAR 把它翻成 998；
+	#   3. root 再跑 → "has owner uid 998, expected uid 0" → 永久被拒。
+	#
+	# 钉成 root:root 0700 之后：root 永远命中 preferred（不在 VAR 里造目录），
+	# 服务用户走自己的 $TMPDIR/openclaw-<uid>（落在 $BASE/tmp，日志因此落盘，
+	# 而不是留在 tmpfs 里每次重启丢失）。
+	#
+	# 幂等；/tmp 是 tmpfs，重启即失，所以必须在**服务启动路径**里调用，
+	# 不能只在装包时做一次。
+	mkdir -p /tmp/openclaw 2>/dev/null || return 0
+	chown root:root /tmp/openclaw 2>/dev/null || true
+	# 权限位必须一起钉：判据含 mode & 0o022 == 0，改成 0777 会让 root 的
+	# preferred 判定失败、又退回 fallback，污染复发。
+	chmod 700 /tmp/openclaw 2>/dev/null || true
+	return 0
+}
+
+oc_sweep_stale_tmp() {
+	# 清掉临时根里**别的身份**留下的 openclaw-<uid> 目录。
+	#
+	# 只匹配 openclaw-[0-9]：同一层还有 openclaw-update-report-*、
+	# openclaw-update-run-handoff-*、openclaw-<date>.log，
+	# 用 openclaw-* 会把它们一起删掉（Hermes 实测误删 9 个）。
+	#
+	# 这些目录只含日志/缓存/锁，删之无损；服务用户自己的那个保留。
+	local base state uid d root o name
+	base="$(oc_base_dir 2>/dev/null)/tmp"
+	state="$(oc_state_dir 2>/dev/null)"
+	uid="$(id -u "${OC_USER:-openclaw}" 2>/dev/null)"
+	case "${uid:-}" in ''|*[!0-9]*) return 0 ;; esac
+
+	for root in "$base" "$state/tmp" /tmp; do
+		[ -d "$root" ] || continue
+		for d in "$root"/openclaw-*; do
+			[ -d "$d" ] || continue
+			# 必须是 openclaw-<纯数字>：同层还有 openclaw-<date>.log 等，
+			# 只靠 glob 与 [ -d ] 挡不干净。
+			oc_is_tmp_root "$d" || continue
+			name="${d##*/}"
+			# 服务用户自己的保留
+			[ "${name#openclaw-}" = "$uid" ] && continue
+			o="$(stat -c %u "$d" 2>/dev/null)"
+			rm -rf "$d" 2>/dev/null && \
+				oc_warn "已清理残留临时根 $d（原属主 uid=${o:-未知}）"
+		done
+	done
+	return 0
+}
+
 oc_as_user() {
 	# oc_as_user <cmd> [args...] —— 以网关用户身份执行命令
 	#
@@ -1369,12 +1462,19 @@ oc_as_user() {
 	[ "$(id -u 2>/dev/null)" = "$(id -u "$u" 2>/dev/null)" ] && { "$@"; return $?; }
 	grep -q "^${u}:" /etc/passwd 2>/dev/null || { "$@"; return $?; }
 
-	# busybox su 与 util-linux su 都支持 -s / -c；用 sh -c 包一层以支持
-	# 带参数的命令（su -c 只接一个字符串）。
+	# 不传 TMPDIR：root 的上下文里 TMPDIR 绝不能指向 VAR 域，否则
+	# 它的 fallback 临时根会生在 VAR 里，被后来的 chown -R 翻成服务用户，
+	# 从此 root 永久被拒（现场故障的完整成因）。
+	# 以服务用户跑时 TMPDIR 由调用方（procd env / 显式传参）决定。
 	local quoted="" a
 	for a in "$@"; do
 		quoted="$quoted $(printf '%s' "$a" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")"
 	done
+	# cwd 必须可访问：root 从 /root(0700) 调用时，su 之后 cwd 仍指向 /root，
+	# 子进程在 spawn 阶段 chdir 失败，只报一句与权限无关的
+	# "Command failed during launch or output capture (EACCES)"。
+	# 这是该报错的唯一成因，必须在命令串**内部** cd。
+	quoted="cd $(printf '%s' "${OC_HOME_FOR_USER:-$HOME}" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/") 2>/dev/null || cd /tmp; $quoted"
 	# shellcheck disable=SC2086
 	su -s /bin/sh "$u" -c "$quoted" 2>/dev/null
 }

@@ -452,6 +452,61 @@ ctrl = (proj / 'luasrc/controller/openclaw.lua').read_text(encoding='utf-8')
 check('api_cloud_backup_bg' in ctrl and 'api_cloud_backup_poll' in ctrl,
       '后端两个端点都已注册')
 
+# ---- 临时根身份错位（Hermes 实机验证的方案）----
+lib11 = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
+init11 = (proj / 'root/etc/init.d/openclaw').read_text(encoding='utf-8')
+wr11 = (proj / 'root/usr/bin/openclaw').read_text(encoding='utf-8')
+ins11 = (proj / 'root/usr/libexec/openclaw/install.sh').read_text(encoding='utf-8')
+rep11 = (proj / 'root/usr/libexec/openclaw/repair.sh').read_text(encoding='utf-8')
+
+# 机制核心：/tmp/openclaw 必须钉成 root:root 0700
+check('oc_pin_system_tmp_root()' in lib11, 'lib.sh 有 oc_pin_system_tmp_root')
+check('chown root:root /tmp/openclaw' in lib11, '把它 chown 成 root')
+check('chmod 700 /tmp/openclaw' in lib11, '权限位一起钉（判据含 mode & 0o022）')
+check('_pin_system_tmp_root' in init11, 'init.d 启动路径里也钉（/tmp 是 tmpfs，重启即失）')
+pin_i = init11.index('_pin_system_tmp_root()')
+check(pin_i < init11.index('procd_open_instance'), '钉属主的定义在 procd 起网关之前')
+
+# 清理：glob 必须收窄，否则误删 openclaw-update-report-*
+# glob 不够：openclaw-[0-9]* 也会命中 openclaw-<date>.log（以数字开头）。
+# 必须用「basename 是 openclaw-<纯数字>」的独立判据。
+check('oc_is_tmp_root()' in lib11, 'lib 有 oc_is_tmp_root 严格判据')
+check('_is_tmp_root()' in init11, 'init 有 _is_tmp_root 严格判据')
+check('oc_is_tmp_root "$d"' in lib11, 'lib 清理用严格判据')
+check('_is_tmp_root "$d"' in init11, 'init 清理用严格判据')
+check('oc_is_tmp_root "$_d"' in ins11, 'install 清理用严格判据')
+# 用 glob 收集 + oc_is_tmp_root 严格判定，两者必须成对出现。
+# 只检查"没有裸 glob"已经过时：真正的保护是判据，不是 glob 收窄。
+_ins_lines = ins11.splitlines()
+_glob_i = [i for i, l in enumerate(_ins_lines)
+           if 'openclaw-*' in l and not l.lstrip().startswith('#')]
+_paired = all(any('oc_is_tmp_root' in _ins_lines[j]
+                   for j in range(i + 1, min(i + 6, len(_ins_lines))))
+              for i in _glob_i)
+check(_paired, 'install 的每个 openclaw-* glob 都紧跟严格判据', 'globs=%d' % len(_glob_i))
+
+# I2/I3：状态操作以服务用户跑；root 不设 TMPDIR
+check('unset TMPDIR' in wr11, 'wrapper 在 root 上下文 unset TMPDIR（故障起点）')
+check('cd ' in wr11 and 'exec' in wr11, 'wrapper 的 su 命令串内有 cd（EACCES 成因）')
+check('oc_as_user' in ins11, 'install 的 doctor 走 oc_as_user')
+check('oc_probe_user_access()' in lib11, 'lib 有以服务用户身份的写探针')
+check('oc_probe_user_access' in ins11, '安装期即以服务用户身份自检')
+
+# I4：启动路径不再递归 chown
+_st = init11[init11.index('start_service() {'):]
+_st = _st[:_st.index(chr(10) + '}' + chr(10))]
+_st_code = chr(10).join(l.split('#', 1)[0] for l in _st.splitlines())
+check('chown -R' not in _st_code, 'start_service 代码里没有 chown -R（I4：无事后修正）')
+check('_probe_user_write' in _st, 'start_service 改用用户视角探针')
+check('_var_problem' in _st, '断言失败 fail closed 并给修复命令')
+
+# 修复命令必须真的存在
+check('owner-fix' in rep11, 'repair.sh 提供 owner-fix（断言提示的那条命令）')
+check('_fix_owner_tree' in rep11, 'owner-fix 会修属主树')
+
+# DIAG 域
+check('$base/dumps' in init11, 'core 落 DIAG 域 dumps/')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF
