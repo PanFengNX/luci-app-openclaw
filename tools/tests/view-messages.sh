@@ -238,6 +238,26 @@ check('_log_gateway' in cl3, 'cmd_log 有 gateway 来源')
 check('logread' in cl3, 'cmd_log 会读 logread')
 check('本机没有 logread' in cl3, '无 logread 时给出明确说明而不是空输出')
 
+# ---- 交互反馈（用户反馈："点了没反应，不知道点没点上"）----
+setup2 = (proj / 'luasrc/view/openclaw/setup.htm').read_text(encoding='utf-8')
+check('button:active:not(:disabled)' in setup2, '按钮有按下反馈（:active）')
+check('[data-busy="1"]' in setup2, '按钮有忙态样式（旋转指示器）')
+check('prefers-reduced-motion' in setup2, '动效尊重 prefers-reduced-motion')
+check('.oc-modal-mask' in setup2, '有统一的弹窗样式')
+check('.oc-progress' in setup2, '有不确定态进度条')
+
+stv3 = (proj / 'luasrc/view/openclaw/status.htm').read_text(encoding='utf-8')
+check('id="up-modal"' in stv3, '状态页升级有弹窗')
+check('upModalOpen(' in stv3, '升级开始即弹窗')
+check("upModalState(d.state === 'done' ? 'done' : 'failed')" in stv3,
+      '升级结束切换弹窗状态')
+check("if (d.state === 'lost')" in stv3, '升级中断会停止轮询并恢复按钮')
+check("b.setAttribute('data-busy', '1')" in stv3, '服务按钮点哪个哪个转圈')
+
+ins3 = (proj / 'luasrc/view/openclaw/install.htm').read_text(encoding='utf-8')
+check('需要下载数百 MB' in ins3, '安装前有确认对话框（说明目录/版本/耗时）')
+check('id="in-progress"' in ins3, '安装弹窗有进度条')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

@@ -1255,33 +1255,37 @@ oc_gateway_pids() {
 	# 既不含 node 路径也不含 "gateway run"。同理 comm 变成 "openclaw-gatewa"
 	# （15 字符截断），所以 `pgrep -x node` 也永远不中。
 	#
-	# 实测（iStoreOS 25.12 / Node v26）：
-	#   /proc/<pid>/cmdline -> "openclaw-gateway"
-	#   ss -lntp            -> 10996/openclaw-gate
-	# 旧实现因此返回空，导致：状态页永远「已停止」、install.sh 的停服门不触发
-	# （在活进程脚下替换 node_modules）、oc_kill_tree 空转。
-	#
-	# 现在的主判据是 basename(argv[0]) == openclaw-gateway，保留
-	# "<node> ... gateway ..." 作为兼容分支（上游若改回不改 title 的启动方式）。
-	# 遍历 /proc 而不是 pgrep：comm 被截断、-f 又会误伤，直接读 cmdline 最可靠。
-	local d p a0 base nb cmd
+	# 性能：**不能对每个 pid 都 fork**。原来的写法对每个 pid 跑
+	# `tr` + `head` 两次命令替换，几百个进程就是上千次 fork —— 单次调用
+	# 在路由器上要几秒，而 install.sh 的「等进程退出」循环每秒调一次，
+	# 于是升级过程像卡死。这里先用内建 read 读 comm（零 fork）预筛，
+	# 只有 comm 像 node / openclaw-gatewa 的才去读 cmdline。
+	local d p comm a0 nb cmd
 	nb="$(oc_node_bin 2>/dev/null)"
 	for d in /proc/[0-9]*; do
 		p="${d#/proc/}"
 		[ "$p" = "$$" ] && continue
-		# pid 可能在两次读取之间消失。重定向顺序很关键：
-		# `tr ... <file 2>/dev/null` 会先处理 <file，失败信息在 2>/dev/null
-		# 生效之前就打到 stderr 了；必须把 2>/dev/null 写在前面。
+		comm=""
+		[ -r "$d/comm" ] && read -r comm 2>/dev/null <"$d/comm"
+		[ -n "$comm" ] || continue
+
+		# 主判据：process.title 改写后 comm 是 openclaw-gatewa（15 字符截断）
+		case "$comm" in
+			openclaw-gatewa*|openclaw-gateway)
+				printf '%s\n' "$p"
+				continue ;;
+		esac
+
+		# 兼容分支：还没改 title 时 comm 是 node / node-MainThread
+		case "$comm" in
+			node|node-*) ;;
+			*) continue ;;
+		esac
+
 		[ -r "$d/cmdline" ] || continue
 		cmd="$(tr '\0' '\n' 2>/dev/null <"$d/cmdline")"
 		[ -n "$cmd" ] || continue
 		a0="$(printf '%s\n' "$cmd" | head -n1)"
-		base="${a0##*/}"
-		if [ "$base" = "openclaw-gateway" ]; then
-			printf '%s\n' "$p"
-			continue
-		fi
-		# 兼容分支：仍然是 node 在跑 gateway 子命令
 		if [ -n "$nb" ] && [ "$a0" = "$nb" ]; then
 			case "$(printf '%s' "$cmd" | tr '\n' ' ')" in
 				*" gateway "*|*" gateway run"*) printf '%s\n' "$p" ;;

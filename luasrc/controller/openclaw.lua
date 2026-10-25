@@ -328,7 +328,24 @@ function api_install()
 	local args = " install-bg --oc-version " .. q(ocv) .. " --node-version " .. q(ndv)
 	if dir ~= "" then args = args .. " --base-dir " .. q(dir) end
 	if odir ~= "" then args = args .. " --openclaw-dir " .. q(odir) end
-	sh(SH .. args)
+
+	-- 这里必须看 install-bg 的退出码，不能无条件 ok=true。
+	--
+	-- install-bg 有三条**同步**拒绝路径（都只写 stderr + exit 2）：
+	--   * require_safe 失败（base_dir 是系统路径 / 端口不安全）
+	--   * 已持有操作锁（另一个操作在跑）
+	--   * 已有安装进程在跑
+	-- 而 sh() 只取 stdout、刻意丢弃 stderr（那是给 JSON 端点防污染用的）。
+	-- 两者一叠加，拒绝原因彻底消失，前端只收到 ok=true，于是
+	--   「点了升级 → 没有任何日志 → 界面像卡死」
+	-- —— 因为后台进程压根没起来，install-status 永远查不到 running。
+	-- 用 run_capture 同时拿退出码与输出，失败时把真实原因回给前端。
+	local ok, out_txt = run_capture(SH .. args)
+	if not ok then
+		out({ ok = false,
+			error = (out_txt ~= "" and out_txt) or "安装进程启动失败（无输出）" })
+		return
+	end
 	out({ ok = true })
 end
 

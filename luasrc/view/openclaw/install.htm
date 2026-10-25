@@ -304,6 +304,80 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
    合计 36px，可用宽度被吃掉一截；上下 22px 也与卡片的 18px 不一致。 */
 .oc-card>.oc-empty{padding:18px 12px;margin:2px 0}
 
+/* ── 按钮按下反馈与忙态 ─────────────────────────────────────────────
+   触屏与低 DPI 屏上，hover 基本不出现；没有 :active 时按钮点下去毫无变化，
+   用户会怀疑没点上、于是连点好几次（服务控制类按钮连点尤其糟）。
+   这里补三件事：
+     1. :active 下沉 1px + 轻微变暗 —— 鼠标和手指都立刻有反馈；
+     2. [data-busy] 显示旋转指示器，并把文字变半透明；
+     3. prefers-reduced-motion 下关掉过渡与旋转（无障碍要求）。
+   spinner 用纯 CSS border 实现，不引入图标库、不增加请求。 */
+button:active:not(:disabled),.oc-btn:active:not(:disabled){
+  transform:translateY(1px);filter:brightness(.88)}
+.oc-btn.ghost:active:not(:disabled),button.ghost:active:not(:disabled){
+  background:var(--oc-line-soft);filter:none}
+button:focus:not(:focus-visible),.oc-btn:focus:not(:focus-visible){outline:none}
+
+/* 忙态：JS 只需 btn.dataset.busy = '1'（或加 class is-busy） */
+button[data-busy="1"],.oc-btn[data-busy="1"]{
+  position:relative;color:transparent !important;pointer-events:none}
+button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
+  content:"";position:absolute;left:50%;top:50%;width:14px;height:14px;
+  margin:-7px 0 0 -7px;border:2px solid currentColor;
+  border-top-color:transparent;border-radius:50%;
+  color:#fff;animation:oc-spin .7s linear infinite}
+.oc-btn.ghost[data-busy="1"]::after,button.ghost[data-busy="1"]::after{color:inherit}
+/* 忙态下文字仍要占位，否则按钮宽度会跳：用 ::before 撑住原文 */
+@keyframes oc-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){
+  button,.oc-btn{transition:none !important}
+  button:active:not(:disabled),.oc-btn:active:not(:disabled){transform:none}
+  button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{animation:none}
+  .oc-modal,.oc-modal-mask{transition:none !important}
+}
+
+/* ── 弹窗（安装/升级进度）────────────────────────────────────────
+   iStore 那种"点完就弹窗、实时滚日志"的做法确实更让人安心：
+   操作有明确的开始、有进度、有结束状态。这里统一一套弹窗样式，
+   安装页与状态页共用。 */
+.oc-modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);
+  z-index:9000;display:flex;align-items:center;justify-content:center;padding:16px;
+  animation:oc-fade .12s ease}
+@keyframes oc-fade{from{opacity:0}to{opacity:1}}
+.oc-modal{background:#fff;border-radius:10px;max-width:760px;width:100%;
+  max-height:86vh;display:flex;flex-direction:column;
+  box-shadow:0 12px 40px rgba(0,0,0,.3);overflow:hidden;
+  animation:oc-pop .14s ease}
+@keyframes oc-pop{from{transform:scale(.97);opacity:.6}to{transform:scale(1);opacity:1}}
+@media (prefers-color-scheme:dark){
+  .oc-modal{background:#20242b;color:#e6e6e6}
+  .oc-modal-head,.oc-modal-foot{border-color:rgba(255,255,255,.08)}
+}
+.oc-modal-head{display:flex;align-items:center;gap:8px;padding:12px 16px;
+  border-bottom:1px solid var(--oc-line-soft)}
+.oc-modal-head h4{margin:0;font-size:14px}
+.oc-spacer{flex:1 1 auto}
+.oc-modal-body{padding:12px 16px;overflow:auto;flex:1 1 auto;min-height:0}
+.oc-modal-foot{display:flex;align-items:center;gap:8px;padding:10px 16px;
+  border-top:1px solid var(--oc-line-soft);flex-wrap:wrap}
+.oc-log{background:#1e1e1e;color:#e6e6e6;border-radius:6px;padding:10px 12px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
+  line-height:1.5;white-space:pre-wrap;word-break:break-word;
+  overflow:auto;max-height:52vh;min-height:120px}
+.oc-log-sm{max-height:260px;min-height:80px}
+
+/* 进度条：未知总长度时用不确定态（左右扫动），比空着好 */
+.oc-progress{height:4px;background:var(--oc-line-soft);border-radius:2px;
+  overflow:hidden;margin:0 0 10px}
+.oc-progress>i{display:block;height:100%;width:30%;background:var(--oc-accent);
+  border-radius:2px;animation:oc-slide 1.3s ease-in-out infinite}
+@keyframes oc-slide{0%{margin-left:-30%}100%{margin-left:100%}}
+.oc-progress.is-done>i{width:100%;margin-left:0;animation:none;background:var(--oc-ok)}
+.oc-progress.is-fail>i{width:100%;margin-left:0;animation:none;background:var(--oc-err)}
+@media (prefers-reduced-motion:reduce){
+  .oc-progress>i{animation:none;width:60%;margin-left:20%}
+}
+
 /* ── 窄屏 ─────────────────────────────────────────────────────── */
 @media (max-width:640px){
   .oc-card{padding:16px 14px}
@@ -449,6 +523,7 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
       <span class="oc-badge oc-none" id="log-modal-state" style="display:none"></span>
     </div>
     <div class="oc-modal-body">
+      <div class="oc-progress" id="in-progress"><i></i></div>
       <div class="oc-log" id="in-log">（尚未开始）</div>
     </div>
     <div class="oc-modal-foot">
@@ -1056,6 +1131,13 @@ function setLogState(st){
   el.className = 'oc-badge ' + v[0];
   el.textContent = v[1];
   el.style.display = '';
+  // 进度条同步：运行中是不确定态（左右扫动），结束切成满格绿/红。
+  // 只有日志在滚、没有进度条时，用户分不清"在下载"还是"卡住了"。
+  var pr = $('in-progress');
+  if (pr){
+    pr.className = 'oc-progress' +
+      (st === 'done' ? ' is-done' : (st === 'failed' || st === 'lost') ? ' is-fail' : '');
+  }
 }
 
 function logSay(text){
@@ -1316,6 +1398,21 @@ $('btn-install').onclick = function(){
   var payload = collectEnvPayload();
   if (!payload) return;
   var inst = payload.install, nm = payload.nm, data = payload.save;
+
+  // 确认框：安装/升级是重操作（下载几百 MB、会短暂停服务），
+  // 必须先让用户看清"装到哪、装什么版本、会不会动数据"再动手。
+  var d0 = state.info || {};
+  var ver = (inst && inst.oc_version) || '最新';
+  var ndv = (inst && inst.node_version) || 'auto';
+  var baseDir = (inst && inst.base_dir) || d0.base_dir || '';
+  var already = !!(d0.installed && d0.openclaw);
+  if (!confirm((already ? '将重新安装 / 升级 OpenClaw' : '将安装 OpenClaw')
+      + '：\n\n'
+      + '· 安装目录：' + baseDir + '\n'
+      + '· OpenClaw 版本：' + ver + '\n'
+      + '· Node.js：' + (ndv === 'auto' ? '自动选择满足要求的版本' : ndv) + '\n\n'
+      + (already ? '过程中网关会短暂停止；配置、会话与插件数据保留。\n\n' : '')
+      + '需要下载数百 MB，视网络情况可能需要几分钟。继续？')) return;
 
   // 从这一刻起才有日志可看：直接弹出来，用户点完按钮就能看到进度，
   // 而不是先去找一个藏在页面底部的黑框。

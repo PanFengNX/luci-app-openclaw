@@ -304,6 +304,80 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
    合计 36px，可用宽度被吃掉一截；上下 22px 也与卡片的 18px 不一致。 */
 .oc-card>.oc-empty{padding:18px 12px;margin:2px 0}
 
+/* ── 按钮按下反馈与忙态 ─────────────────────────────────────────────
+   触屏与低 DPI 屏上，hover 基本不出现；没有 :active 时按钮点下去毫无变化，
+   用户会怀疑没点上、于是连点好几次（服务控制类按钮连点尤其糟）。
+   这里补三件事：
+     1. :active 下沉 1px + 轻微变暗 —— 鼠标和手指都立刻有反馈；
+     2. [data-busy] 显示旋转指示器，并把文字变半透明；
+     3. prefers-reduced-motion 下关掉过渡与旋转（无障碍要求）。
+   spinner 用纯 CSS border 实现，不引入图标库、不增加请求。 */
+button:active:not(:disabled),.oc-btn:active:not(:disabled){
+  transform:translateY(1px);filter:brightness(.88)}
+.oc-btn.ghost:active:not(:disabled),button.ghost:active:not(:disabled){
+  background:var(--oc-line-soft);filter:none}
+button:focus:not(:focus-visible),.oc-btn:focus:not(:focus-visible){outline:none}
+
+/* 忙态：JS 只需 btn.dataset.busy = '1'（或加 class is-busy） */
+button[data-busy="1"],.oc-btn[data-busy="1"]{
+  position:relative;color:transparent !important;pointer-events:none}
+button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
+  content:"";position:absolute;left:50%;top:50%;width:14px;height:14px;
+  margin:-7px 0 0 -7px;border:2px solid currentColor;
+  border-top-color:transparent;border-radius:50%;
+  color:#fff;animation:oc-spin .7s linear infinite}
+.oc-btn.ghost[data-busy="1"]::after,button.ghost[data-busy="1"]::after{color:inherit}
+/* 忙态下文字仍要占位，否则按钮宽度会跳：用 ::before 撑住原文 */
+@keyframes oc-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){
+  button,.oc-btn{transition:none !important}
+  button:active:not(:disabled),.oc-btn:active:not(:disabled){transform:none}
+  button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{animation:none}
+  .oc-modal,.oc-modal-mask{transition:none !important}
+}
+
+/* ── 弹窗（安装/升级进度）────────────────────────────────────────
+   iStore 那种"点完就弹窗、实时滚日志"的做法确实更让人安心：
+   操作有明确的开始、有进度、有结束状态。这里统一一套弹窗样式，
+   安装页与状态页共用。 */
+.oc-modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);
+  z-index:9000;display:flex;align-items:center;justify-content:center;padding:16px;
+  animation:oc-fade .12s ease}
+@keyframes oc-fade{from{opacity:0}to{opacity:1}}
+.oc-modal{background:#fff;border-radius:10px;max-width:760px;width:100%;
+  max-height:86vh;display:flex;flex-direction:column;
+  box-shadow:0 12px 40px rgba(0,0,0,.3);overflow:hidden;
+  animation:oc-pop .14s ease}
+@keyframes oc-pop{from{transform:scale(.97);opacity:.6}to{transform:scale(1);opacity:1}}
+@media (prefers-color-scheme:dark){
+  .oc-modal{background:#20242b;color:#e6e6e6}
+  .oc-modal-head,.oc-modal-foot{border-color:rgba(255,255,255,.08)}
+}
+.oc-modal-head{display:flex;align-items:center;gap:8px;padding:12px 16px;
+  border-bottom:1px solid var(--oc-line-soft)}
+.oc-modal-head h4{margin:0;font-size:14px}
+.oc-spacer{flex:1 1 auto}
+.oc-modal-body{padding:12px 16px;overflow:auto;flex:1 1 auto;min-height:0}
+.oc-modal-foot{display:flex;align-items:center;gap:8px;padding:10px 16px;
+  border-top:1px solid var(--oc-line-soft);flex-wrap:wrap}
+.oc-log{background:#1e1e1e;color:#e6e6e6;border-radius:6px;padding:10px 12px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
+  line-height:1.5;white-space:pre-wrap;word-break:break-word;
+  overflow:auto;max-height:52vh;min-height:120px}
+.oc-log-sm{max-height:260px;min-height:80px}
+
+/* 进度条：未知总长度时用不确定态（左右扫动），比空着好 */
+.oc-progress{height:4px;background:var(--oc-line-soft);border-radius:2px;
+  overflow:hidden;margin:0 0 10px}
+.oc-progress>i{display:block;height:100%;width:30%;background:var(--oc-accent);
+  border-radius:2px;animation:oc-slide 1.3s ease-in-out infinite}
+@keyframes oc-slide{0%{margin-left:-30%}100%{margin-left:100%}}
+.oc-progress.is-done>i{width:100%;margin-left:0;animation:none;background:var(--oc-ok)}
+.oc-progress.is-fail>i{width:100%;margin-left:0;animation:none;background:var(--oc-err)}
+@media (prefers-reduced-motion:reduce){
+  .oc-progress>i{animation:none;width:60%;margin-left:20%}
+}
+
 /* ── 窄屏 ─────────────────────────────────────────────────────── */
 @media (max-width:640px){
   .oc-card{padding:16px 14px}
@@ -417,14 +491,15 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
     </div>
   </div>
   <div class="oc-hint">拉不到版本列表时用「手动指定版本…」填写版本号升级；Node.js 留空表示自动选择满足要求的版本。</div>
-  <!-- 升级进度日志：默认收起、不占版面；升级开始后自动展开并滚动。
-       完整日志仍可到「设置 · 安装」页看，这里给的是同一份的尾部。 -->
+  <!-- 升级进度：点「升级」立刻弹窗显示，实时滚日志。
+       以前是一个默认收起的内嵌小框，用户点完升级看不到任何东西，
+       不知道到底有没有开始 —— 这条反馈跟安装页保持一致。 -->
   <div class="oc-actions" style="margin-top:10px">
     <button id="btn-ver-log" class="oc-btn ghost" type="button">查看升级日志</button>
     <span id="ver-log-state" class="oc-hint" style="margin:0"></span>
   </div>
-  <div id="ver-log-wrap" style="display:none;margin-top:8px">
-    <div class="oc-log oc-log-sm" id="ver-log">（尚未开始）</div>
+  <div id="ver-log-wrap" style="display:none">
+    <div class="oc-log" id="ver-log">（尚未开始）</div>
   </div>
   <div class="oc-sub">访问</div>
   <div class="oc-grid">
@@ -495,6 +570,28 @@ input.oc-addr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
 </div>
 
 
+<!-- 升级 / 安装进度弹窗：与安装页同一套结构与样式，操作有明确的
+     开始、进度、结束，不让用户对着静止页面猜。 -->
+<div class="oc-modal-mask" id="up-modal" style="display:none">
+  <div class="oc-modal" role="dialog" aria-modal="true" aria-labelledby="up-modal-title">
+    <div class="oc-modal-head">
+      <h4 id="up-modal-title">正在升级</h4>
+      <span class="oc-spacer"></span>
+      <span class="oc-badge oc-none" id="up-modal-state" style="display:none"></span>
+    </div>
+    <div class="oc-modal-body">
+      <div class="oc-progress" id="up-progress"><i></i></div>
+      <div class="oc-log" id="up-log">准备中…</div>
+    </div>
+    <div class="oc-modal-foot">
+      <button id="btn-up-autoscroll" class="oc-btn ghost" type="button">自动滚动：开</button>
+      <button id="btn-up-copy" class="oc-btn ghost" type="button">复制</button>
+      <span class="oc-spacer"></span>
+      <button id="btn-up-close" class="oc-btn ghost" type="button">关闭</button>
+    </div>
+  </div>
+</div>
+
 <script>
 var API = {
   info: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","info")%>',
@@ -523,7 +620,7 @@ var API = {
   devices_pending: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","devices_pending")%>',
   devices_approve: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","devices_approve")%>'
 };
-var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, nodeExisting:[], nodeBusy:false,
+var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, nodeExisting:[], nodeBusy:false, upAutoScroll:true,
   // versionsStatus：api_versions 透传的 versions.sh status（一行 JSON 字符串）。
   // versionsNet：整个请求都没拿到（断网 / 超时），与"后端说没拉到列表"区分开。
   versionsStatus:'', versionsNet:false, verLoading:false,
@@ -1167,17 +1264,69 @@ function setVerLog(text, scroll){
   if (scroll) box.scrollTop = box.scrollHeight;
 }
 
+// 弹窗开关。state.upAutoScroll 默认开：进度日志要"跟着走"才有存在感，
+// 用户手动往上翻时自动关掉，别把人拽回底部。
+var UP_STATE_TEXT = {
+  running: ['oc-run', '进行中'],
+  done:    ['oc-ok',  '已完成'],
+  failed:  ['oc-err', '失败'],
+  lost:    ['oc-none', '已中断']
+};
+
+function upModalOpen(title){
+  var m = $('up-modal');
+  if (!m) return;
+  if (title) $('up-modal-title').textContent = title;
+  m.style.display = '';
+  var p = $('up-progress');
+  if (p) p.className = 'oc-progress';
+  upModalState('running');
+}
+function upModalClose(){
+  var m = $('up-modal');
+  if (m) m.style.display = 'none';
+}
+function upModalState(kind){
+  var el = $('up-modal-state'), pr = $('up-progress');
+  if (!el) return;
+  var s = UP_STATE_TEXT[kind];
+  if (!s){ el.style.display = 'none'; return; }
+  el.className = 'oc-badge ' + s[0];
+  el.textContent = s[1];
+  el.style.display = '';
+  if (pr){
+    pr.className = 'oc-progress' +
+      (kind === 'done' ? ' is-done' : kind === 'failed' || kind === 'lost' ? ' is-fail' : '');
+  }
+}
+function upSay(text){
+  var box = $('up-log');
+  if (!box) return;
+  var s = String(text == null ? '' : text).replace(/\r/g, '');
+  if (!s){ box.textContent = '（暂无输出）'; return; }
+  var lines = s.split('\n');
+  if (lines.length > VER_LOG_LINES){
+    lines = lines.slice(lines.length - VER_LOG_LINES);
+    lines.unshift('…（仅显示最后 ' + VER_LOG_LINES + ' 行）');
+  }
+  var atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+  box.textContent = lines.join('\n');
+  if (state.upAutoScroll && atBottom) box.scrollTop = box.scrollHeight;
+}
+
 function openVerLog(open){
-  var w = $('ver-log-wrap'), b = $('btn-ver-log');
-  if (!w) return;
-  w.style.display = open ? '' : 'none';
+  // 「查看升级日志」按钮：打开同一个弹窗（不重新开始轮询，只显示已有内容）
+  var b = $('btn-ver-log');
   if (b) b.textContent = open ? '收起升级日志' : '查看升级日志';
+  if (open) { upModalOpen('升级日志'); tickVerLog(); }
+  else upModalClose();
 }
 
 function tickVerLog(){
   get(API.ilog, function(r){
     var log = (r && r.log) ? String(r.log) : '';
-    setVerLog(log, true);
+    setVerLog(log, true);      // 内嵌框（次要入口）仍然同步
+    upSay(log);                // 弹窗是主入口
     var st = $('ver-log-state');
     if (st) st.textContent = log ? ('共 ' + log.split('\n').length + ' 行') : '（日志为空）';
   });
@@ -1187,14 +1336,31 @@ function tickVerLog(){
 // 完整日志在「设置 · 安装」页；这里给同一份的尾部，省得来回跳。
 function startInstallPoll(what, onDone){
   if (state.logTimer) clearInterval(state.logTimer);
-  if (!state.verLogClosed) openVerLog(true);      // 开跑就展开
+  // 开跑就弹窗：这是"点完按钮到底有没有开始"的唯一可靠反馈。
+  upModalOpen(what);
   state.logTimer = setInterval(function(){
     tickVerLog();
     get(API.istatus, function(r){
       var d = jp(r.data||'{}', {});
+      // state=lost：后台进程没了、也没留下完成标记（被 OOM 杀掉、磁盘写满、
+      // 或启动后立刻失败）。原来这里只认 done/failed，于是 lost 会让轮询
+      // 永远转下去、按钮永远灰着 —— 用户看到的就是「点了没反应、像卡死」。
+      if (d.state === 'lost'){
+        clearInterval(state.logTimer); state.logTimer = null;
+        tickVerLog();
+        upModalState('lost');
+        state.ocCand = null; state.nodeCand = null;
+        setUpgrading(false);
+        stOpSay(what + '未完成：' + (d.msg || '后台进程已退出，但没有留下完成记录。')
+                + ' 下方日志是最后的输出，可据此判断原因后重试。', true);
+        loadInfo();
+        if (onDone) onDone('lost');
+        return;
+      }
       if (d.state === 'done' || d.state === 'failed'){
         clearInterval(state.logTimer); state.logTimer = null;
         tickVerLog();                              // 收尾再刷一次，拿到最后几行
+        upModalState(d.state === 'done' ? 'done' : 'failed');
         stOpSay(what + (d.state==='done' ? '完成。' : '失败，请到设置页查看安装日志。'),
                 d.state==='failed');
         // 先清掉候选再关 upgrading：此刻 info 与版本列表都还是旧的，
@@ -1601,16 +1767,24 @@ function svcSay(msg, kind){
   el.className = 'oc-hint' + (kind === 'bad' ? ' oc-err' : '');
 }
 
-function svcBusy(on){
+function svcBusy(on, activeId){
   ['btn-start','btn-stop','btn-restart','btn-refresh'].forEach(function(id){
     var b = $(id);
-    if (b) b.disabled = !!on;
+    if (!b) return;
+    b.disabled = !!on;
+    // 只有被点的那一个显示 spinner，其余仅禁用 ——
+    // 全部变灰的话，用户看不出"我刚点的是哪个、现在在等什么"。
+    if (on && id === activeId){
+      b.setAttribute('data-busy', '1');
+    } else {
+      b.removeAttribute('data-busy');
+    }
   });
 }
 
 function svcAction(action){
   var label = SVC_LABEL[action] || action;
-  svcBusy(true);
+  svcBusy(true, 'btn-' + action);
   svcSay('正在' + label + '…');
   // 启动慢：procd 的 start 是异步的，网关还要初始化，给足时间。
   var wait = (action === 'start') ? 4000 : (action === 'restart' ? 4000 : 2000);
@@ -1704,11 +1878,12 @@ $('btn-start').onclick   = function(){ svcAction('start'); };
 $('btn-stop').onclick    = function(){ svcAction('stop'); };
 $('btn-restart').onclick = function(){ svcAction('restart'); };
 $('btn-refresh').onclick = function(){
+  svcBusy(true, 'btn-refresh');
   svcSay('正在刷新…');
   loadInfo();
   loadNodeExisting();
   // loadInfo 是异步的，用一个短延时收尾（它自己也带超时兜底）。
-  setTimeout(function(){ svcSay(''); }, 1200);
+  setTimeout(function(){ svcBusy(false); svcSay(''); }, 1200);
 };
 $('btn-devices').onclick = loadDevices;
 $('btn-open').onclick = openControl;
@@ -1798,6 +1973,46 @@ if ($('btn-node-manual')) $('btn-node-manual').onclick = function(){
 };
 // 「重试」只重新拉一次版本列表（refresh=1），失败也保持按钮可用 ——
 // 手填入口不受影响，随时可以指定版本升级。
+// 弹窗底部三个按钮
+if ($('btn-up-close')) $('btn-up-close').onclick = function(){
+  upModalClose();
+  var b = $('btn-ver-log');
+  if (b) b.textContent = '查看升级日志';
+};
+if ($('btn-up-copy')) $('btn-up-copy').onclick = function(){
+  var box = $('up-log');
+  if (!box) return;
+  var txt = box.textContent || '';
+  var btn = this, old = btn.textContent;
+  var done = function(){ btn.textContent = '已复制'; setTimeout(function(){ btn.textContent = old; }, 1200); };
+  if (navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(done, function(){ btn.textContent = '复制失败'; });
+  } else {
+    // 老浏览器 / 非安全上下文：用临时 textarea 兜底
+    var ta = document.createElement('textarea');
+    ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); done(); } catch(e){ btn.textContent = '复制失败'; }
+    document.body.removeChild(ta);
+  }
+};
+if ($('btn-up-autoscroll')) $('btn-up-autoscroll').onclick = function(){
+  state.upAutoScroll = !state.upAutoScroll;
+  this.textContent = '自动滚动：' + (state.upAutoScroll ? '开' : '关');
+  if (state.upAutoScroll){
+    var box = $('up-log');
+    if (box) box.scrollTop = box.scrollHeight;
+  }
+};
+// 用户往上翻日志时自动关掉"自动滚动"，别把人拽回底部
+if ($('up-log')) $('up-log').onscroll = function(){
+  if (state.upAutoScroll && this.scrollTop + this.clientHeight < this.scrollHeight - 40){
+    state.upAutoScroll = false;
+    var b = $('btn-up-autoscroll');
+    if (b) b.textContent = '自动滚动：关';
+  }
+};
+
 if ($('btn-ver-retry')) $('btn-ver-retry').onclick = function(){
   var b = this;
   if (state.verLoading) return;
@@ -1896,5 +2111,6 @@ loadVersions(false);
 // 慢探测不会阻塞主信息渲染。
 setTimeout(loadNodeExisting, 900);
 resumeInstallIfRunning();
+
 </script>
 <%+footer%>

@@ -781,6 +781,75 @@ cmd_run() {
 	return $_rc
 }
 
+cmd_snapshot() {
+	# snapshot [lines]
+	# 只读。输出**单个 JSON 对象**，包含：
+	#   status    : 与 info 同源的服务状态（installed/running/reachable/port/...）
+	#   logs      : 各来源的日志尾部（gateway 最有价值）
+	#   crash     : dmesg 里与崩溃相关的行 + core_pattern + 已有 core 文件
+	#   paths     : 关键路径，自动化不必再猜
+	#
+	# 与 info 的分工：info 是面板用的轻量状态；snapshot 是给排障用的、
+	# 自带上下文的一次性快照。日志一律走尾部截断，不会把几十 MB 塞进响应。
+	local n="${2:-200}" port base
+	case "$n" in ''|*[!0-9]*) n=200 ;; esac
+	[ "$n" -gt 2000 ] && n=2000
+
+	base="$(oc_base_dir 2>/dev/null)"
+	port="$(get_port 2>/dev/null)"
+
+	# 各段分别生成，最后拼起来：这样单段失败不会毁掉整个 JSON。
+	local gw_text gw_path sys_text crash_text
+	gw_path=""
+	for _f in "$base"/tmp/openclaw-*/openclaw-*.log; do
+		[ -f "$_f" ] || continue
+		if [ -z "$gw_path" ] || [ "$_f" -nt "$gw_path" ]; then gw_path="$_f"; fi
+	done
+	if [ -n "$gw_path" ]; then
+		gw_text="$(tail -n "$n" "$gw_path" 2>/dev/null)"
+	else
+		gw_text=""
+	fi
+
+	sys_text=""
+	if command -v logread >/dev/null 2>&1; then
+		# 同 cmd_log：logread 在部分固件会挂死，必须有超时。
+		sys_text="$(oc_timeout 5 logread 2>/dev/null | grep -i 'openclaw' | tail -n "$n")"
+	fi
+
+	crash_text=""
+	if command -v dmesg >/dev/null 2>&1; then
+		crash_text="$(dmesg 2>/dev/null \
+			| grep -iE 'segfault|openclaw|oom|killed process|out of memory' \
+			| tail -n 40)"
+	fi
+
+	printf '{"ok":true'
+	printf ',"status":{'
+	printf '"state":"%s"' "$(running && echo running || echo stopped)"
+	printf ',"installed":%s' "$(installed && echo true || echo false)"
+	printf ',"reachable":%s' "$(_reachable_flag)"
+	printf ',"port":"%s"' "$(oc_json_str "$port")"
+	printf ',"openclaw":"%s"' "$(oc_json_str "$(oc_oc_bin 2>/dev/null)")"
+	printf '}'
+	printf ',"paths":{'
+	printf '"base_dir":"%s"' "$(oc_json_str "$base")"
+	printf ',"state_dir":"%s"' "$(oc_json_str "$(oc_state_dir 2>/dev/null)")"
+	printf ',"home":"%s"' "$(oc_json_str "$(oc_home_dir 2>/dev/null)")"
+	printf ',"gateway_log":"%s"' "$(oc_json_str "$gw_path")"
+	printf ',"manager_log":"%s"' "$(oc_json_str "$OC_LOGFILE")"
+	printf '}'
+	printf ',"logs":{'
+	printf '"gateway":"%s"' "$(oc_json_str "$gw_text")"
+	printf ',"syslog":"%s"' "$(oc_json_str "$sys_text")"
+	printf '}'
+	printf ',"crash":{'
+	printf '"core_pattern":"%s"' "$(oc_json_str "$(cat /proc/sys/kernel/core_pattern 2>/dev/null)")"
+	printf ',"dmesg":"%s"' "$(oc_json_str "$crash_text")"
+	printf '}'
+	printf '}\n'
+}
+
 cmd_mounts() {
 	printf '['
 	local first=1 m free fst
@@ -1663,6 +1732,57 @@ cmd_export() {
 		cat "$OC_INSTALLLOG" >"$stage/logs/openclaw-install.log" 2>/dev/null || : >"$stage/logs/openclaw-install.log"
 	fi
 
+	# 网关自己的日志：这是排查崩溃/启动失败唯一有用的那份。
+	# /var/log 下那三个是管理脚本写的动作记录，网关从不写它们。
+	export_note "收集网关日志"
+	_gw_n=0
+	for _gwf in "$base"/tmp/openclaw-*/openclaw-*.log; do
+		[ -f "$_gwf" ] || continue
+		_gw_n=$((_gw_n + 1))
+		# 只留最近 3 个 uid 目录、每个取尾部 2000 行：日志可能有几十 MB，
+		# 整份打进诊断包既慢又没人看得完。
+		[ "$_gw_n" -gt 3 ] && break
+		_gwname="$(basename "$(dirname "$_gwf")")-$(basename "$_gwf")"
+		tail -n 2000 "$_gwf" 2>/dev/null >"$stage/logs/gw-$_gwname" \
+			|| : >"$stage/logs/gw-$_gwname"
+	done
+	if [ "$_gw_n" -eq 0 ]; then
+		printf '# 未找到网关日志：%s/tmp/openclaw-*/openclaw-*.log\n' "$base" \
+			>"$stage/logs/gw-NOTFOUND.txt"
+	fi
+
+	# 崩溃现场：段错误查不下去就是因为这里从来没被收集过。
+	# dmesg 里有 "segfault at ... ip=..." 那一行（内核打的，唯一能定位到
+	# 具体指令的证据）；core_pattern 决定 core 落到哪。
+	export_note "收集崩溃现场"
+	{
+		printf '=== dmesg 相关行 ===\n'
+		if command -v dmesg >/dev/null 2>&1; then
+			dmesg 2>/dev/null | grep -iE 'segfault|openclaw|oom|killed process|out of memory' \
+				| tail -n 80 || printf '(无匹配)\n'
+		else
+			printf '(dmesg 不可用)\n'
+		fi
+		printf '\n=== /proc/sys/kernel/core_pattern ===\n'
+		cat /proc/sys/kernel/core_pattern 2>/dev/null || printf '(读不到)\n'
+		printf '\n=== ulimit -c ===\n'
+		ulimit -c 2>/dev/null || printf '(未知)\n'
+	} >"$stage/system/crash.txt" 2>&1
+
+	# 已有的 core 文件：只登记路径与大小，不打包（几十到几百 MB）。
+	{
+		printf '=== core 文件 ===\n'
+		_core_found=0
+		for _c in "$base"/logs/core.* "$base"/logs/core-* /tmp/core.*; do
+			[ -f "$_c" ] || continue
+			_core_found=1
+			printf '%s  %s bytes  %s\n' "$_c" \
+				"$(wc -c <"$_c" 2>/dev/null | tr -d ' ')" \
+				"$(date -r "$_c" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '?')"
+		done
+		[ "$_core_found" = "0" ] && printf '(没有 core 文件。若服务在闪退，请到设置页把「崩溃转储」打开后重现一次)\n'
+	} >"$stage/system/core-files.txt" 2>&1
+
 	export_note "收集系统信息"
 	uname -a >"$stage/system/uname.txt" 2>&1 || true
 	df -h >"$stage/system/df.txt" 2>&1 || true
@@ -1794,6 +1914,7 @@ case "${1:-}" in
 	export)        cmd_export "$@" ;;
 	run)           cmd_run "$@" ;;
 	mounts)        cmd_mounts ;;
+	snapshot)      cmd_snapshot "$@" ;;
 	node-existing) cmd_node_existing ;;
 	devices-pending) cmd_devices_pending ;;
 	devices-approve) cmd_devices_approve "$@" ;;
@@ -1854,6 +1975,8 @@ Usage: openclaw.sh <command> [options]
   export [path]             diagnostic bundle: full logs + system info + redacted
                             openclaw.json / .env / uci (default
                             /tmp/luci-app-openclaw-diag-<ts>.tar.gz, mode 600)
+  snapshot [lines]          one-shot read-only JSON: status + log tails + crash info
+                            (for agents / automation; `info` is the light one)
   mounts                    candidate install targets with free space
   node-existing             JSON array of node runtimes already on this device
                             (path / version / source / usable; read-only, installs nothing)
