@@ -314,10 +314,30 @@ OC_V_R2=""		# 国内镜像失败原因
 OC_V_FETCH_ERR=""	# 两个源都失败时的完整原因（含两个 URL）
 
 oc_source_save() {
-	# oc_source_save <official|mirror> —— 记下缓存里的数据来自哪个源。
-	# 下次命中缓存（不联网）时仍能如实告诉用户来源。
+	# oc_source_save <official|mirror> [url]
+	#   记下缓存里的数据来自哪个源；第二个参数是**实际成功的完整 URL**。
+	#
+	# 为什么要记 URL 而不只记 official/mirror：安装时必须用**同一个源**。
+	# 只记"mirror"的话，安装阶段要重新按 npm_registry 推断地址，一旦推断结果
+	# 与取版本列表时不同（例如官方源此刻不通、但当时是从镜像取的），
+	# 就会出现"列表里有这个版本、npm 说没有"。
 	case "${1:-}" in
-		official|mirror) printf '%s\n' "$1" >"$OC_CACHE_DIR/oc-source.tsv" 2>/dev/null || true ;;
+		official|mirror)
+			printf '%s\n' "$1" >"$OC_CACHE_DIR/oc-source.tsv" 2>/dev/null || true
+			if [ -n "${2:-}" ]; then
+				printf '%s\n' "$2" >"$OC_CACHE_DIR/oc-source-url.txt" 2>/dev/null || true
+			fi
+			;;
+	esac
+}
+
+oc_source_url_saved() {
+	# 取版本列表时实际成功的 registry 基址；没有记录时输出空串。
+	local u
+	u="$(cat "$OC_CACHE_DIR/oc-source-url.txt" 2>/dev/null)"
+	case "$u" in
+		http://*|https://*) printf '%s' "${u%/}" ;;
+		*) printf '' ;;
 	esac
 }
 
@@ -486,7 +506,7 @@ oc_versions_json() {
 				rm -f "$f"
 				fail_clear "$OC_FAIL_OC"
 				# 只有解析成功才记来源：解析失败时这份数据并没有进缓存。
-				oc_source_save "$OC_V_SOURCE"
+				oc_source_save "$OC_V_SOURCE" "${OC_V_URL%/openclaw}"
 			else
 				rm -f "$f" "$OC_CACHE_DIR/oc-versions.tsv.new"
 				OC_V_ERROR="解析失败：返回内容不是 npm 包文档（${OC_V_URL:-$url}）"

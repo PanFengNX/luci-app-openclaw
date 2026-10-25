@@ -1,8 +1,55 @@
-<!-- version: 1.8.35 -->
+<!-- version: 1.8.36 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.36
+
+**升级失败的真因：`--prefer-offline` 让 npm 用旧缓存。**
+
+日志里 `npm error notarget No matching version found for openclaw@2026.10.7`
+看起来像"这个版本不存在"。实际查证：`registry.npmjs.org` 与
+`registry.npmmirror.com` **都有** 2026.10.7，而且它就是 `latest`。
+真正的原因是 npm 那次请求只用了 101ms 且标着 `cache stale` ——
+我们传了 `--prefer-offline`，它让 npm 直接采信本地缓存里的旧版本列表，
+于是"版本列表说有、npm 说没有"。改为 `--prefer-online`。
+
+顺带去掉 `npm_config_tmp`：npm 11+ 已移除该配置项，只会刷
+`npm warn Unknown env config "tmp"`，对行为没有影响。临时目录改用 `TMPDIR`。
+
+**「能查到更新的是哪个源，能否用那个」——可以，现在就是这么做的。**
+
+原来只记录 `official|mirror`，安装阶段要重新按 `main.npm_registry` 推断地址；
+推断结果一旦与取列表时不同，就会出现上面那种"列表有、安装没有"。
+现在把**实际成功的完整 registry URL** 落盘（`oc-source-url.txt`），
+安装时优先复用它；只有没有记录时才用配置值。
+
+**「已安装的不要重装」——OpenClaw 也加了跳过。**
+
+Node 一直有跳过，OpenClaw 没有：每次点升级都重新 `npm install` 一遍，
+即使版本完全相同。现在先问程序自己 `--version`，与目标一致就直接返回。
+（注意判定放在**停服务之前** —— 否则跳过时网关已被停掉却不会重启，
+等于"点了一次升级，服务挂了"。）
+
+**所有日志都能复制 / 导出。**
+
+统一了一套 `ocCopyText` / `ocDownloadText` / `ocBindLogTools`：
+- 复制必须带 `execCommand` 退路 —— `navigator.clipboard` 只在 https / localhost
+  可用，而用户访问的是 `http://192.168.x.x`，主路径在路由器上永远走不通。
+- 导出生成 `.txt`，文件名带时间戳，避免多次导出互相覆盖；不支持 Blob 的
+  老浏览器退回新窗口显示全文。
+- 覆盖：日志页、渠道页、命令行页、云端备份输出、状态页诊断输出、
+  升级弹窗、安装日志弹窗。
+
+**`chown` 失败告警：在 exfat/ntfs 上是必然的，不该报成故障。**
+
+日志里那条「无法把 /SSD/OpenClaw/home 的属主改为 openclaw」来自 `chown -R`。
+但 exfat / vfat / ntfs 没有真正的 uid/gid 语义，`chown` 必然失败 ——
+而这几个文件系统正是 USB 硬盘/SSD 上最常见的，本插件也允许把数据装到上面。
+用户看到告警却做不了任何事。现在先判断文件系统能力（以 `/proc/mounts` 为准，
+因为 `stat -f -c %T` 在部分环境返回 `UNKNOWN`），不支持就跳过 `chown`，
+只修权限位，并把提示改成说明性的。
 
 ## 1.8.35
 

@@ -350,6 +350,42 @@ check('if oc_locked;' not in bg, 'install-bg 不再用裸 oc_locked 挡升级')
 check('_inst_log_note' in bg, '拒绝路径会写日志（能查到被拒原因）')
 check('install.logpath' in ins7 and 'OC_INST_LOGPATH' in cli7, '日志路径跨进程一致')
 
+# ---- 日志区必须都能"带走"（复制 / 导出）----
+for _f, _ids in (('log.htm', ['btn-out-copy', 'btn-out-export']),
+                 ('channels.htm', ['btn-out-copy', 'btn-out-export']),
+                 ('terminal.htm', ['btn-out-copy', 'btn-out-export']),
+                 ('backup.htm', ['btn-clout-copy', 'btn-clout-export']),
+                 ('status.htm', ['btn-diag-copy', 'btn-diag-export', 'btn-up-export']),
+                 ('install.htm', ['btn-log-copy', 'btn-log-export'])):
+    _t = (proj / 'luasrc/view/openclaw' / _f).read_text(encoding='utf-8')
+    for _b in _ids:
+        check(('id="%s"' % _b) in _t, '%s 有 %s' % (_f, _b))
+# 共享 helper：复制在 http 页面上必须有 execCommand 退路
+setup3 = (proj / 'luasrc/view/openclaw/setup.htm').read_text(encoding='utf-8')
+check('function ocCopyText(' in setup3, '有统一的复制函数')
+check('function ocDownloadText(' in setup3, '有统一的导出函数')
+check('execCommand' in setup3, '复制有 execCommand 退路（http 页面上 clipboard API 不可用）')
+check('function ocBindLogTools(' in setup3, '有统一的绑定 helper')
+
+# ---- 升级：npm 参数与官方文档一致 ----
+ins8 = (proj / 'root/usr/libexec/openclaw/install.sh').read_text(encoding='utf-8')
+check('--prefer-online' in ins8, 'npm 用 --prefer-online（--prefer-offline 会用旧缓存导致 notarget）')
+check('--prefer-offline' not in ins8, '不再用 --prefer-offline')
+_ins8_code = '\n'.join(l.split('#', 1)[0] for l in ins8.splitlines())
+check('npm_config_tmp' not in _ins8_code, '不再设 npm 已废弃的 npm_config_tmp')
+check('oc_source_url_saved' in ins8, '安装复用取版本列表时成功的源')
+check('已是 $_cur_ver，跳过 npm install' in ins8 or '跳过 npm install' in ins8,
+      '已是要装的版本就跳过 npm install')
+
+# ---- chown：文件系统不支持属主时不该报成故障 ----
+lib8 = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
+init8 = (proj / 'root/etc/init.d/openclaw').read_text(encoding='utf-8')
+check('oc_fs_supports_fowner()' in lib8, '有文件系统属主能力判断')
+check('/proc/mounts' in lib8[lib8.index('oc_fs_supports_fowner()'):][:2000],
+      '判断以 /proc/mounts 为准（stat -f 在部分环境返回 UNKNOWN）')
+check('oc_fs_supports_fowner' in init8, 'init.d 用它决定是否 chown')
+check('不支持设置属主' in init8, '不支持时给说明性提示而不是故障告警')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

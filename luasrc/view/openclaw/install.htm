@@ -529,6 +529,7 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
     <div class="oc-modal-foot">
       <button id="btn-log-autoscroll" class="oc-btn ghost">自动滚动：开</button>
       <button id="btn-log-copy" class="oc-btn ghost">复制</button>
+      <button id="btn-log-export" class="oc-btn ghost" type="button">导出</button>
       <span class="oc-spacer"></span>
       <button id="btn-log-close" class="oc-btn ghost">关闭</button>
     </div>
@@ -536,6 +537,88 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
 </div>
 
 <script>
+// ── 日志工具栏：一键复制 / 导出 ─────────────────────────────────────
+// 每个日志区都该能"带走"：复制到剪贴板贴进聊天，或存成文件发出去。
+// 复制在路由器上必须留 execCommand 退路：navigator.clipboard 只在
+// https / localhost 可用，而用户访问的是 http://192.168.x.x。
+function ocCopyText(txt, done){
+  txt = String(txt == null ? '' : txt);
+  if (navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(
+      function(){ done && done(true); },
+      function(){ ocCopyFallback(txt, done); });
+    return;
+  }
+  ocCopyFallback(txt, done);
+}
+function ocCopyFallback(txt, done){
+  var ta = document.createElement('textarea');
+  ta.value = txt;
+  ta.style.position = 'fixed';
+  ta.style.top = '-1000px';
+  ta.setAttribute('readonly', 'readonly');
+  document.body.appendChild(ta);
+  ta.select();
+  ta.setSelectionRange(0, ta.value.length);
+  var ok = false;
+  try { ok = document.execCommand('copy'); } catch(e){ ok = false; }
+  document.body.removeChild(ta);
+  done && done(ok);
+}
+// 导出为 .txt：文件名带时间戳，避免多次导出互相覆盖。
+function ocDownloadText(txt, name){
+  var s = String(txt == null ? '' : txt);
+  var ts = new Date();
+  function p(n){ return (n < 10 ? '0' : '') + n; }
+  var stamp = ts.getFullYear() + p(ts.getMonth() + 1) + p(ts.getDate())
+            + '-' + p(ts.getHours()) + p(ts.getMinutes()) + p(ts.getSeconds());
+  var fname = (name || 'openclaw-log') + '-' + stamp + '.txt';
+  if (window.Blob && window.URL && URL.createObjectURL){
+    var blob = new Blob([s], {type: 'text/plain;charset=utf-8'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+    return true;
+  }
+  // 老浏览器：新窗口显示全文，让用户自己保存
+  var w = window.open('', '_blank');
+  if (w && w.document){
+    w.document.write('<pre style="white-space:pre-wrap"></pre>');
+    w.document.querySelector('pre').textContent = s;
+    return true;
+  }
+  return false;
+}
+// 通用绑定：btn 复制 / btn 导出，源为 #srcId 的 textContent。
+function ocBindLogTools(copyId, exportId, srcId, baseName){
+  function text(){
+    var el = $(srcId);
+    return el ? (el.textContent || '') : '';
+  }
+  if (copyId && $(copyId)) $(copyId).onclick = function(){
+    var btn = this, old = btn.textContent;
+    if (btn.disabled) return;
+    var t = text();
+    if (!t){ btn.textContent = '无内容'; setTimeout(function(){ btn.textContent = old; }, 1200); return; }
+    ocCopyText(t, function(ok){
+      btn.textContent = ok ? '已复制' : '复制失败';
+      setTimeout(function(){ btn.textContent = old; }, 1200);
+    });
+  };
+  if (exportId && $(exportId)) $(exportId).onclick = function(){
+    var btn = this, old = btn.textContent;
+    if (btn.disabled) return;
+    var t = text();
+    if (!t){ btn.textContent = '无内容'; setTimeout(function(){ btn.textContent = old; }, 1200); return; }
+    var ok = ocDownloadText(t, baseName);
+    btn.textContent = ok ? '已导出' : '导出失败';
+    setTimeout(function(){ btn.textContent = old; }, 1200);
+  };
+}
+
 var API = {
   info: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","info")%>',
   versions: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","versions")%>',
@@ -1490,5 +1573,8 @@ loadMounts();
 // 安装可能是上一次启动的（刷新页面 / 从别的菜单进来）：必须主动接管进度，
 // 否则日志区会一直停在「（尚未开始）」，看起来像根本没在装。
 checkInstallStatusOnLoad();
+
+// 安装日志弹窗的导出（复制沿用原有实现，行为已有"已复制"反馈）
+ocBindLogTools(null, 'btn-log-export', 'in-log', 'openclaw-install-log');
 </script>
 <%+footer%>

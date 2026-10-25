@@ -594,9 +594,17 @@ NODE_DIR_bin() { "$NODE_DIR/bin/node" -v 2>/dev/null; }
 install_openclaw() {
 	ilog "== 安装 OpenClaw $OCV（官方 npm 包） =="
 	local reg npmcache npmcli npm_log rc start_ts end_ts elapsed added timed_out
-	local npm_ver npm_major npm_minor allow_scripts
+	local npm_ver npm_major npm_minor allow_scripts _cur_ver _want_ver
 	local _gw_pids _i
-	reg="$(npm_registry)"
+	# 优先用「取版本列表时实际成功的那个源」。
+	# 只记 official/mirror 是不够的：安装阶段要重新推断 URL，推断结果一旦
+	# 与取列表时不同，就会出现"列表里有这个版本、npm 说没有"。
+	# 有记录就用记录里的；没有（用户手工指定了 main.npm_registry）就用配置值。
+	reg="$(oc_source_url_saved 2>/dev/null)"
+	[ -n "$reg" ] || reg="$(npm_registry)"
+	if [ "$reg" != "$(npm_registry)" ]; then
+		ilog "使用取版本列表时成功的源：$reg（配置值 $(npm_registry) 本次未采用）"
+	fi
 	npmcache="$BASE_DIR/npm-cache"
 	npmcli="$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js"
 	[ -f "$npmcli" ] || npmcli="$(dirname "$NPM_BIN")/../lib/node_modules/npm/bin/npm-cli.js"
@@ -609,8 +617,29 @@ install_openclaw() {
 	export PATH="$NODE_DIR/bin:$PATH"
 	export HOME="$HOME_DIR"
 	export npm_config_cache="$npmcache"
-	export npm_config_tmp="$OC_DL"
+	# 不要设 npm_config_tmp：npm 11+ 已移除该配置项，只会刷
+	# `npm warn Unknown env config "tmp"`，对实际行为没有影响。
+	# 临时目录用 TMPDIR 表达（npm 与 node 都认）。
+	export TMPDIR="$OC_DL"
 	export npm_config_prefix="$OC_DIR"
+
+	# ---- 已经是要装的版本就跳过（用户明确要求：已安装的不要重装）------
+	# 版本相同再跑一遍 npm install 的唯一效果是：停一次网关、下载几百 MB、
+	# 重写 node_modules，最后什么都没变。用户点"升级"时如果已经是最新，
+	# 这里应当立刻返回，而不是让他等几分钟。
+	# 注意：只用 main.oc_version 不可靠（手工装过、或被改过），
+	# 以**程序自己报的版本**为准。
+	if [ "$FORCE" != "1" ] && [ -x "$OC_DIR/bin/openclaw" ]; then
+		_cur_ver="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+			oc_timeout 20 "$OC_DIR/bin/openclaw" --version 2>/dev/null | head -n1)"
+		_cur_ver="$(printf '%s' "$_cur_ver" | tr -d ' \t\r\n' | sed 's/^v//')"
+		_want_ver="$(printf '%s' "$OCV" | sed 's/^v//')"
+		if [ -n "$_cur_ver" ] && [ "$_cur_ver" = "$_want_ver" ]; then
+			ilog "OpenClaw 已是 $_cur_ver，跳过 npm install（如需强制重装请在设置页勾选强制）"
+			return 0
+		fi
+		[ -n "$_cur_ver" ] && ilog "当前 OpenClaw $_cur_ver → 目标 $_want_ver，开始升级"
+	fi
 
 	# ---- 覆盖安装前必须先停服务 ----------------------------------------
 	# 整份脚本原先没有一处 init.d stop，直接在运行中的网关脚下替换
@@ -706,7 +735,7 @@ install_openclaw() {
 	# 用 set -- 组装参数：allow_scripts 可能为空，直接拼字符串会留下多余空格，
 	# 而这里每一个选项都必须原样传给 npm。
 	set -- install -g --prefix "$OC_DIR" --registry "$reg" \
-		--no-audit --no-fund --loglevel=http --prefer-offline
+		--no-audit --no-fund --loglevel=http --prefer-online
 	[ -n "$allow_scripts" ] && set -- "$@" "$allow_scripts"
 	set -- "$@" "openclaw@$OCV"
 	run_with_heartbeat "npm install" -- \

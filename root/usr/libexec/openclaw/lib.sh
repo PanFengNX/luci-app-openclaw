@@ -1305,6 +1305,52 @@ oc_ensure_user() {
 	grep -q "^${OC_USER}:" /etc/passwd 2>/dev/null
 }
 
+oc_fs_supports_fowner() {
+	# oc_fs_supports_fowner <dir> -> 0 = 支持设置属主，1 = 不支持
+	#
+	# exfat / vfat / ntfs 在 Linux 上没有真正的 uid/gid 语义（挂载时用一个
+	# 全局 uid 顶替），`chown` 必然失败。而这几个文件系统恰恰是 USB 硬盘/
+	# SSD 上最常见的（本插件也允许把数据装到它们上面），于是每次启动都刷
+	# "无法把 xxx 的属主改为 openclaw，网关可能因权限不足失败" ——
+	# 用户看到告警却做不了任何事，因为这不是可以修的。
+	#
+	# 判据**以 /proc/mounts 为准**：stat -f -c %T 在部分场合（MSYS、某些
+	# 内核）返回 "UNKNOWN (0x...)"，据此判断会一律当成"支持"，等于没修。
+	# 做法：把目标路径解析成物理路径，找它**最长匹配**的挂载点，取 fs 类型。
+	local d="${1:-}" phys mnt fst best="" bestlen=-1 bestfst=""
+	[ -n "$d" ] || return 1
+	[ -e "$d" ] || return 1
+	phys="$(readlink -f "$d" 2>/dev/null)" || phys=""
+	[ -n "$phys" ] || phys="$d"
+
+	if [ -r /proc/mounts ]; then
+		while read -r _dev _mnt fst _rest; do
+			[ -n "$_mnt" ] || continue
+			# 只接受目标路径的**前缀**挂载点，取最长的那个（即真正的所属挂载）
+			case "$phys" in
+				"$_mnt"|"$_mnt"/*) ;;
+				*) continue ;;
+			esac
+			[ "${#_mnt}" -gt "$bestlen" ] || continue
+			best="$_mnt"; bestlen="${#_mnt}"; bestfst="$fst"
+		done </proc/mounts
+	fi
+
+	if [ -z "$bestfst" ]; then
+		# 没有 /proc/mounts 或没能匹配：退回 stat -f，且只在能拿到**具体
+		# 类型名**时才采信；拿不到就当支持（宁可多试一次 chown）。
+		bestfst="$(stat -f -c %T "$phys" 2>/dev/null)"
+		case "$bestfst" in *UNKNOWN*|''|*'('*) bestfst="" ;; esac
+	fi
+
+	case "$bestfst" in
+		exfat|msdos|vfat|fat|fat32|ntfs|ntfs3|fuseblk|cifs|smb|cifs*|smb*|nfs|nfs4|nfs*|9p|tmpfs|ramfs)
+			return 1 ;;
+		*)
+			return 0 ;;
+	esac
+}
+
 oc_fix_perms() {
 	local base ocdir
 	base="$(oc_base_dir)"

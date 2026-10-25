@@ -177,6 +177,12 @@ oc_home()     { printf '%s/home' "$(oc_base_dir)"; }
 # 权限修正失败不阻止启动（权限问题不该让服务起不来），但必须留下痕迹：
 # 静默吞掉的结果是网关以错误的权限运行，日志里却只有一行正常的 started。
 _warn_chown() {
+	# exfat / vfat / ntfs 不支持设置属主，chown 必然失败 —— 那不是故障，
+	# 用户也无从修复。这类文件系统上把话改成说明性的，别冒充告警。
+	if ! oc_fs_supports_fowner "$1"; then
+		logger -t openclaw "说明：$1 所在文件系统不支持设置属主（exfat/vfat/ntfs），已跳过 chown；网关改用文件权限位访问"
+		return 0
+	fi
 	logger -t openclaw "警告：无法把 $1 的属主改为 $OC_USER，网关可能因权限不足失败"
 }
 
@@ -385,7 +391,13 @@ start_service() {
 		done
 	fi
 	if [ "$_need_recursive" = "1" ]; then
-		chown -R "$OC_USER:$OC_USER" "$home" 2>/dev/null || _warn_chown "$home"
+		# 文件系统不支持属主时，chown -R 除了遍历几万文件、全部失败、
+		# 再刷一条告警之外没有任何作用。直接跳过，只做 chmod。
+		if oc_fs_supports_fowner "$home"; then
+			chown -R "$OC_USER:$OC_USER" "$home" 2>/dev/null || _warn_chown "$home"
+		else
+			logger -t openclaw "说明：$home 所在文件系统不支持设置属主，跳过 chown（只修权限位）"
+		fi
 		chmod -R u+rwX "$home" 2>/dev/null || _warn_chmod "$home"
 	else
 		# 关键目录都对，只补顶层权限位（可能有目录被改过 mode），不做递归。
