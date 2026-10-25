@@ -183,19 +183,37 @@ _warn_chown() {
 		logger -t openclaw "说明：$1 所在文件系统不支持设置属主（exfat/vfat/ntfs），已跳过 chown；网关改用文件权限位访问"
 		return 0
 	fi
-	# 文件系统**支持**属主却失败了，说明是真问题（只读挂载、inode 用尽、
-	# 有个目录被别的进程锁住、或某个子文件不可改）。此前一律 2>/dev/null，
-	# 导致只能看到"失败了"、永远查不出为什么 —— 这是本项目反复踩过的坑：
-	# 静默吞掉错误 = 永远找不到根因。这里把**第一条真实报错**带出来。
-	local why=""
-	if [ -d "$1" ]; then
-		why="$(chown -R "$OC_USER:$OC_USER" "$1" 2>&1 | head -n 1)"
-	fi
-	if [ -n "$why" ]; then
-		logger -t openclaw "警告：无法把 $1 的属主改为 $OC_USER：$why"
+	# 文件系统**支持**属主却失败了，说明是真问题（只读挂载、子挂载不支持、
+	# inode 用尽、某个子文件不可改）。此前一律 2>/dev/null，导致只能看到
+	# "失败了"、永远查不出为什么 —— 这是本项目反复踩过的坑：
+	# 静默吞掉错误 = 永远找不到根因。
+	# 第二个参数由调用方传入（chown 的 stderr 第一行）——
+	# 不在这里重跑一次 chown -R：那等于把几万文件再遍历一遍只为读一条错误。
+	if [ -n "${2:-}" ]; then
+		logger -t openclaw "警告：无法把 $1 的属主改为 $OC_USER：$2"
 	else
 		logger -t openclaw "警告：无法把 $1 的属主改为 $OC_USER，网关可能因权限不足失败"
 	fi
+}
+
+# 跑一次 chown -R，失败时把**第一条**报错交给 _warn_chown。
+# 用一个私有临时文件接 stderr：命令替换会把换行折叠，且我们要保留原始文本。
+_fix_owner() {
+	local d="${1:-}" errf err
+	[ -n "$d" ] && [ -d "$d" ] || return 0
+	# init.d 不 source lib.sh，$OC_RUNDIR 在这里是空的 —— 拼出来会变成
+	# "/chown.err.<pid>"，往根目录写文件。优先用 $base/tmp（调用方已建、0700，
+	# 靠 ash 的动态作用域可见）；拿不到时退到 /tmp。
+	# 这里只接一条错误信息，没有保密要求，但绝不能拼出绝对根路径。
+	errf="${base:-/tmp}/tmp/chown.err.$$"
+	[ -d "$(dirname "$errf")" ] || errf="/tmp/chown.err.$$"
+	if chown -R "$OC_USER:$OC_USER" "$d" 2>"$errf"; then
+		rm -f "$errf" 2>/dev/null
+		return 0
+	fi
+	err="$(head -n 1 "$errf" 2>/dev/null)"
+	rm -f "$errf" 2>/dev/null
+	_warn_chown "$d" "$err"
 }
 
 _warn_chmod() {
@@ -406,7 +424,7 @@ start_service() {
 		# 文件系统不支持属主时，chown -R 除了遍历几万文件、全部失败、
 		# 再刷一条告警之外没有任何作用。直接跳过，只做 chmod。
 		if oc_fs_supports_fowner "$home"; then
-			chown -R "$OC_USER:$OC_USER" "$home" 2>/dev/null || _warn_chown "$home"
+			_fix_owner "$home"
 		else
 			logger -t openclaw "说明：$home 所在文件系统不支持设置属主，跳过 chown（只修权限位）"
 		fi
@@ -420,7 +438,7 @@ start_service() {
 	# 但这是用户可配置路径：先校验再递归操作，不安全的只告警、继续启动。
 	if [ "$state_dir" != "$home/.openclaw" ]; then
 		if _state_dir_safe "$state_dir"; then
-			chown -R "$OC_USER:$OC_USER" "$state_dir" 2>/dev/null || _warn_chown "$state_dir"
+			_fix_owner "$state_dir"
 			chmod -R u+rwX "$state_dir" 2>/dev/null || _warn_chmod "$state_dir"
 		else
 			logger -t openclaw "state_dir 不在允许清理的范围内，跳过属主修正：$state_dir"

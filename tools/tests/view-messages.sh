@@ -407,7 +407,13 @@ check('openclaw-*' in ins9, '升级前清理遗留的 openclaw-<uid> 临时目�
 init10 = (proj / 'root/etc/init.d/openclaw').read_text(encoding='utf-8')
 _wc = init10[init10.index('_warn_chown() {'):]
 _wc = _wc[:_wc.index('\n}\n')]
-check('2>&1' in _wc, '_warn_chown 会捕获真实报错（此前 2>/dev/null 吞掉了原因）')
+check('"${2:-}"' in _wc or '${2:-}' in _wc, '_warn_chown 接受调用方传入的真实报错')
+_fo = init10[init10.index('_fix_owner() {'):]
+_fo = _fo[:_fo.index('\n}\n')]
+check('2>"$errf"' in _fo, '_fix_owner 把 chown 的 stderr 接进文件')
+check('head -n 1' in _fo, '只取第一条报错（不刷屏）')
+_fo_code = '\n'.join(l.split('#', 1)[0] for l in _fo.splitlines())
+check('OC_RUNDIR' not in _fo_code, '_fix_owner 代码不依赖 OC_RUNDIR（init.d 里未定义，会写到根目录）')
 check('不支持设置属主' in _wc, 'exfat/ntfs 上仍降为说明性提示')
 
 # ---- 备份范围文案必须与实际归档一致 ----
