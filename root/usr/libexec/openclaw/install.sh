@@ -589,6 +589,7 @@ NODE_DIR_bin() { "$NODE_DIR/bin/node" -v 2>/dev/null; }
 install_openclaw() {
 	ilog "== 安装 OpenClaw $OCV（官方 npm 包） =="
 	local reg npmcache npmcli npm_log rc start_ts end_ts elapsed added timed_out
+	local _gw_pids _i
 	reg="$(npm_registry)"
 	npmcache="$BASE_DIR/npm-cache"
 	npmcli="$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js"
@@ -863,7 +864,7 @@ svc_wait_running() {
 autostart_service() {
 	# 只在安装全部成功时调用（finish 的末尾）。任何失败都只告警：
 	# 安装本身已经成功，这里的退出码必须保持 0。
-	local auto
+	local auto _n
 	if [ "$NO_START" = "1" ]; then
 		ilog "已跳过自动启动（--no-start）"
 		return 0

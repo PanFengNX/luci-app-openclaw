@@ -287,6 +287,9 @@ oc_archive_ok_size() {
 # ---------------------------------------------------------------- create
 cmd_create() {
 	local name="" ws=1
+	# 下面这些是本函数用的临时变量，必须 local：ash 里未 local 的赋值会污染
+	# 全局，而 cmd_restore 也用了 _pl/_ct* 这类名字 —— 会互相踩。
+	local _src_n _stg_n _pkgname _nm _crontab _data_rel
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--name) shift; name="${1:-}"; [ $# -eq 0 ] || shift ;;
@@ -612,7 +615,8 @@ cmd_restore() {
 	home="$(oc_home_dir)"
 	data="$(oc_data_dir)"
 
-	local stage terr old="" moved=0
+	local stage terr old="" moved=0 _src_n _stg_n _pkgname _nm
+	local _ct _ctdir _cttmp _pl
 	stage="$OC_RUNDIR/restore.$$"
 	terr="$OC_RUNDIR/bk-tar.$$.err"
 	# 同上：只回收陈旧残留，避免删掉并发实例正在用的目录。
@@ -663,43 +667,7 @@ cmd_restore() {
 		oc_info "已还原非路径类设置（端口/绑定/自启/镜像源/云备份计划）"
 	fi
 
-	# 5b) 定时任务：备份里记的 openclaw 行写回 crontab
-	# 这些行不在数据目录内，不写回就等于"恢复后云备份静默消失"。
-	if [ -s "$stage/crontab.txt" ]; then
-		_ct="${OC_CRONTAB:-/etc/crontabs/root}"
-		_ctdir="$(dirname "$_ct")"
-		if [ -d "$_ctdir" ]; then
-			# 先去掉现有的 openclaw 行（避免重复），再追加备份里的。
-			# 用同目录临时文件 + mv：crond 正在读这个文件。
-			_cttmp="$_ctdir/.openclaw-restore.$$"
-			if [ -f "$_ct" ]; then
-				grep -vF '# openclaw' "$_ct" >"$_cttmp" 2>/dev/null || : >"$_cttmp"
-			else
-				: >"$_cttmp"
-			fi
-			cat "$stage/crontab.txt" >>"$_cttmp" 2>/dev/null
-			if [ -s "$_cttmp" ] && chmod 600 "$_cttmp" 2>/dev/null && mv "$_cttmp" "$_ct" 2>/dev/null; then
-				oc_info "已恢复定时任务（$(wc -l <"$stage/crontab.txt" | tr -d ' ') 行）"
-				# 让 crond 重新加载：不重启也能生效，但部分固件需要 HUP
-				[ -x /etc/init.d/cron ] && /etc/init.d/cron reload >/dev/null 2>&1 || true
-			else
-				rm -f "$_cttmp" 2>/dev/null
-				oc_warn "定时任务未能写回，请手动把备份里的 crontab.txt 内容加回 $_ct"
-			fi
-		fi
-	fi
-
-	# 5c) 插件清单：插件装在程序目录，不在备份里 —— 明确告诉用户要重装哪些。
-	# 不静默跳过：用户会以为"恢复完就一模一样了"，直到某个 skill 用不了才发现。
-	if [ -s "$stage/plugins.txt" ]; then
-		_pl="$(grep -v '^#' "$stage/plugins.txt" 2>/dev/null | grep -v '^$' | tr '\n' ' ')"
-		if [ -n "$_pl" ]; then
-			oc_warn "备份里记录了这些插件（装在程序目录，未随数据备份）：$_pl"
-			oc_warn "若刚重装过 OpenClaw，请在「模型」页重新安装上述插件，否则对应 provider 不可用"
-		fi
-	fi
-
-	# 6) 数据目录（整体替换，先移到一边以便失败回滚）
+	# 6a) 数据目录（整体替换，先移到一边以便失败回滚）
 	if [ -d "$stage/home/.openclaw" ]; then
 		mkdir -p "$home" 2>/dev/null
 		# 名字带 PID：既不与上一次中断留下的残留同名（否则下面那句 rm -rf
@@ -729,6 +697,44 @@ cmd_restore() {
 	fi
 
 	rm -rf "$stage"
+
+	# 6b) 定时任务：备份里记的 openclaw 行写回 crontab
+	# 放在数据目录恢复**之后**：写 crontab 是不可回滚的副作用，
+	# 若数据恢复失败把旧数据挪回去，crontab 不该已经被改过。
+	# 这些行不在数据目录内，不写回就等于"恢复后云备份静默消失"。
+	if [ -s "$stage/crontab.txt" ]; then
+		_ct="${OC_CRONTAB:-/etc/crontabs/root}"
+		_ctdir="$(dirname "$_ct")"
+		if [ -d "$_ctdir" ]; then
+			# 先去掉现有的 openclaw 行（避免重复），再追加备份里的。
+			# 用同目录临时文件 + mv：crond 正在读这个文件。
+			_cttmp="$_ctdir/.openclaw-restore.$$"
+			if [ -f "$_ct" ]; then
+				grep -vF '# openclaw' "$_ct" >"$_cttmp" 2>/dev/null || : >"$_cttmp"
+			else
+				: >"$_cttmp"
+			fi
+			cat "$stage/crontab.txt" >>"$_cttmp" 2>/dev/null
+			if [ -s "$_cttmp" ] && chmod 600 "$_cttmp" 2>/dev/null && mv "$_cttmp" "$_ct" 2>/dev/null; then
+				oc_info "已恢复定时任务（$(wc -l <"$stage/crontab.txt" | tr -d ' ') 行）"
+				# 让 crond 重新加载：不重启也能生效，但部分固件需要 HUP
+				[ -x /etc/init.d/cron ] && /etc/init.d/cron reload >/dev/null 2>&1 || true
+			else
+				rm -f "$_cttmp" 2>/dev/null
+				oc_warn "定时任务未能写回，请手动把备份里的 crontab.txt 内容加回 $_ct"
+			fi
+		fi
+	fi
+
+	# 6c) 插件清单：插件装在程序目录，不在备份里 —— 明确告诉用户要重装哪些。
+	# 不静默跳过：用户会以为"恢复完就一模一样了"，直到某个 skill 用不了才发现。
+	if [ -s "$stage/plugins.txt" ]; then
+		_pl="$(grep -v '^#' "$stage/plugins.txt" 2>/dev/null | grep -v '^$' | tr '\n' ' ')"
+		if [ -n "$_pl" ]; then
+			oc_warn "备份里记录了这些插件（装在程序目录，未随数据备份）：$_pl"
+			oc_warn "若刚重装过 OpenClaw，请在「模型」页重新安装上述插件，否则对应 provider 不可用"
+		fi
+	fi
 
 	# 7) 凭据文件重新收紧权限，并修正属主
 	[ -f "$data/.env" ] && chmod 600 "$data/.env" 2>/dev/null

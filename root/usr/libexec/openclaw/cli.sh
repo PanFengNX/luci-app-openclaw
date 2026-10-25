@@ -513,7 +513,7 @@ oc_probe_hosts() {
 }
 
 cmd_info() {
-	local st port token ver nver base free home ocdir
+	local st port token ver nver base free home ocdir _pkg
 	if installed; then
 		if running; then
 			# 进程在，但端口未必应答：区分"真在服务"和"起来了但没通"。
@@ -1603,6 +1603,7 @@ export_verify_stage() {
 cmd_export() {
 	# export [输出路径]
 	local out ts stage outdir sec terr size mode
+	local _gw_n _gwf _gwname _gw_list _core_found _c
 	local base state ocdir home envf envf2 f
 
 	shift
@@ -1735,17 +1736,26 @@ cmd_export() {
 	# 网关自己的日志：这是排查崩溃/启动失败唯一有用的那份。
 	# /var/log 下那三个是管理脚本写的动作记录，网关从不写它们。
 	export_note "收集网关日志"
+	# 取**最新**的三份，不是"字典序前三份"：日志文件名带日期，字典序恰好
+	# 等于时间序，直接 break 会拿到最旧的三份 —— 排查崩溃时最没用的就是它们。
+	# 用 oc_mtime 排序（stat -c %Y，GNU 与 busybox 通用）。
 	_gw_n=0
-	for _gwf in "$base"/tmp/openclaw-*/openclaw-*.log; do
+	_gw_list="$(for _gwf in "$base"/tmp/openclaw-*/openclaw-*.log; do
 		[ -f "$_gwf" ] || continue
-		_gw_n=$((_gw_n + 1))
-		# 只留最近 3 个 uid 目录、每个取尾部 2000 行：日志可能有几十 MB，
-		# 整份打进诊断包既慢又没人看得完。
-		[ "$_gw_n" -gt 3 ] && break
-		_gwname="$(basename "$(dirname "$_gwf")")-$(basename "$_gwf")"
-		tail -n 2000 "$_gwf" 2>/dev/null >"$stage/logs/gw-$_gwname" \
-			|| : >"$stage/logs/gw-$_gwname"
-	done
+		printf '%s\t%s\n' "$(oc_mtime "$_gwf")" "$_gwf"
+	done | sort -rn | head -n 3 | cut -f2-)"
+	if [ -n "$_gw_list" ]; then
+		while IFS= read -r _gwf; do
+			[ -n "$_gwf" ] || continue
+			_gw_n=$((_gw_n + 1))
+			# 每份只取尾部 2000 行：日志可能几十 MB，整份打进诊断包既慢又没人看完。
+			_gwname="$(basename "$(dirname "$_gwf")")-$(basename "$_gwf")"
+			tail -n 2000 "$_gwf" 2>/dev/null >"$stage/logs/gw-$_gwname" \
+				|| : >"$stage/logs/gw-$_gwname"
+		done <<EOF
+$_gw_list
+EOF
+	fi
 	if [ "$_gw_n" -eq 0 ]; then
 		printf '# 未找到网关日志：%s/tmp/openclaw-*/openclaw-*.log\n' "$base" \
 			>"$stage/logs/gw-NOTFOUND.txt"

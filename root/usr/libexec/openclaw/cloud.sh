@@ -2179,6 +2179,8 @@ cloud_upload_file() {
 	#
 	# 失败走 cloud_fail（exit 1）；调用方若在子 shell 里调用，只会结束子 shell。
 	local local_path="${1:-}" name="${2:-}" bin tmp rc size lsize err
+	# 加密产物目录与上传超时：未 local 会污染全局（cloud.sh 是长脚本）
+	local _encroot up_bytes up_to encrypted
 	local encrypted=false remote_name upload_path encdir enc_out csize magic ver pass
 
 	[ -n "$local_path" ] || cloud_fail "缺少本地文件路径"

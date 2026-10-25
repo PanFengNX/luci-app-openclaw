@@ -258,6 +258,33 @@ ins3 = (proj / 'luasrc/view/openclaw/install.htm').read_text(encoding='utf-8')
 check('需要下载数百 MB' in ins3, '安装前有确认对话框（说明目录/版本/耗时）')
 check('id="in-progress"' in ins3, '安装弹窗有进度条')
 
+# ---- 提示必须放在触发它的模块里，不能落在页面底部 ----
+stv4 = (proj / 'luasrc/view/openclaw/status.htm').read_text(encoding='utf-8')
+check('id="ver-up-hint"' in stv4, '升级模块有自己的提示位')
+check('function verUpSay(' in stv4, '升级相关反馈写 ver-up-hint')
+# 升级路径不应再用页面底部的 stOpSay（那个位置在"控制台地址"卡片里）
+up_block = stv4[stv4.index('function startOcUpdate('):]
+up_block = up_block[:up_block.index('function startOcUpdateFromHint')]
+check('stOpSay(' not in up_block, '升级失败不再写到页面底部')
+check('verUpSay(' in up_block, '升级失败写进升级模块')
+# 冲突要能接管已有任务，而不是只丢一句红字
+check('function attachRunningTask(' in stv4, '有冲突接管逻辑')
+check('looksLikeConflict(' in up_block, '升级失败会区分"是不是冲突"')
+check('id="btn-attach-task"' in stv4, '冲突提示旁边有「查看正在进行的任务」')
+
+# ---- 还原步骤顺序：crontab 写在数据恢复之后 ----
+bkp3 = (proj / 'root/usr/libexec/openclaw/backup.sh').read_text(encoding='utf-8')
+i_data = bkp3.index('# 6a) 数据目录')
+i_cron = bkp3.index('# 6b) 定时任务')
+check(i_cron > i_data, 'crontab 写回排在数据目录恢复之后（不可回滚的副作用不能先做）')
+
+# ---- 诊断包按 mtime 取最新，不按字典序 ----
+cli3 = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
+gw = cli3[cli3.index('收集网关日志'):]
+gw = gw[:gw.index('收集崩溃现场')]
+check('sort -rn' in gw and 'head -n 3' in gw,
+      '诊断包按 mtime 倒序取最新三份日志（不是字典序前三份）')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

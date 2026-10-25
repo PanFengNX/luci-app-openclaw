@@ -476,6 +476,13 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
       <span id="node-ver-hint" class="oc-hint"></span>
       <button id="btn-node-upgrade" class="oc-btn" disabled>升级</button>
     </div>
+    <!-- 升级/安装的反馈就放在升级模块里：失败原因、冲突提示、"正在升级"。
+         之前统一写进页面最底部的 #st-op-hint（在"可复制的控制台地址"卡片里），
+         用户点了升级后红字出现在一个无关位置，等于没提示。 -->
+    <div id="ver-up-hint" class="oc-hint" style="display:none;margin-top:8px"></div>
+    <div id="ver-up-actions" class="oc-actions" style="display:none">
+      <button id="btn-attach-task" class="oc-btn" type="button">查看正在进行的任务</button>
+    </div>
   </div>
   <div class="oc-actions">
     <button id="btn-ver-manual" class="oc-btn ghost" type="button">手动指定版本…</button>
@@ -545,6 +552,7 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
     <button id="btn-repair" class="oc-btn green">一键修复（环境 + OpenClaw 自检）</button>
   </div>
   <div class="oc-hint">体检只检查不改动；一键修复会修复目录/属主/配置，并让 OpenClaw 自检修复其内部配置，最后重启服务。</div>
+  <div id="st-op-hint" class="oc-hint" style="display:none;margin-top:10px"></div>
   <div class="oc-sub">可复制的控制台地址</div>
   <div id="oc-open-addrs">
     <div class="oc-row">
@@ -558,7 +566,6 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
       <button class="oc-copy" data-copy="open-current" type="button">复制</button>
     </div>
   </div>
-  <div id="st-op-hint" class="oc-hint" style="display:none;margin-top:10px"></div>
   <div id="diag-box" style="display:none;margin-top:12px">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
       <b id="diag-title">诊断</b>
@@ -1233,6 +1240,64 @@ function stOpSay(msg, bad){
   el.style.display = msg ? '' : 'none';
 }
 
+// 升级模块自己的提示位。升级相关的反馈写这里，不写页面底部。
+function verUpSay(msg, bad){
+  var el = $('ver-up-hint');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = bad ? '#b00' : '';
+  el.style.display = msg ? '' : 'none';
+  // 冲突类提示旁边给一个「查看正在进行的任务」按钮 ——
+  // 用户看到"另一个操作正在运行"时，下一步一定是"那它在干什么？"
+  var act = $('ver-up-actions');
+  if (act){
+    var needBtn = !!msg && /占用|冲突|正在运行|稍后再试|接入/.test(String(msg));
+    act.style.display = needBtn ? '' : 'none';
+  }
+}
+
+// 冲突处理：后端拒绝时可能是"另一个操作正在运行 / 已有安装进程"。
+// 这时候正确做法不是让用户干瞪眼，而是**把他接到正在跑的那个任务上**：
+// 打开同一个日志弹窗、继续轮询进度。用户想看的本来就是"现在到底在干什么"。
+function looksLikeConflict(msg){
+  var s = String(msg || '');
+  return s.indexOf('另一个操作') >= 0 || s.indexOf('已有安装进程') >= 0
+      || s.indexOf('正在运行') >= 0 || s.indexOf('稍后再试') >= 0;
+}
+
+function attachRunningTask(){
+  get(API.istatus, function(r){
+    var d = jp((r && r.data) || '{}', {});
+    if (d.state === 'running'){
+      // 已有任务在跑：直接接到它上面
+      state.upgrading = true;
+      setUpgrading(true);
+      upModalOpen('正在进行的任务');
+      stOpSay('');
+      verUpSay('检测到已有任务在运行，已接入它的进度（下方弹窗）。');
+      startInstallPoll('当前任务');
+      return;
+    }
+    if (d.state === 'done' || d.state === 'failed' || d.state === 'lost'){
+      // 上一次已经结束：把结果和日志摊开给用户看，然后允许重试
+      upModalOpen('上一次任务');
+      upModalState(d.state);
+      tickVerLog();
+      verUpSay('上一次任务已结束（' + (d.state === 'done' ? '成功' : '未成功')
+        + '），日志见下方弹窗。');
+      return;
+    }
+    // 既没在跑也没记录：可能是锁被别的操作（修复/还原）占着
+    upModalOpen('操作被占用');
+    upModalState('failed');
+    upSay('后端报告"另一个操作正在运行"，但当前没有安装任务。\n'
+      + '通常是「一键修复」「备份还原」「云端备份」正在进行。\n'
+      + '请等它结束后重试；若确认没有任务在跑，可到「日志」页查看，'
+      + '或用 SSH 执行：/usr/libexec/openclaw/cli.sh unlock');
+    verUpSay('操作被占用：' + (d.msg || '另一个任务正在运行'), true);
+  });
+}
+
 // 「有安装动作在跑」的唯一开关：两个行内升级按钮与手填入口的两个按钮
 // 一起禁用 / 按探测结果恢复。所有入口（行内、手填、复用本机 Node）都走它，
 // 否则总有一个按钮会被漏掉、永久禁用。
@@ -1351,7 +1416,7 @@ function startInstallPoll(what, onDone){
         upModalState('lost');
         state.ocCand = null; state.nodeCand = null;
         setUpgrading(false);
-        stOpSay(what + '未完成：' + (d.msg || '后台进程已退出，但没有留下完成记录。')
+        verUpSay(what + '未完成：' + (d.msg || '后台进程已退出，但没有留下完成记录。')
                 + ' 下方日志是最后的输出，可据此判断原因后重试。', true);
         loadInfo();
         if (onDone) onDone('lost');
@@ -1361,8 +1426,8 @@ function startInstallPoll(what, onDone){
         clearInterval(state.logTimer); state.logTimer = null;
         tickVerLog();                              // 收尾再刷一次，拿到最后几行
         upModalState(d.state === 'done' ? 'done' : 'failed');
-        stOpSay(what + (d.state==='done' ? '完成。' : '失败，请到设置页查看安装日志。'),
-                d.state==='failed');
+        verUpSay(what + (d.state==='done' ? '完成。' : '失败，日志见下方弹窗。'),
+                 d.state==='failed');
         // 先清掉候选再关 upgrading：此刻 info 与版本列表都还是旧的，
         // 直接 setUpgrading(false) 会按旧候选把按钮重新点亮，用户能再点一次。
         // 新候选等 loadInfo → renderOcUpdate/renderNodeUpdate 用新版本重算。
@@ -1399,7 +1464,7 @@ function startNodeUpdate(target){
 
   var raw = verValue(target);
   if (raw === null){
-    stOpSay('Node.js 版本号格式不正确：只接受形如 v22.22.2 的版本号', true);
+    verUpSay('Node.js 版本号格式不正确：只接受形如 v22.22.2 的版本号', true);
     return;
   }
   // 留空 = 自动：交给后端按 OpenClaw 的 engines.node 选一个可用运行时。
@@ -1419,17 +1484,25 @@ function startNodeUpdate(target){
   var oc = /^v?\d+\.\d+\.\d+$/.test(String(d.openclaw || '')) ? d.openclaw : 'latest';
 
   setUpgrading(true);
-  stOpSay('正在更新 Node.js ' + (nv === 'auto' ? '（自动选择）' : '到 ' + nv)
-        + ' …（完整日志见「设置」页）');
+  upModalOpen('正在更新 Node.js');
+  upSay('正在提交更新请求…\n');
+  verUpSay('正在更新 Node.js ' + (nv === 'auto' ? '（自动选择）' : '到 ' + nv) + ' …');
   post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc,
                       node_version: nv }, function(r){
     if (!r || r.ok === false){
+      var msg = (r && (r.data || r.error)) || '服务无响应，请重试';
+      if (looksLikeConflict(msg)){
+        verUpSay('已有一个任务在运行，正在接入它的进度…');
+        attachRunningTask();
+        return;
+      }
       setUpgrading(false);
-      stOpSay('Node.js 更新启动失败：'
-        + ((r && (r.data || r.error)) || '服务无响应，请重试'), true);
+      upModalState('failed');
+      upSay('更新未能启动：\n' + msg);
+      verUpSay('Node.js 更新启动失败：' + msg, true);
       return;
     }
-    stOpSay('Node.js 更新已启动，完成后本页会自动刷新。');
+    verUpSay('Node.js 更新已启动，进度见下方弹窗。');
     startInstallPoll('Node.js 更新');
   });
 }
@@ -1450,11 +1523,11 @@ function startOcUpdate(target){
 
   var v = verValue(target);
   if (v === null){
-    stOpSay('OpenClaw 版本号格式不正确：只接受 latest 或形如 2026.10.4 的版本号', true);
+    verUpSay('OpenClaw 版本号格式不正确：只接受 latest 或形如 2026.10.4 的版本号', true);
     return;
   }
   if (!v){
-    stOpSay('请填写要升级到的 OpenClaw 版本（latest 或 2026.10.4）', true);
+    verUpSay('请填写要升级到的 OpenClaw 版本（latest 或 2026.10.4）', true);
     return;
   }
   // OpenClaw 的版本号不带 v 前缀（npm 包版本是 2026.10.4），用户多打一个也照收。
@@ -1472,16 +1545,27 @@ function startOcUpdate(target){
   var nd = /^v?\d+\.\d+\.\d+$/.test(String(d.node || '')) ? String(d.node) : 'auto';
 
   setUpgrading(true);
-  stOpSay('正在升级 OpenClaw 到 ' + v + ' …（完整日志见「设置」页）');
+  // 点下去就弹窗 + 转圈：用户要的是"立刻有反应"，而不是等请求回来。
+  upModalOpen('正在升级 OpenClaw');
+  upSay('正在提交升级请求…\n');
+  verUpSay('正在升级 OpenClaw 到 ' + v + ' …');
   post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: v,
                       node_version: nd }, function(r){
     if (!r || r.ok === false){
+      var msg = (r && (r.data || r.error)) || '服务无响应，请重试';
+      if (looksLikeConflict(msg)){
+        // 冲突不该只丢一句红字：接到正在跑的那个任务上。
+        verUpSay('已有一个任务在运行，正在接入它的进度…');
+        attachRunningTask();
+        return;
+      }
       setUpgrading(false);
-      stOpSay('OpenClaw 升级启动失败：'
-        + ((r && (r.data || r.error)) || '服务无响应，请重试'), true);
+      upModalState('failed');
+      upSay('升级未能启动：\n' + msg);
+      verUpSay('OpenClaw 升级启动失败：' + msg, true);
       return;
     }
-    stOpSay('OpenClaw 升级已启动，完成后本页会自动刷新。');
+    verUpSay('OpenClaw 升级已启动，进度见下方弹窗。');
     startInstallPoll('OpenClaw 升级');
   });
 }
@@ -1612,17 +1696,19 @@ function useExistingNode(e, btn){
   setUpgrading(true);                     // 同一时刻只允许一个安装动作
   var host = $('st-node-existing');
   if (host){ host.style.display = ''; host.textContent = '正在切换到本机已有的 Node.js …（完整日志见「设置」页）'; }
-  stOpSay('正在复用本机 Node.js ' + (e.version || '') + ' …');
+  verUpSay('正在复用本机 Node.js ' + (e.version || '') + ' …');
+  upModalOpen('正在切换 Node.js');
   post(API.install, { base_dir: dir, openclaw_dir: ocdir, oc_version: oc, node_version: 'system' }, function(r){
     if (!r || r.ok === false){
       state.nodeBusy = false;
       setUpgrading(false);
-      stOpSay('复用本机 Node 启动失败：'
+      upModalState('failed');
+      verUpSay('复用本机 Node 启动失败：'
         + ((r && (r.data || r.error)) || '服务无响应，请重试'), true);
       loadNodeExisting();                 // 重绘并恢复按钮
       return;
     }
-    stOpSay('复用本机 Node 已启动，完成后本页会自动刷新。');
+    verUpSay('复用本机 Node 已启动，进度见下方弹窗。');
     startInstallPoll('切换到本机 Node.js ', function(){ state.nodeBusy = false; loadNodeExisting(); });
   });
 }
@@ -2013,6 +2099,11 @@ if ($('up-log')) $('up-log').onscroll = function(){
   }
 };
 
+// 「查看正在进行的任务」：只在冲突时显示，一键接入正在跑的任务。
+if ($('btn-attach-task')) $('btn-attach-task').onclick = function(){
+  attachRunningTask();
+};
+
 if ($('btn-ver-retry')) $('btn-ver-retry').onclick = function(){
   var b = this;
   if (state.verLoading) return;
@@ -2088,13 +2179,13 @@ function resumeInstallIfRunning(){
       state.upgrading = true;
       setUpgrading(true);
       if (!state.verLogClosed) openVerLog(true);
-      stOpSay('正在升级，进度见下方日志…');
+      verUpSay('正在升级，进度见下方弹窗…');
       startInstallPoll('升级');
     } else if (d.state === 'lost'){
       // 后台进程没了但没留完成标记：说清楚，别让界面像卡住
       if (!state.verLogClosed) openVerLog(true);
       tickVerLog();
-      stOpSay('上一次升级异常中断（后台进程已退出）。可查看下方日志后重试。', true);
+      verUpSay('上一次升级异常中断（后台进程已退出）。可查看下方弹窗里的日志后重试。', true);
     }
   });
 }
