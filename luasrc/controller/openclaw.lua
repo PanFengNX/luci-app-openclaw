@@ -112,6 +112,7 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "channels"},  call("api_channels")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "log"},       call("api_log")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "mounts"},    call("api_mounts")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "diag_export"}, call("api_diag_export")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "node_existing"}, call("api_node_existing")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "devices_pending"}, call("api_devices_pending")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "devices_approve"}, call("api_devices_approve")).leaf = true
@@ -358,23 +359,58 @@ end
 -- browser so a big log cannot blow up memory or the response body
 local MAX_ILOG = 262144   -- 256 KiB
 
-function api_ilog()
-	local r = ""
-	local f = io.open("/var/log/openclaw-install.log", "r")
-	if f then
-		-- 只读尾部：read("*a") 会把几十 MB 的安装日志整份读进内存，
-		-- 之后才截断，正好和上面"限制内存"的初衷相反。
-		local size = f:seek("end") or 0
-		if size > MAX_ILOG then
-			f:seek("set", size - MAX_ILOG)
-			r = "…（日志过长，仅显示最后 256KB）\n" .. (f:read("*a") or "")
-		else
-			f:seek("set", 0)
-			r = f:read("*a") or ""
-		end
-		f:close()
+-- 读一个日志文件的尾部（最多 MAX_ILOG 字节）
+local function read_tail(path)
+	local f = io.open(path, "r")
+	if not f then return nil end
+	-- 只读尾部：read("*a") 会把几十 MB 的安装日志整份读进内存，
+	-- 之后才截断，正好和"限制内存"的初衷相反。
+	local size = f:seek("end") or 0
+	local txt
+	if size > MAX_ILOG then
+		f:seek("set", size - MAX_ILOG)
+		txt = "…（日志过长，仅显示最后 256KB）\n" .. (f:read("*a") or "")
+	else
+		f:seek("set", 0)
+		txt = f:read("*a") or ""
 	end
-	out({ ok = true, log = r })
+	f:close()
+	return txt
+end
+
+function api_ilog()
+	-- 安装日志的**真实路径由后端决定**，不能写死。
+	--
+	-- 两处会偏离 /var/log/openclaw-install.log：
+	--   1. install.sh 在 /var/log 不可写时回退到 $OC_RUNDIR/install.log；
+	--   2. install.sh 每次启动都先把上一轮日志 `mv` 成 .1 再清空主文件。
+	--      如果这一轮刚启动就退出（preflight 失败、被 kill），主文件是空的，
+	--      **有用内容全在 .1 里** —— 而这里原来只读主文件，于是弹窗空着，
+	--      用户看到的就是"点了升级、没进度、也没有日志"。
+	-- install-status 已经返回真实路径（"log" 字段），优先用它。
+	local path = nil
+	local st = sh(SH .. " install-status")
+	if st ~= "" then
+		local okj, tbl = pcall(jsonc.parse, st)
+		if okj and type(tbl) == "table" and type(tbl.log) == "string" and tbl.log ~= "" then
+			path = tbl.log
+		end
+	end
+	if not path or path == "" then path = "/var/log/openclaw-install.log" end
+
+	local r = read_tail(path)
+	if not r or r == "" then
+		-- 主日志空/不存在：试试上一轮留下的 .1（本轮启动时被 mv 过去的那份）。
+		-- 这是"刚点完升级就失败"时唯一有内容的文件。
+		local prev = read_tail(path .. ".1")
+		if prev and prev ~= "" then
+			r = ("（本轮安装日志为空，以下是上一轮的日志 %s.1）\n\n"):format(path) .. prev
+		else
+			-- 都没有：给出实际找过的路径，别让用户对着空白猜
+			r = ("（暂无安装日志）\n已查找：\n  %s\n  %s.1\n"):format(path, path)
+		end
+	end
+	out({ ok = true, log = r, path = path })
 end
 
 -- ---------------------------------------------------------------- changelog
@@ -812,6 +848,13 @@ function api_log()
 	end
 	local r = sh(SH .. " log " .. q(tostring(n)) .. " " .. q(src))
 	out({ ok = true, log = r, src = src })
+end
+
+function api_diag_export()
+	-- 把诊断快照落到 <state_dir>/diagnostics/，供 agent / 人工查看。
+	-- 这不是"改代码"的通道，只是把已有的只读信息搬到 agent 有读权限的目录里。
+	local r = sh(SH .. " diag-export")
+	out({ ok = true, data = r })
 end
 
 function api_mounts()

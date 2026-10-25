@@ -404,6 +404,10 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
     <button id="btn-auto" class="oc-btn ghost">自动刷新：关</button>
     <button id="btn-doctor" class="oc-btn ghost">运行 doctor 体检</button>
     <button id="btn-export" class="oc-btn ghost">导出诊断包</button>
+    <button id="btn-diag-export" class="oc-btn ghost" type="button"
+            title="把状态、网关日志、崩溃线索写进 OpenClaw 数据目录，供 agent 直接读取">
+      生成给 OpenClaw 的诊断快照
+    </button>
     <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#888">
       来源
       <select id="log-src" style="font-size:12px;padding:3px 6px">
@@ -428,6 +432,7 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
 <script>
 var LOG = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","log")%>';
 var DOC = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","doctor")%>';
+var DIAG_EXPORT = '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_export")%>';
 var timer = null;
 function $(id){ return document.getElementById(id); }
 function get(url, cb){ var x=new XMLHttpRequest(); x.open('GET',url,true); x.onreadystatechange=function(){ if(x.readyState==4){ try{cb(JSON.parse(x.responseText));}catch(e){cb({});} } }; x.send(); }
@@ -452,6 +457,38 @@ function refresh(){
     if (st) st.textContent = '更新于 ' + new Date().toLocaleTimeString();
   });
 }
+
+// 生成给 agent 的诊断快照：落到 <state_dir>/diagnostics/。
+// 用户随后可以在 OpenClaw 对话里直接让它读那个目录，或在 SSH 里看。
+if ($('btn-diag-export')) $('btn-diag-export').onclick = function(){
+  var btn = this, label = btn.textContent;
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.setAttribute('data-busy', '1');
+  btn.textContent = '生成中…';
+  var hint = $('export-hint');
+  post(DIAG_EXPORT, {}, function(r){
+    btn.disabled = false;
+    btn.removeAttribute('data-busy');
+    btn.textContent = label;
+    var d = {};
+    try { d = JSON.parse((r && r.data) || '{}'); } catch(e){}
+    if (!r || r.ok === false || d.ok === false){
+      if (hint){
+        hint.textContent = '生成失败：'
+          + ((d && d.error) || (r && (r.data || r.error)) || '服务无响应');
+        hint.style.color = '#b00';
+      }
+      return;
+    }
+    if (hint){
+      hint.style.color = '';
+      hint.textContent = '已写入 ' + (d.dir || '(未知目录)')
+        + '（' + (d.files || 0) + ' 个文件）。'
+        + '可在 OpenClaw 对话里让它读这个目录，或在 SSH 里查看。';
+    }
+  });
+};
 
 $('log-src').onchange = function(){
   $('out').textContent = '加载中…';

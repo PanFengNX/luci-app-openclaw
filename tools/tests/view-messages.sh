@@ -285,6 +285,36 @@ gw = gw[:gw.index('收集崩溃现场')]
 check('sort -rn' in gw and 'head -n 3' in gw,
       '诊断包按 mtime 倒序取最新三份日志（不是字典序前三份）')
 
+# ---- agent 读取日志的通道（不能给 agent 改代码的权限）----
+cli5 = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
+check('cmd_diag_export()' in cli5, '有 diag-export：把快照落到数据目录供 agent 读')
+check('cmd_snapshot()' in cli5, '有 snapshot：只读 JSON 快照')
+check('diag-export)' in cli5, 'diag-export 已在子命令分发里注册')
+# 属主必须改成网关用户，否则 agent 读不到
+dx = cli5[cli5.index('cmd_diag_export() {'):]
+dx = dx[:dx.index('\n}\n')]
+check('chown -R' in dx and 'OC_USER' in dx, 'diag-export 最后把属主给网关用户')
+check('README.txt' in dx, 'diag-export 带读取指引')
+
+# api_ilog 不能再硬编码路径，且要能回退到 .1
+ctrl5 = (proj / 'luasrc/controller/openclaw.lua').read_text(encoding='utf-8')
+il = ctrl5[ctrl5.index('function api_ilog()'):]
+il = il[:il.index('\nend\n')]
+check('io.open("/var/log/openclaw-install.log"' not in il,
+      'api_ilog 不再硬编码日志路径')
+check('install-status' in il, 'api_ilog 跟随后端返回的真实路径')
+check('.. ".1"' in il or '.1\")' in il or 'path .. ".1"' in il,
+      'api_ilog 主日志为空时回退读上一轮的 .1')
+
+# 弹窗状态不能硬编码 running
+stv5 = (proj / 'luasrc/view/openclaw/status.htm').read_text(encoding='utf-8')
+check('function upModalOpen(title, kind)' in stv5, 'upModalOpen 可传实际状态')
+check("openVerLog(true, 'lost')" in stv5, '中断时按 lost 状态打开弹窗')
+
+# 备份排除 diagnostics
+bkp5 = (proj / 'root/usr/libexec/openclaw/backup.sh').read_text(encoding='utf-8')
+check('${_data_rel}/diagnostics' in bkp5, '备份排除 diagnostics（可重建产物）')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

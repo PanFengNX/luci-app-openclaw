@@ -1338,14 +1338,14 @@ var UP_STATE_TEXT = {
   lost:    ['oc-none', '已中断']
 };
 
-function upModalOpen(title){
+function upModalOpen(title, kind){
   var m = $('up-modal');
   if (!m) return;
   if (title) $('up-modal-title').textContent = title;
   m.style.display = '';
-  var p = $('up-progress');
-  if (p) p.className = 'oc-progress';
-  upModalState('running');
+  // kind 默认 'running'（真的在跑），但"查看历史日志"这类只读打开必须传
+  // 实际状态 —— 否则任务已经中断、徽章却仍写"进行中"，与页面下方矛盾。
+  upModalState(kind || 'running');
 }
 function upModalClose(){
   var m = $('up-modal');
@@ -1379,12 +1379,16 @@ function upSay(text){
   if (state.upAutoScroll && atBottom) box.scrollTop = box.scrollHeight;
 }
 
-function openVerLog(open){
-  // 「查看升级日志」按钮：打开同一个弹窗（不重新开始轮询，只显示已有内容）
+function openVerLog(open, kind){
+  // 「查看升级日志」按钮：打开同一个弹窗（不重新开始轮询，只显示已有内容）。
+  // kind 传实际状态：任务已中断时不该显示"进行中"。
   var b = $('btn-ver-log');
   if (b) b.textContent = open ? '收起升级日志' : '查看升级日志';
-  if (open) { upModalOpen('升级日志'); tickVerLog(); }
-  else upModalClose();
+  if (open) {
+    var k = kind || (state.upgrading ? 'running' : 'none');
+    upModalOpen('升级日志', k);
+    tickVerLog();
+  } else upModalClose();
 }
 
 function tickVerLog(){
@@ -2178,12 +2182,15 @@ function resumeInstallIfRunning(){
     if (d.state === 'running'){
       state.upgrading = true;
       setUpgrading(true);
-      if (!state.verLogClosed) openVerLog(true);
+      if (!state.verLogClosed) openVerLog(true, 'running');
       verUpSay('正在升级，进度见下方弹窗…');
       startInstallPoll('升级');
     } else if (d.state === 'lost'){
-      // 后台进程没了但没留完成标记：说清楚，别让界面像卡住
-      if (!state.verLogClosed) openVerLog(true);
+      // 后台进程没了但没留完成标记：说清楚，别让界面像卡住。
+      // 弹窗按 lost 状态打开（不是 running），徽章才不会与实际情况矛盾。
+      state.upgrading = false;
+      setUpgrading(false);
+      if (!state.verLogClosed) openVerLog(true, 'lost');
       tickVerLog();
       verUpSay('上一次升级异常中断（后台进程已退出）。可查看下方弹窗里的日志后重试。', true);
     }

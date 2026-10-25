@@ -472,6 +472,7 @@ cmd_create() {
 	_data_rel='./home/.openclaw'
 	set -- --exclude="${_data_rel}/logs" --exclude="${_data_rel}/log" \
 		--exclude="${_data_rel}/cache" --exclude="${_data_rel}/tmp" \
+		--exclude="${_data_rel}/diagnostics" \
 		--exclude='*.log' --exclude='*.tmp' \
 		--exclude='*.lock' --exclude='*.pid' --exclude='*.sock' \
 		--exclude='node_modules'

@@ -268,7 +268,7 @@ openclaw.sh restore <文件名> [--no-safety]
 iStoreOS 25.12.x 基于 OpenWrt 25.12，包管理器是 **apk-tools v3**，请安装：
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.8.33-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.8.34-r1.apk
 ```
 
 **不要**装 `...-v2.apk` —— 那是 apk-tools 2.x / Alpine 的格式，不是 OpenWrt 25.12 的
@@ -373,13 +373,13 @@ python3 scripts/build_apk.py
 ### apk（OpenWrt 25.12+ / apk-tools 3.x）
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.8.33-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.8.34-r1.apk
 ```
 
 ### ipk（opkg）—— **OpenWrt 24.10 及更早、iStoreOS 等 opkg 系统**
 
 ```sh
-opkg install luci-app-openclaw_1.8.33_all.ipk
+opkg install luci-app-openclaw_1.8.34_all.ipk
 ```
 
 在 LuCI / iStore 界面里也可以直接「手动上传安装」这个 ipk。
@@ -403,7 +403,7 @@ opkg install luci-app-openclaw_1.8.33_all.ipk
 ### .run 自解压（无需包管理器）
 
 ```sh
-sh luci-app-openclaw-1.8.33.run
+sh luci-app-openclaw-1.8.34.run
 ```
 
 ### 集成到固件 / SDK 编译
@@ -418,7 +418,7 @@ make package/luci-app-openclaw/compile V=s
 ### 自行生成安装包（无需 SDK）
 
 ```sh
-python3 scripts/build_apk.py --version 1.8.33 --release 1 --sign
+python3 scripts/build_apk.py --version 1.8.34 --release 1 --sign
 python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 / ipk）
 ```
 
@@ -526,6 +526,32 @@ tools/verify-project.sh
 安全闸门会直接拦截：越界路径、危险路径（`.ssh`、`/etc/passwd`、`.bashrc`）、
 新增二进制、`rm -rf`、`curl | sh`、`eval`、写系统账户文件、反弹 shell、
 fork 炸弹、明文密钥、删除关键文件。
+
+## 让 OpenClaw agent 自己看日志
+
+**不能**让 agent 改插件代码：包内文件是 `root:root`，网关以 `uid=998` 运行，
+没有写权限；给它权限就等于让网关能改 LuCI 控制器，而 LuCI 以 root 执行 ——
+一条直接的提权链。
+
+**能**让它读日志，而且这是设计的一部分：把快照写进**网关自己的数据目录**
+（`<state_dir>/diagnostics/`），那个目录本来就属于网关用户。
+**不需要新权限，也不需要开端口。**
+
+```sh
+# 只读、不落盘的即时快照（stdout 一个 JSON）
+/usr/libexec/openclaw/cli.sh snapshot 200
+
+# 落盘到 <state_dir>/diagnostics/，供 agent 直接读取
+/usr/libexec/openclaw/cli.sh diag-export
+```
+
+面板上对应「日志」页的**生成给 OpenClaw 的诊断快照**按钮。
+
+落地文件：`snapshot.json`（状态/路径/日志/崩溃线索）、`gateway-log-tail.txt`
+（真正有崩溃堆栈的那份）、`manager-log-tail.txt`、`crash.txt`，以及一份
+`README.txt` 告诉 agent 按什么顺序读。
+
+完整说明见 [`docs/AGENT-DIAGNOSTICS.md`](docs/AGENT-DIAGNOSTICS.md)。
 
 ## 升级与向后兼容（设计规范）
 

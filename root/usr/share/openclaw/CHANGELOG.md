@@ -1,8 +1,48 @@
-<!-- version: 1.8.33 -->
+<!-- version: 1.8.34 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.34
+
+**让 OpenClaw agent 能自己看日志（问的是这件事）。**
+
+先分清两件事：**不能**让 agent 改插件代码，**能**让它读日志。
+
+- 改代码不行：包内文件是 `root:root`，网关以 `uid=998` 运行，没有写权限。给它
+  权限就等于让网关能改 LuCI 控制器，而 LuCI 以 root 执行 —— 一条直接的提权链。
+- 读日志可行，而且现在是设计的一部分：把快照写进**网关自己的数据目录**
+  （`<state_dir>/diagnostics/`），那个目录本来就属于网关用户，agent 天生能读。
+  **不需要新权限，也不需要开端口。**
+
+新增两个命令与一个按钮：
+
+- `cli.sh snapshot [lines]` —— 只读、不落盘，stdout 一个 JSON：
+  `status`（是否运行 / 端口是否应答）、`paths`、`logs`（网关与系统日志尾部）、
+  `crash`（dmesg 与 core_pattern）。
+- `cli.sh diag-export [--out DIR] [--lines N]` —— 落盘到 `diagnostics/`：
+  `snapshot.json`、`gateway-log-tail.txt`（真正有崩溃堆栈的那份）、
+  `manager-log-tail.txt`、`crash.txt`，外加一份 `README.txt` 告诉 agent
+  按什么顺序读。写完把属主改成网关用户，否则它读不到。
+- 「日志」页新增「生成给 OpenClaw 的诊断快照」按钮。
+
+说明见 `docs/AGENT-DIAGNOSTICS.md`。`diagnostics/` 已从备份排除（可重建的
+诊断产物，进归档只会让备份变大）。
+
+**顺带修掉截图里的问题**
+
+截图里弹窗写着"进行中"，页面底部却写"异常中断"，日志还是空的 —— 三处叠加：
+
+- `api_ilog` **硬编码**读 `/var/log/openclaw-install.log`。而 `install.sh`
+  每次启动都先把上一轮日志 `mv` 成 `.1` 再清空主文件；如果本轮刚启动就退出，
+  主文件是空的，**有用内容全在 `.1` 里**，界面却从不读它。现在跟随
+  `install-status` 返回的真实路径（`/var/log` 不可写时它会回退到 rundir），
+  并在主日志为空时回退读 `.1`，都空则把查找过的路径打出来。
+- `upModalOpen()` 无条件把状态设成"进行中"，所以「查看升级日志」打开历史
+  日志时，徽章与页面下方的"异常中断"矛盾。现在按实际状态打开。
+- `resumeInstallIfRunning` 的 `lost` 分支补上 `setUpgrading(false)`：
+  否则按钮会一直灰着。
 
 ## 1.8.33
 

@@ -850,6 +850,119 @@ cmd_snapshot() {
 	printf '}\n'
 }
 
+cmd_diag_export() {
+	# diag-export [--out <dir>]
+	#
+	# 把排障需要的材料**落到 OpenClaw 自己的数据目录**，供 agent 直接读取。
+	#
+	# 为什么用文件而不是 HTTP：网关是上游 npm 包，往里加路由等于改上游；
+	# 而这个目录本来就属于网关用户（init.d 会 chown 给它），agent 有读权限。
+	# 于是"agent 看日志"这条链路不需要任何新权限、也不需要开端口。
+	#
+	# 输出（默认 <state_dir>/diagnostics/）：
+	#   snapshot.json        一次性的机器可读快照（状态+路径+日志+崩溃）
+	#   gateway-log-tail.txt 网关自己的日志尾部（有崩溃堆栈的就是这份）
+	#   manager-log-tail.txt 管理脚本动作日志
+	#   crash.txt            dmesg 里与崩溃相关的行 + core_pattern
+	#   README.txt           给 agent / 人的说明：这些文件是什么、怎么用
+	#
+	# 只写这一个目录，不碰别处；写完把属主改成网关用户，否则 agent 读不了。
+	local out="" n=400
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--out) shift; out="${1:-}"; [ $# -eq 0 ] || shift ;;
+			--lines) shift; n="${1:-400}"; [ $# -eq 0 ] || shift ;;
+			*) shift ;;
+		esac
+	done
+	case "$n" in ''|*[!0-9]*) n=400 ;; esac
+	out="${out:-$(oc_state_dir)/diagnostics}"
+
+	# 目录必须能建、可写；失败要说清原因（这里常踩的是 state_dir 只读）
+	if ! mkdir -p "$out" 2>/dev/null; then
+		printf '{"ok":false,"error":"无法创建目录：%s"}\n' "$(oc_json_str "$out")"
+		return 1
+	fi
+	if [ ! -w "$out" ]; then
+		printf '{"ok":false,"error":"目录不可写：%s"}\n' "$(oc_json_str "$out")"
+		return 1
+	fi
+
+	local gw_path
+	gw_path=""
+	for _f in "$(oc_base_dir)"/tmp/openclaw-*/openclaw-*.log; do
+		[ -f "$_f" ] || continue
+		if [ -z "$gw_path" ] || [ "$_f" -nt "$gw_path" ]; then gw_path="$_f"; fi
+	done
+
+	# snapshot.json：复用 cmd_snapshot 的输出，保证两处口径一致
+	if cmd_snapshot snapshot "$n" >"$out/snapshot.json.tmp" 2>/dev/null; then
+		mv -f "$out/snapshot.json.tmp" "$out/snapshot.json" 2>/dev/null
+	else
+		rm -f "$out/snapshot.json.tmp" 2>/dev/null
+	fi
+
+	if [ -n "$gw_path" ]; then
+		tail -n "$n" "$gw_path" 2>/dev/null >"$out/gateway-log-tail.txt" \
+			|| : >"$out/gateway-log-tail.txt"
+		printf '# 源文件：%s\n' "$gw_path" | cat - "$out/gateway-log-tail.txt" \
+			>"$out/gateway-log-tail.txt.new" 2>/dev/null \
+			&& mv -f "$out/gateway-log-tail.txt.new" "$out/gateway-log-tail.txt" 2>/dev/null
+	else
+		printf '未找到网关日志：%s/tmp/openclaw-*/openclaw-*.log\n' \
+			"$(oc_base_dir)" >"$out/gateway-log-tail.txt"
+	fi
+
+	[ -f "$OC_LOGFILE" ] && tail -n "$n" "$OC_LOGFILE" >"$out/manager-log-tail.txt" 2>/dev/null
+	[ -f "$out/manager-log-tail.txt" ] || : >"$out/manager-log-tail.txt"
+
+	{
+		printf '=== dmesg（崩溃相关）===\n'
+		command -v dmesg >/dev/null 2>&1 \
+			&& dmesg 2>/dev/null | grep -iE 'segfault|openclaw|oom|killed process' | tail -n 60 \
+			|| printf '(dmesg 不可用)\n'
+		printf '\n=== core_pattern ===\n'
+		cat /proc/sys/kernel/core_pattern 2>/dev/null || printf '(读不到)\n'
+	} >"$out/crash.txt" 2>&1
+
+	cat >"$out/README.txt" 2>/dev/null <<'DIAGEOF'
+这是 luci-app-openclaw 生成的诊断快照，供 OpenClaw agent 或人工排查使用。
+
+文件说明：
+  snapshot.json         机器可读：status（是否运行/端口是否应答）、paths（各目录
+                        与日志位置）、logs（网关与系统日志尾部）、crash（崩溃线索）
+  gateway-log-tail.txt  网关进程自己写的日志尾部。排查闪退、插件加载失败、
+                        schema 迁移问题看这一份，其它日志里没有。
+  manager-log-tail.txt  管理器（安装/升级/修复/备份）的动作记录，回答"谁在什么时候
+                        做了什么"。
+  crash.txt             dmesg 里 segfault / OOM 相关行，以及 core_pattern（core 文件
+                        会落到哪）。
+
+建议的读取顺序：
+  1. snapshot.json 里 status.state 与 status.reachable
+     —— 进程在跑但 reachable=false，通常是还在初始化（等 10-30 秒）或启动失败。
+  2. gateway-log-tail.txt 的最后 100 行
+     —— 真正的错误一般就在这里。
+  3. crash.txt 里有没有 segfault
+     —— 有的话说明是原生崩溃（node 或 .node 模块），需要 core 文件分析。
+
+注意：这些文件由本插件生成，会被下一次 diag-export 覆盖。
+本目录已从备份中排除（属于可重建的诊断产物）。
+DIAGEOF
+
+	chmod 600 "$out"/*.json "$out"/*.txt 2>/dev/null
+	# 属主给网关用户：cli.sh 以 root 跑，不改属主的话 agent 读不到。
+	if grep -q "^${OC_USER}:" /etc/passwd 2>/dev/null; then
+		chown -R "${OC_USER}:${OC_GROUP}" "$out" 2>/dev/null \
+			|| chown -R "$OC_USER" "$out" 2>/dev/null || true
+	fi
+
+	local files
+	files="$(find "$out" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+	printf '{"ok":true,"dir":"%s","files":%s,"gateway_log":"%s"}\n' \
+		"$(oc_json_str "$out")" "${files:-0}" "$(oc_json_str "$gw_path")"
+}
+
 cmd_mounts() {
 	printf '['
 	local first=1 m free fst
@@ -1925,6 +2038,7 @@ case "${1:-}" in
 	run)           cmd_run "$@" ;;
 	mounts)        cmd_mounts ;;
 	snapshot)      cmd_snapshot "$@" ;;
+	diag-export)   cmd_diag_export "$@" ;;
 	node-existing) cmd_node_existing ;;
 	devices-pending) cmd_devices_pending ;;
 	devices-approve) cmd_devices_approve "$@" ;;
@@ -1987,6 +2101,11 @@ Usage: openclaw.sh <command> [options]
                             /tmp/luci-app-openclaw-diag-<ts>.tar.gz, mode 600)
   snapshot [lines]          one-shot read-only JSON: status + log tails + crash info
                             (for agents / automation; `info` is the light one)
+  diag-export [--out DIR] [--lines N]
+                            write snapshot.json + log tails + crash.txt into
+                            <state_dir>/diagnostics/ so an agent reading the
+                            OpenClaw data dir can see what is wrong (no new
+                            permissions, no extra port)
   mounts                    candidate install targets with free space
   node-existing             JSON array of node runtimes already on this device
                             (path / version / source / usable; read-only, installs nothing)
