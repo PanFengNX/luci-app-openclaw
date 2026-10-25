@@ -1062,6 +1062,12 @@ CLOUD_INSTALL_LOG="$OC_RUNDIR/cloud-install.log"
 CLOUD_INSTALL_RC="$OC_RUNDIR/cloud-install.rc"
 CLOUD_INSTALL_PID="$OC_RUNDIR/cloud-install.pid"
 CLOUD_INSTALL_LOCK="$OC_RUNDIR/cloud-install.lock"
+# 手动云备份的后台任务（进度可查）。与组件安装各自独立一套状态文件：
+# 两者可能先后发起，共用会互相覆盖 pid / rc。
+CLOUD_BK_LOG="$OC_RUNDIR/cloud-bk.log"
+CLOUD_BK_RC="$OC_RUNDIR/cloud-bk.rc"
+CLOUD_BK_PID="$OC_RUNDIR/cloud-bk.pid"
+CLOUD_BK_LOCK="$OC_RUNDIR/cloud-bk.lock"
 CLOUD_INSTALL_STAGE="$OC_RUNDIR/cloud-install.stage"
 
 cloud_install_lock_clear() {
@@ -3442,6 +3448,183 @@ EOF
 	printf '%s' "$n"
 }
 
+# ---------------------------------------------------------------- 手动备份（带进度）
+bk_log() {
+	# 写进度日志：前端轮询这个文件。
+	# 与 br_log 的区别：br_log 写任务总日志（给定时任务事后查），
+	# bk_log 写**本次**手动备份的独立日志（给进度框实时看）。
+	[ -n "${CLOUD_BK_LOG:-}" ] || return 0
+	printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" >>"$CLOUD_BK_LOG" 2>/dev/null || true
+	return 0
+}
+
+cmd_backup_bg() {
+	# backup-bg [--no-workspace]
+	#
+	# 手动备份改成后台执行：打包几 GB + 上传几十 MB 可能要几分钟，
+	# 同步等会让前端一直空白。这里立刻返回 started，前端轮询 backup-poll。
+	# 定时任务（backup-run）保持原样：静默、只写任务日志。
+	local ws="1"
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--no-workspace) ws="0"; shift ;;
+			*) shift ;;
+		esac
+	done
+
+	# 前置检查（与定时任务同口径，但失败要明确回给用户，因为这是手动触发的）
+	cloud_bin_ready >/dev/null 2>&1 || cloud_fail "网盘组件未安装，请先完成上面的步骤" 2
+	if ! cloud_is_logged_in; then
+		if [ "$CLOUD_AUTH_STATE" = "unknown" ]; then
+			cloud_fail "登录状态无法确认，请重新登录后再试" 2
+		fi
+		cloud_fail "尚未登录百度网盘，请先完成授权" 2
+	fi
+	cloud_ensure_dirs || cloud_fail "无法创建云备份目录" 2
+	[ -d "$OC_RUNDIR" ] && [ -w "$OC_RUNDIR" ] || cloud_fail "临时目录不可用：$OC_RUNDIR" 2
+
+	# 已有任务在跑：pid 活着就报 busy；否则清掉陈旧状态继续
+	if [ -f "$CLOUD_BK_PID" ]; then
+		local _p
+		_p="$(head -n1 "$CLOUD_BK_PID" 2>/dev/null | tr -d ' \r\n')"
+		if [ -n "$_p" ] && oc_pid_alive "$_p"; then
+			printf '{"ok":false,"busy":true,"error":"%s"}\n' \
+				"$(jstr "已有备份任务在运行，请等它结束")"
+			return 0
+		fi
+		rm -f "$CLOUD_BK_PID" "$CLOUD_BK_RC" 2>/dev/null
+	fi
+	rm -f "$CLOUD_BK_RC" 2>/dev/null
+	: >"$CLOUD_BK_LOG" 2>/dev/null || cloud_fail "无法写入进度日志：$CLOUD_BK_LOG"
+
+	# 阶段前缀 [local] / [cloud] 供前端分别显示"本地备份""云端上传"两行状态。
+	# 文本本身仍然可读：日志同时要能直接给人看。
+	bk_log "[local] 开始打包（$([ "$ws" = "1" ] && echo '配置 + 会话 + 工作区' || echo '配置 + 会话，不含工作区')）"
+	bk_log "[local] tar 不提供可靠总量，故不显示百分比；完成时给出文件名与体积"
+
+	( backup_bg_worker "$ws" ) >/dev/null 2>&1 </dev/null &
+	printf '%s\n' "$!" >"$CLOUD_BK_PID" 2>/dev/null || true
+	printf '{"ok":true,"started":true}\n'
+}
+
+backup_bg_worker() {
+	# 后台 worker：打包 → 上传。所有输出进进度日志，最后写 rc。
+	local ws="${1:-1}" out errf rc file dir local_path remote _sz _szh
+	out="$OC_RUNDIR/bk-bg-out.$$"
+	errf="$OC_RUNDIR/bk-bg-err.$$"
+	rm -f "$out" "$errf" 2>/dev/null
+
+	# ---- 打包 ----
+	if [ "$ws" = "1" ]; then
+		sh "$OC_CLOUD_BACKUP" create >"$out" 2>"$errf"
+	else
+		sh "$OC_CLOUD_BACKUP" create --no-workspace >"$out" 2>"$errf"
+	fi
+	rc=$?
+	if [ "$rc" -ne 0 ] || ! grep -q '"ok":true' "$out" 2>/dev/null; then
+		bk_log "[local] ✗ 打包失败（rc=$rc）：$(cloud_tail_err "$errf" 3 | tr '\n' ' ')"
+		rm -f "$out" "$errf" 2>/dev/null
+		printf '1\n' >"$CLOUD_BK_RC" 2>/dev/null || true
+		rm -f "$CLOUD_BK_PID" 2>/dev/null
+		return 0
+	fi
+	file="$(sed -n 's/.*"file":"\([^"]*\)".*/\1/p' "$out" 2>/dev/null | head -n1)"
+	rm -f "$out" "$errf" 2>/dev/null
+	case "$file" in
+		'') bk_log "[local] ✗ 打包未返回文件名"
+			printf '1\n' >"$CLOUD_BK_RC" 2>/dev/null || true
+			rm -f "$CLOUD_BK_PID" 2>/dev/null
+			return 0 ;;
+		*/*|*..*) bk_log "[local] ✗ 打包返回的文件名不合法：$file"
+			printf '1\n' >"$CLOUD_BK_RC" 2>/dev/null || true
+			rm -f "$CLOUD_BK_PID" 2>/dev/null
+			return 0 ;;
+	esac
+
+	dir="$(sh "$OC_CLOUD_BACKUP" path 2>/dev/null)"
+	[ -n "$dir" ] || dir="$(oc_base_dir)/backups"
+	local_path="$dir/$file"
+	if [ ! -f "$local_path" ]; then
+		bk_log "[local] ✗ 打包产物不存在：$local_path"
+		printf '1\n' >"$CLOUD_BK_RC" 2>/dev/null || true
+		rm -f "$CLOUD_BK_PID" 2>/dev/null
+		return 0
+	fi
+	_sz="$(wc -c <"$local_path" 2>/dev/null | tr -d ' \r\n')"
+	case "$_sz" in ''|*[!0-9]*) _sz=0 ;; esac
+	if [ "$_sz" -ge 1048576 ]; then
+		_szh="$((_sz / 1048576)) MB"
+	elif [ "$_sz" -ge 1024 ]; then
+		_szh="$((_sz / 1024)) KB"
+	else
+		_szh="$_sz B"
+	fi
+	bk_log "[local] ✓ 打包完成：$file（$_szh）"
+
+	# ---- 上传 ----
+	bk_log "[cloud] 开始上传到 $OC_CLOUD_REMOTE/ …"
+	out="$OC_RUNDIR/bk-bg-up.$$"
+	errf="$OC_RUNDIR/bk-bg-uperr.$$"
+	rm -f "$out" "$errf" 2>/dev/null
+	( cloud_upload_file "$local_path" "$file" ) >"$out" 2>"$errf"
+	rc=$?
+	if [ "$rc" -ne 0 ] || ! grep -q '"ok":true' "$out" 2>/dev/null; then
+		remote="$(sed -n 's/.*"error":"\([^"]*\)".*/\1/p' "$out" 2>/dev/null | head -n1)"
+		[ -n "$remote" ] || remote="上传失败（rc=$rc）"
+		bk_log "[cloud] ✗ $remote"
+		[ -s "$errf" ] && bk_log "[cloud]   $(cloud_tail_err "$errf" 3 | tr '\n' ' ')"
+		rm -f "$out" "$errf" 2>/dev/null
+		printf '1\n' >"$CLOUD_BK_RC" 2>/dev/null || true
+		rm -f "$CLOUD_BK_PID" 2>/dev/null
+		return 0
+	fi
+	remote="$(sed -n 's/.*"remote":"\([^"]*\)".*/\1/p' "$out" 2>/dev/null | head -n1)"
+	rm -f "$out" "$errf" 2>/dev/null
+	bk_log "[cloud] ✓ 上传完成：${remote:-$file}"
+	bk_log "[done] 全部完成。"
+	printf '0\n' >"$CLOUD_BK_RC" 2>/dev/null || true
+	rm -f "$CLOUD_BK_PID" 2>/dev/null
+	return 0
+}
+
+cmd_backup_poll() {
+	# backup-poll -> {"ok":true,"running":bool,"done":bool,"rc":"","log":"..."}
+	local pid running=false done=false rc="" out=""
+
+	# 从未启动过：不返回 done，避免前端把"没开始"当成"已完成"
+	if [ ! -f "$CLOUD_BK_LOG" ] && [ ! -f "$CLOUD_BK_RC" ] && [ ! -f "$CLOUD_BK_PID" ]; then
+		printf '{"ok":true,"running":false,"done":false,"rc":"","log":""}\n'
+		return 0
+	fi
+
+	pid="$(head -n1 "$CLOUD_BK_PID" 2>/dev/null | tr -d ' \r\n')"
+	if [ -n "$pid" ] && oc_pid_alive "$pid"; then
+		running=true
+	fi
+
+	if [ "$running" = "true" ]; then
+		:
+	elif [ -f "$CLOUD_BK_RC" ]; then
+		done=true
+		rc="$(head -n1 "$CLOUD_BK_RC" 2>/dev/null | tr -d ' \r\n')"
+		case "$rc" in ''|*[!0-9]*) rc=1 ;; esac
+	else
+		# 进程没了又没留 rc：被中断（OOM / 手动 kill / 断电）
+		done=true
+		rc=124
+		if ! grep -qF "任务已中断" "$CLOUD_BK_LOG" 2>/dev/null; then
+			printf '%s\n' "任务已中断（进程已退出但没有结果），以上为已产生的日志。" \
+				>>"$CLOUD_BK_LOG" 2>/dev/null
+		fi
+		printf '124\n' >"$CLOUD_BK_RC" 2>/dev/null || true
+		rm -f "$CLOUD_BK_PID" 2>/dev/null
+	fi
+
+	out="$(cloud_install_log_tail "$CLOUD_BK_LOG")"
+	printf '{"ok":true,"running":%s,"done":%s,"rc":"%s","log":"%s"}\n' \
+		"$running" "$done" "$(jstr "$rc")" "$(jstr "$out")"
+}
+
 cmd_backup_run() {
 	local enabled out errf file dir local_path remote pruned rc
 	local local_removed drop_reason dir_phys par_phys
@@ -3629,6 +3812,8 @@ case "${1:-}" in
 	schedule-set)    cmd_schedule_set ;;
 	schedule-clear)  cmd_schedule_clear ;;
 	backup-run)      cmd_backup_run ;;
+	backup-bg)       cmd_backup_bg "$@" ;;
+	backup-poll)     cmd_backup_poll ;;
 	*)
 		printf '{"ok":false,"error":"%s"}\n' "$(jstr "未知动作：${1:-}")"
 		cat >&2 <<EOF

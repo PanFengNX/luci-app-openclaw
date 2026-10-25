@@ -139,6 +139,8 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "cloud_login_url"},  call("api_cloud_login_url")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_login_code"}, call("api_cloud_login_code")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_logout"}, call("api_cloud_logout")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_backup_bg"}, call("api_cloud_backup_bg")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_backup_poll"}, call("api_cloud_backup_poll")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_upload"}, call("api_cloud_upload")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_ls"},     call("api_cloud_ls")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_download"}, call("api_cloud_download")).leaf = true
@@ -1320,6 +1322,24 @@ end
 
 -- 上传：只接受「本机备份目录里的文件名」，不接受任意本地路径。
 -- 这样即使前端被篡改，也无法把 /etc/shadow 之类的东西传到网盘。
+-- 手动云备份：后台执行 + 进度轮询。
+-- 原来是一次同步 post 到底（打包 → 上传），几分钟内前端毫无反馈；
+-- 定时任务那条路径保持静默（只写任务日志），手动这条要能看到进度。
+function api_cloud_backup_bg()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	local ws = http.formvalue("workspace")
+	local args = " backup-bg"
+	if ws == "0" then args = args .. " --no-workspace" end
+	cloud_reply(cloud_exec(args))
+end
+
+function api_cloud_backup_poll()
+	cloud_reply(cloud_exec("backup-poll"))
+end
+
 function api_cloud_upload()
 	if not is_post() then
 		out({ ok = false, error = "请使用 POST 提交" })

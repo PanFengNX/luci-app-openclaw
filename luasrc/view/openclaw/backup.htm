@@ -532,6 +532,14 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
     <button id="btn-cl-refresh" class="oc-btn ghost" disabled>刷新云端列表</button>
     <span id="cl-enc-note" class="oc-hint">本次上传：不加密</span>
   </div>
+  <div id="cl-phases" class="oc-actions" style="margin-top:8px;display:none;gap:14px">
+    <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px">
+      本地备份 <span id="cl-phase-local" class="oc-badge oc-none">等待</span>
+    </span>
+    <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px">
+      云端上传 <span id="cl-phase-cloud" class="oc-badge oc-none">等待</span>
+    </span>
+  </div>
   <div id="cl-out" class="oc-out" style="margin-top:8px;display:none"></div>
   <div class="oc-actions" id="cl-out-tools" style="margin-top:8px;display:none">
     <button id="btn-clout-copy" class="oc-btn ghost" type="button">复制输出</button>
@@ -719,6 +727,8 @@ var API = {
   cloud_login_code: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_login_code")%>',
   cloud_logout: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_logout")%>',
   cloud_upload: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_upload")%>',
+  cloud_backup_bg: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_backup_bg")%>',
+  cloud_backup_poll: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_backup_poll")%>',
   cloud_ls: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_ls")%>',
   cloud_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_download")%>',
   cloud_rm: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_rm")%>',
@@ -959,6 +969,7 @@ loadBackups();
 //   * 页面加载只做只读查询（status / ls / encrypt-status / schedule-status），
 //     不会自动下载或上传任何东西。
 var CL = {
+  bkTimer: null,          // 手动备份轮询定时器
   statusKnown: false,
   statusTried: false,
   installed: false,
@@ -988,13 +999,29 @@ function clOut(line){
   var el = $('cl-out');
   if (!el) return;
   el.style.display = '';
+  var ph = $('cl-phases');
+  if (ph) ph.style.display = '';
   el.textContent = el.textContent ? (el.textContent + '\n' + line) : line;
+  el.scrollTop = el.scrollHeight;
+}
+
+// 整体替换输出区。轮询拿到的是**完整日志**，用 clOut 会一遍遍追加，
+// 几轮之后同一段话重复十几次。
+function clOutSet(text){
+  var el = $('cl-out');
+  if (!el) return;
+  el.style.display = '';
+  var ph = $('cl-phases');
+  if (ph) ph.style.display = '';
+  el.textContent = String(text == null ? '' : text);
   el.scrollTop = el.scrollHeight;
 }
 
 function clOutReset(){
   var el = $('cl-out');
   if (el){ el.textContent = ''; el.style.display = 'none'; }
+  var ph = $('cl-phases');
+  if (ph) ph.style.display = 'none';
 }
 
 function clNet(r){
@@ -1996,35 +2023,87 @@ function clBackup(){
   clRender();
   clErr('cl-err3', '');
   clOutReset();
-  clOut('① 正在本机打包备份（' + scope + '）…');
+  clPhaseReset();
 
-  post(API.backup_create, { name: '', workspace: ws }, function(r){
-    var d = jp(r && r.data, {});
-    if (!r || !r.ok || !d.file){
+  // 先弹进度框：用户点完立刻有反馈，而不是等第一个请求回来。
+  clOut('正在启动备份任务…');
+  post(API.cloud_backup_bg, { workspace: ws }, function(r){
+    if (!r || r.ok === false){
       CL.busy = false;
       clRender();
-      clErr('cl-err3', '本地打包失败：' + ((d && d.error) || (r && r.error) || '未知错误') + clNet(r));
-      clOut('本地打包失败。');
+      var msg = (r && (r.data && r.data.error || r.error)) || '启动失败';
+      clErr('cl-err3', '无法启动备份：' + msg + clNet(r));
+      clOut('无法启动备份任务。');
+      clPhaseFail('local', msg);
       return;
     }
-    clOut('本地备份完成：' + d.file + '（' + fmtSize(d.size || 0) + '）');
-    clOut('② 正在上传到网盘 openclaw-backups/ …');
-
-    post(API.cloud_upload, { file: d.file }, function(rr){
-      CL.busy = false;
-      clRender();
-      if (rr && rr.ok){
-        var up = (rr.data && rr.data.remote) || d.file;
-        var sz = (rr.data && rr.data.size) || d.size || 0;
-        clErr('cl-err3', '');
-        clOut('已上传 ' + up + '（' + fmtSize(sz) + '）');
-      } else {
-        clErr('cl-err3', '上传失败：' + ((rr && rr.error) || '未知错误') + clNet(rr));
-        clOut('上传失败。');
-      }
-      clLoadList();
-    });
+    clOut('备份任务已启动，正在打包…');
+    clPollBackup();
   });
+}
+
+// 轮询备份进度，直到 done。
+// 同时把日志里的 [local] / [cloud] 前缀解析成两行独立状态，
+// 这样"本地打包"和"云端上传"能各自显示进行中/完成/失败。
+function clPollBackup(){
+  if (CL.bkTimer) clearTimeout(CL.bkTimer);
+  CL.bkTimer = setTimeout(function(){
+    get(API.cloud_backup_poll, function(r){
+      var d = jp((r && r.data) || '{}', {});
+      var log = String(d.log || '');
+      clOutSet(log || '（暂无输出）');
+      clPhaseFromLog(log, d);
+
+      if (d.done){
+        CL.bkTimer = null;
+        CL.busy = false;
+        clRender();
+        var ok = String(d.rc) === '0';
+        if (ok){
+          clErr('cl-err3', '');
+        } else if (String(d.rc) === '124'){
+          clErr('cl-err3', '备份被中断（进程已退出但没有结果），请查看上面的输出后重试。');
+        } else {
+          clErr('cl-err3', '备份失败，请查看上面的输出。');
+        }
+        clLoadList();
+        return;
+      }
+      clPollBackup();
+    });
+  }, 1500);
+}
+
+// 两行阶段状态：本地备份 / 云端上传
+function clPhaseReset(){
+  ['local', 'cloud'].forEach(function(k){
+    var el = $('cl-phase-' + k);
+    if (!el) return;
+    el.className = 'oc-badge oc-none';
+    el.textContent = '等待';
+  });
+}
+function clPhaseSet(k, cls, text){
+  var el = $('cl-phase-' + k);
+  if (!el) return;
+  el.className = 'oc-badge ' + cls;
+  el.textContent = text;
+}
+function clPhaseFail(k, msg){
+  clPhaseSet(k, 'oc-none', msg ? '失败' : '失败');
+}
+function clPhaseFromLog(log, d){
+  var has = function(s){ return log.indexOf(s) >= 0; };
+  // 本地：出现 [local] ✓ 打包完成 = 成功；出现 [local] ✗ = 失败；只有 [local] 开头 = 进行中
+  if (has('[local] ✓ 打包完成')) clPhaseSet('local', 'oc-run', '完成');
+  else if (has('[local] ✗'))     clPhaseSet('local', 'oc-none', '失败');
+  else if (has('[local]'))        clPhaseSet('local', 'oc-run', '进行中');
+  else                            clPhaseSet('local', 'oc-none', '等待');
+
+  if (has('[cloud] ✓ 上传完成'))   clPhaseSet('cloud', 'oc-run', '完成');
+  else if (has('[cloud] ✗'))      clPhaseSet('cloud', 'oc-none', '失败');
+  else if (has('[cloud]'))        clPhaseSet('cloud', 'oc-run', '进行中');
+  else                            clPhaseSet('cloud', 'oc-none', '等待');
 }
 
 // ---------------------------------------------------------------- 加密口令

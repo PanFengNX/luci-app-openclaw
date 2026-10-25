@@ -424,6 +424,34 @@ bks = (proj / 'root/usr/libexec/openclaw/backup.sh').read_text(encoding='utf-8')
 check('$stage/plugins.txt' in bks, '归档确实写入 plugins.txt')
 check('$stage/crontab.txt' in bks, '归档确实写入 crontab.txt')
 
+# ---- 手动云备份：后台任务 + 进度（本地/云端两行状态）----
+cs = (proj / 'root/usr/libexec/openclaw/cloud.sh').read_text(encoding='utf-8')
+check('cmd_backup_bg()' in cs, '手动备份有后台入口 backup-bg')
+check('cmd_backup_poll()' in cs, '有进度查询 backup-poll')
+check('backup_bg_worker()' in cs, '有后台 worker')
+check('backup-bg)' in cs and 'backup-poll)' in cs, '两个子命令已注册分发')
+# 定时任务那条路径必须保持静默（不改动）
+check('cmd_backup_run()' in cs, '定时任务入口仍在（静默路径不变）')
+# 阶段前缀：前端据此分开显示"本地备份""云端上传"
+check('[local]' in cs and '[cloud]' in cs, '日志带 [local]/[cloud] 阶段前缀')
+# 状态文件必须与组件安装分开，否则互相覆盖 pid/rc
+check('CLOUD_BK_LOG' in cs and 'CLOUD_INSTALL_LOG' in cs,
+      '备份与组件安装各自独立一套状态文件')
+check('CLOUD_BK_LOG="$OC_RUNDIR/cloud-bk.log"' in cs, '备份日志路径独立')
+
+bh = (proj / 'luasrc/view/openclaw/backup.htm').read_text(encoding='utf-8')
+check('function clPollBackup(' in bh, '前端轮询备份进度')
+check('clPhaseFromLog(' in bh, '前端解析阶段前缀成两行状态')
+check('id="cl-phase-local"' in bh, '有"本地备份"状态位')
+check('id="cl-phase-cloud"' in bh, '有"云端上传"状态位')
+check('function clOutSet(' in bh, '有替换式输出（轮询是完整日志，追加会重复）')
+check('clOutSet(log' in bh, '轮询用替换而不是追加')
+check('cloud_backup_bg' in bh and 'cloud_backup_poll' in bh, '前端已接两个新端点')
+
+ctrl = (proj / 'luasrc/controller/openclaw.lua').read_text(encoding='utf-8')
+check('api_cloud_backup_bg' in ctrl and 'api_cloud_backup_poll' in ctrl,
+      '后端两个端点都已注册')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF
