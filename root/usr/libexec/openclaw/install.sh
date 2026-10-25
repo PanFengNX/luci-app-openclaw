@@ -131,7 +131,7 @@ ilog() {
 # 却始终看到同一段文字，用户就会以为安装卡死了。所以这里补两样东西：
 #   [i/N] 阶段名 …            每个阶段开始/结束各一行，能看出"到第几步、共几步"
 #   … 仍在进行（已 Xm Ys）     长步骤每 15 秒一行心跳，证明进程还活着
-STAGE_TOTAL=7
+STAGE_TOTAL=8
 STAGE_IDX=0
 STAGE_NAME=""
 STAGE_START=0
@@ -594,6 +594,7 @@ NODE_DIR_bin() { "$NODE_DIR/bin/node" -v 2>/dev/null; }
 install_openclaw() {
 	ilog "== 安装 OpenClaw $OCV（官方 npm 包） =="
 	local reg npmcache npmcli npm_log rc start_ts end_ts elapsed added timed_out
+	local npm_ver npm_major npm_minor allow_scripts
 	local _gw_pids _i
 	reg="$(npm_registry)"
 	npmcache="$BASE_DIR/npm-cache"
@@ -643,6 +644,46 @@ install_openclaw() {
 		fi
 	fi
 
+	# ---- 按 npm 版本决定是否传 --allow-scripts（官方文档要求）----------
+	# npm 12 默认**阻止**未批准的 package lifecycle scripts，OpenClaw 的
+	# preinstall / postinstall 正是这类脚本；不显式批准会被 blocked，
+	# 表现为"装完了但运行不正常"。而 npm <=11.15 根本没有这个选项，
+	# 带了会让 npm 直接报错。所以只能探测版本后再决定：
+	#   npm >= 12        → 必须加 --allow-scripts=openclaw
+	#   npm 11.16        → 接受该选项（仅警告），脚本仍会执行 → 加上更稳
+	#   npm <= 11.15     → 绝不能加
+	npm_ver=""
+	if [ -n "$npmcli" ] && [ -f "$npmcli" ]; then
+		npm_ver="$("$NODE_BIN" "$npmcli" --version 2>/dev/null | head -n1)"
+	fi
+	# npm --version 正常输出 "11.6.2"，但个别包装脚本会带 v 前缀；先剥掉。
+	npm_ver="${npm_ver#v}"
+	npm_major=""
+	case "$npm_ver" in
+		[0-9]*) npm_major="${npm_ver%%.*}" ;;
+	esac
+	case "$npm_major" in ''|*[!0-9]*) npm_major=0 ;; esac
+
+	allow_scripts=""
+	if [ "$npm_major" -ge 12 ]; then
+		allow_scripts="--allow-scripts=openclaw"
+	elif [ "$npm_major" -eq 11 ]; then
+		npm_minor="${npm_ver#*.}"; npm_minor="${npm_minor%%.*}"
+		case "$npm_minor" in ''|*[!0-9]*) npm_minor=0 ;; esac
+		[ "$npm_minor" -ge 16 ] && allow_scripts="--allow-scripts=openclaw"
+	fi
+
+	# sharp 的原生二进制：官方安装器默认 SHARP_IGNORE_GLOBAL_LIBVIPS=1，
+	# 避免它在路由器上尝试对系统 libvips 做原生构建（必然失败或极慢）。
+	# 我们跟随官方默认值。
+	SHARP_IGNORE_GLOBAL_LIBVIPS=1
+	export SHARP_IGNORE_GLOBAL_LIBVIPS
+
+	if [ -n "$allow_scripts" ]; then
+		ilog "npm 版本 ${npm_ver:-未知}：使用 $allow_scripts（npm 12 起必须显式批准生命周期脚本）"
+	else
+		ilog "npm 版本 ${npm_ver:-未知}：不传 --allow-scripts（该版本不支持此选项）"
+	fi
 	ilog "npm install -g openclaw@$OCV  (registry=$reg)"
 	# npm 的输出写到独立文件：$OC_INSTALLLOG 由 ilog 的 tee -a 追加，
 	# 两个写入者（外加调用方的 stdout 重定向）同时写一个文件会产生半截行。
@@ -662,11 +703,15 @@ install_openclaw() {
 
 	# npm 的输出只进独立日志，主日志在整段安装期间不会自己增长；
 	# 心跳是"还在干活"的唯一可见证据，命令结束（含被 timeout 杀掉）后立刻收掉。
+	# 用 set -- 组装参数：allow_scripts 可能为空，直接拼字符串会留下多余空格，
+	# 而这里每一个选项都必须原样传给 npm。
+	set -- install -g --prefix "$OC_DIR" --registry "$reg" \
+		--no-audit --no-fund --loglevel=http --prefer-offline
+	[ -n "$allow_scripts" ] && set -- "$@" "$allow_scripts"
+	set -- "$@" "openclaw@$OCV"
 	run_with_heartbeat "npm install" -- \
-		run_with_timeout "$NPM_INSTALL_TIMEOUT" "$NODE_BIN" "$npmcli" install -g \
-		--prefix "$OC_DIR" --registry "$reg" \
-		--no-audit --no-fund --loglevel=http --prefer-offline \
-		"openclaw@$OCV" >>"$npm_log" 2>&1
+		run_with_timeout "$NPM_INSTALL_TIMEOUT" "$NODE_BIN" "$npmcli" "$@" \
+		>>"$npm_log" 2>&1
 	rc=$?
 
 	end_ts="$(date +%s 2>/dev/null)"
@@ -869,7 +914,7 @@ svc_wait_running() {
 autostart_service() {
 	# 只在安装全部成功时调用（finish 的末尾）。任何失败都只告警：
 	# 安装本身已经成功，这里的退出码必须保持 0。
-	local auto _n
+	local auto _n _deep
 	if [ "$NO_START" = "1" ]; then
 		ilog "已跳过自动启动（--no-start）"
 		return 0
@@ -904,6 +949,16 @@ autostart_service() {
 			oc_timeout 150 /etc/init.d/openclaw start >/dev/null 2>&1
 			if svc_wait_running; then
 				ilog "服务已启动"
+				# 官方升级流程的最后一步：`openclaw gateway status --deep`
+				# 端口通只说明进程在听，不说明网关自己认为健康（插件加载失败、
+				# schema 未迁移完都可能仍然监听）。这一步把结论记进日志。
+				_deep="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+					oc_timeout 60 "$OC_DIR/bin/openclaw" gateway status --deep 2>&1)"
+				if [ -n "$_deep" ]; then
+					printf '%s\n' "$_deep" | tail -n 10 | while IFS= read -r _l; do
+						[ -n "$_l" ] && ilog "  status| $_l"
+					done
+				fi
 			else
 				ilog "WARN: 服务启动失败，请到状态页查看日志或点「一键修复」"
 			fi
@@ -926,6 +981,37 @@ finish() {
 	ilog "OpenClaw $OCV  |  Node.js $NODE_V  |  目录 $BASE_DIR"
 }
 
+# ---------------------------------------------------------------- doctor
+run_doctor_after_upgrade() {
+	# 升级后让 OpenClaw 修自己的配置（官方安装器的做法）。
+	#
+	# 官方 install.sh 在"升级已有安装"时会执行 `openclaw doctor --non-interactive`
+	# （best effort）。我们不跑这一步的后果很具体：openclaw.json 的 schema 会
+	# 随版本演进（旧键被移除、新键有默认值），不修的话升级完网关可能起不来，
+	# 或者起来了但功能不对 —— 而日志里只有一句 "config invalid"。
+	#
+	# 用 --fix（与官方"从极旧版本升级"的桥接步骤一致）：只跑只读体检不会改配置。
+	# 失败不判死：doctor 在个别问题上会返回非零，但那不代表安装失败。
+	local oc out rc
+	oc="$OC_DIR/bin/openclaw"
+	[ -x "$oc" ] || { ilog "跳过 doctor：未找到 $oc"; return 0; }
+
+	ilog "运行 openclaw doctor --fix（让 OpenClaw 修正自身配置，官方升级流程要求）"
+	out="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+		oc_timeout 180 "$oc" doctor --fix 2>&1)"
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		ilog "doctor --fix 完成"
+	else
+		ilog "WARN: doctor --fix 退出码 $rc（不代表安装失败；个别问题它修不了）"
+	fi
+	# 只记最后几行：doctor 输出很长，全打进主日志会把关键信息埋掉。
+	[ -n "$out" ] && printf '%s\n' "$out" | tail -n 20 | while IFS= read -r _l; do
+		[ -n "$_l" ] && ilog "  doctor| $_l"
+	done
+	return 0
+}
+
 # ---------------------------------------------------------------- main
 main() {
 	stage_begin "检查环境并准备目录"
@@ -943,6 +1029,12 @@ main() {
 
 	stage_begin "安装 OpenClaw（npm install，可能数分钟）"
 	install_openclaw
+	stage_end
+
+	# 官方安装器在升级已有安装后必跑 doctor；放在写配置之前，
+	# 让它先修好 OpenClaw 自己的 schema，我们再补自己的键。
+	stage_begin "让 OpenClaw 修正自身配置（doctor --fix）"
+	run_doctor_after_upgrade
 	stage_end
 
 	stage_begin "写入配置"

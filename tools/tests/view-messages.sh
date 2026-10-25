@@ -326,6 +326,30 @@ st6 = cli6[cli6.index('cmd_install_status() {'):]
 st6 = st6[:st6.index('\n}\n')]
 check('OC_INST_LOGPATH' in st6, 'install-status 读标记文件而不是硬编码路径')
 
+# ---- 升级流程必须对齐 OpenClaw 官方文档 ----
+ins7 = (proj / 'root/usr/libexec/openclaw/install.sh').read_text(encoding='utf-8')
+lib7 = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
+cli7 = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
+
+# npm 12 默认阻止未批准的 lifecycle scripts，而 OpenClaw 的 preinstall/postinstall
+# 正是这类脚本；不显式批准会"装完但跑不起来"。
+check('--allow-scripts=openclaw' in ins7, 'npm 12+ 会传 --allow-scripts=openclaw')
+check('npm_major' in ins7, '按 npm 版本决定是否传该选项（老版本不支持）')
+check('SHARP_IGNORE_GLOBAL_LIBVIPS=1' in ins7, 'sharp 原生构建走官方默认规避')
+# 官方升级流程：doctor --fix + gateway status --deep
+check('run_doctor_after_upgrade()' in ins7, '升级后跑 openclaw doctor --fix（官方要求）')
+check("doctor --fix" in ins7, 'doctor 用 --fix（能修配置而不只是检查）')
+check('gateway status --deep' in ins7, '启动后做深度验证')
+
+# 锁判定：陈旧锁不能永久挡住升级
+check('oc_lock_busy()' in lib7, '有 oc_lock_busy（问活进程而不是目录存在）')
+bg = cli7[cli7.index('cmd_install_bg() {'):]
+bg = bg[:bg.index('\n}\n')]
+check('oc_lock_busy' in bg, 'install-bg 用 oc_lock_busy')
+check('if oc_locked;' not in bg, 'install-bg 不再用裸 oc_locked 挡升级')
+check('_inst_log_note' in bg, '拒绝路径会写日志（能查到被拒原因）')
+check('install.logpath' in ins7 and 'OC_INST_LOGPATH' in cli7, '日志路径跨进程一致')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

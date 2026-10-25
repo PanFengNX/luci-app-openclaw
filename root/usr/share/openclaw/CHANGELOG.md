@@ -1,8 +1,56 @@
-<!-- version: 1.8.34 -->
+<!-- version: 1.8.35 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.35
+
+**「无法升级」的根因，以及按官方文档补齐升级流程。**
+
+### 根因：陈旧锁永久挡住升级
+
+`install-bg` 用的是裸 `oc_locked()` —— 它只判断**锁目录是否存在**。
+于是任何一次被 SIGKILL、OOM、断电打断的操作都会把目录留在那里，
+此后**每一次升级都被"另一个操作正在运行"拒绝**，用户除非知道要
+`cli.sh unlock`，否则再也没有升级入口。
+
+改为 `oc_lock_busy()`（问"有没有**活着的**进程持锁"）。陈旧锁交给
+`install.sh` 里的 `oc_lock_acquire` 原子接管 —— 那里本来就有完整的
+陈旧判定和 `mv` 抢占，只是升级入口绕过了它。
+
+### 顺带：借鉴 iStore，升级入口自己清理残留
+
+升级入口不该假设"上一次是干净结束的"。现在 `install-bg` 启动前会：
+清掉陈旧锁、清掉上一次的完成标记 / rc / pid / start / logpath、
+把上一次的日志移成 `.1`（**不删**，那是失败的唯一现场）。
+剩下真正在跑的 `install.sh` 由 `oc_inst_alive` 拒绝 —— 这个拒绝是对的。
+
+### 按官方文档补齐三处（此前都没有）
+
+查了 `docs.openclaw.ai/install` 与 `install/updating`，我们缺三步：
+
+1. **`--allow-scripts=openclaw`**。npm 12 默认**阻止**未批准的 package
+   lifecycle scripts，而 OpenClaw 的 `preinstall` / `postinstall` 正是这类；
+   不显式批准会被 blocked，表现为"装完了但跑不起来"。
+   但 npm ≤11.15 没有这个选项、带了会直接报错，所以按版本探测：
+   `>=12` 必加、`11.16+` 也加、`<=11.15` 绝不加。
+2. **`openclaw doctor --fix`**。官方安装器在升级已有安装后必跑
+   （`--non-interactive`，best effort）。不跑的后果很具体：`openclaw.json`
+   的 schema 随版本演进，不修的话升级完可能起不来或功能异常，日志里只有一句
+   `config invalid`。已插入为独立阶段（阶段总数 7→8）。
+3. **`sharp` 的 `SHARP_IGNORE_GLOBAL_LIBVIPS=1`**。官方安装器默认设，
+   避免它在路由器上尝试对系统 libvips 做原生构建（必然失败或极慢）。
+
+另外补了官方升级序列的最后一步 **`openclaw gateway status --deep`**：
+端口通只说明进程在听，不说明网关自己认为健康（插件加载失败、schema 未迁移完
+都可能仍然监听）。结论记进安装日志。
+
+### 拒绝也要留痕
+
+`install-bg` 的三条拒绝路径（base_dir 不安全 / 有锁 / 已有安装进程）此前
+只写 stderr 就 `exit 2`，**不创建也不写日志**。于是面板打开"升级日志"只能
+显示"暂无安装日志"，用户完全不知道被拒的原因。现在拒绝也写一行进安装日志。
 
 ## 1.8.34
 

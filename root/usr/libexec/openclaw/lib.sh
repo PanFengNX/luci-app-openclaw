@@ -1604,6 +1604,23 @@ oc_lock_release() {
 
 oc_locked() { [ -d "$OC_LOCK_DIR" ]; }
 
+oc_lock_busy() {
+	# 锁是否被**活着的**进程持有。0 = 忙，1 = 空闲或只有陈旧残留。
+	#
+	# 与 oc_locked 的区别很重要：oc_locked 只看目录在不在，于是任何一次
+	# 被 SIGKILL / OOM / 断电打断的操作都会留下目录，之后所有升级都被
+	# "另一个操作正在运行"永久拒绝 —— 除非用户知道要手工 unlock。
+	# 升级入口必须问这个函数，而不是 oc_locked。
+	local pid
+	[ -d "$OC_LOCK_DIR" ] || return 1
+	pid="$(cat "$OC_LOCK_DIR/pid" 2>/dev/null || true)"
+	case "${pid:-}" in ''|*[!0-9]*) return 1 ;; esac
+	oc_pid_alive "$pid" || return 1
+	# 祖先进程持锁时对我们而言是"可用"的（会以 ADOPT 方式继承）
+	oc_pid_in_ancestry "$pid" && return 1
+	return 0
+}
+
 # ---------------------------------------------------------------- download
 oc_fmt_elapsed() {
 	local total="${1:-0}" h m s

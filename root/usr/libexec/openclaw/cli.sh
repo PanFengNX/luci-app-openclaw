@@ -273,25 +273,69 @@ cmd_install() {
 	sh "$OC_INSTALL" "$@"
 }
 
+# 写一行到安装日志（供 install-bg 的拒绝路径使用）。
+# 与 install.sh 的 ilog() 同一份文件，面板通过 api_ilog 读它。
+_inst_log_note() {
+	local f="${OC_INSTALLLOG:-${OC_RUNDIR:-/tmp/.openclaw}/install.log}"
+	local dir
+	dir="$(dirname "$f")"
+	[ -d "$dir" ] && [ -w "$dir" ] || { f="${OC_RUNDIR:-/tmp/.openclaw}/install.log"; }
+	printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$f" 2>/dev/null || true
+}
+
 cmd_install_bg() {
 	# non blocking install for LuCI; progress in $OC_INSTALLLOG
 	# NOTE: do not hold the lock here - this process exits immediately, which
 	# would release it. install.sh acquires (and holds) the lock itself.
 	shift
-	require_safe
-	if oc_locked; then
-		oc_err "另一个操作正在运行，请稍后再试"
+
+	# 拒绝也要留痕。原来三条拒绝路径直接 exit 2，**不创建也不写日志文件**
+	# （只有 install.sh 才写），于是面板打开"升级日志"只能显示"暂无安装日志"，
+	# 用户完全不知道被拒的原因。拒绝也是"发生过的事"。
+	_reject() {
+		_inst_log_note "[拒绝] $1"
+		oc_err "$1"
 		exit 2
+	}
+
+	require_safe
+	# 用 oc_lock_busy（问"有没有**活着的**进程持锁"），不是裸 oc_locked
+	# （只问"目录在不在"）。用后者的话，任何一次被 SIGKILL / OOM / 断电
+	# 打断的操作都会把锁目录留在那里，之后**每次升级都被拒绝**，用户只能
+	# 摸到 SSH 里手工 unlock —— 这正是"无法升级"的成因。
+	# 陈旧锁交给 install.sh 里的 oc_lock_acquire 原子接管。
+	if oc_lock_busy; then
+		_reject "另一个操作正在运行，请稍后再试（操作锁被占用；可能是「一键修复」「备份还原」或云备份在进行）"
 	fi
 	# install.sh takes the lock only after it has been forked, so oc_locked
 	# alone leaves a window where two clicks both get through. The pid-based
 	# check closes it (and also covers a foreground `install`).
 	if oc_inst_alive; then
-		oc_err "已有安装进程在运行，请稍后再试"
-		exit 2
+		_reject "已有安装进程在运行，请稍后再试（可在弹窗里查看它的实时日志）"
 	fi
-	rm -f "$OC_INSTALLLOG" "$OC_INST_DONE" "$OC_INST_RC" "$OC_INST_PID" \
-		"$OC_INST_LOGPATH" 2>/dev/null || true
+	# ---- 自动清理上一次的残留（借鉴 iStore 的升级策略）----------------
+	# 升级入口不能假设"上一次是干净结束的"。断电、OOM、用户关页面、上一次
+	# 装到一半卡住 —— 这些都会留下痕迹，而每一样都可能让这次升级失败：
+	#   * 陈旧锁目录        → 已由上面的 oc_lock_busy 放行，install.sh 会原子接管
+	#   * 残留的完成标记    → 会让状态轮询以为"已经有结果了"，看到旧结论
+	#   * 上一次的半截日志  → 与本次日志混在一起，看不出哪句是这次的
+	#   * 残留的 install.sh → 若还在跑，下面 oc_inst_alive 会拒绝（正确的）
+	# 这里把前三类清掉；第四类交给上面的检查（跑着就不能动）。
+	local _stale
+	if [ -d "$OC_LOCK_DIR" ]; then
+		_stale="$(cat "$OC_LOCK_DIR/pid" 2>/dev/null || true)"
+		oc_warn "发现残留的操作锁（pid ${_stale:-未知}），已判定为陈旧并清理"
+		_inst_log_note "[清理] 移除上一次留下的陈旧锁（pid ${_stale:-未知}）"
+		oc_rmtree "$OC_LOCK_DIR"
+	fi
+	for _f in "$OC_INST_DONE" "$OC_INST_RC" "$OC_INST_PID" "$OC_INST_START" "$OC_INST_LOGPATH"; do
+		[ -e "$_f" ] && rm -f "$_f" 2>/dev/null
+	done
+	# 上一次的日志移到 .1：不删（它是失败的唯一现场），但也别混进本次日志。
+	if [ -s "$OC_INSTALLLOG" ]; then
+		mv -f "$OC_INSTALLLOG" "$OC_INSTALLLOG.1" 2>/dev/null || rm -f "$OC_INSTALLLOG" 2>/dev/null
+	fi
+	rm -f "$OC_INSTALLLOG" 2>/dev/null || true
 	mkdir -p "$OC_LOGDIR" "$(dirname "$OC_INST_RC")" 2>/dev/null || true
 	date +%s >"$OC_INST_START" 2>/dev/null || true
 	# 子 shell 的 stdio 必须离开 LuCI 请求的管道（同 diag）：内层已经
