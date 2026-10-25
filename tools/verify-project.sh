@@ -283,6 +283,42 @@ else
 	fi
 fi
 
+head_ "7d3. Lua dispatch（call() 必须拿字符串名，传函数对象会让接口 500）"
+if [ -z "$PY" ]; then
+	skip "找不到 python"
+elif [ ! -f tools/tests/lua-dispatch.py ]; then
+	skip "缺少 tools/tests/lua-dispatch.py"
+else
+	disp_out="$("$PY" tools/tests/lua-dispatch.py . 2>&1)"
+	if [ $? -eq 0 ]; then
+		printf '%s\n' "$disp_out" | tail -1 | sed 's/^/    /'
+		ok "call() 注册全部合法"
+	else
+		bad "call() 注册非法（该接口在设备上会 500）"
+		printf '%s\n' "$disp_out" | grep -E '行|call\(' | head -8 | sed 's/^/        /'
+	fi
+fi
+
+head_ "7d4. Lua dispatch 实跑（真实 Lua 5.1 逐路由调度）"
+if [ -z "$PY" ]; then
+	skip "找不到 python"
+elif [ ! -f tools/tests/lua-dispatch-run.py ]; then
+	skip "缺少 tools/tests/lua-dispatch-run.py"
+else
+	run_out="$("$PY" tools/tests/lua-dispatch-run.py . 2>&1)"
+	run_rc=$?
+	if [ "$run_rc" -eq 0 ]; then
+		printf '%s\n' "$run_out" | tail -2 | sed 's/^/    /'
+		ok "全部接口可被调度"
+	elif [ "$run_rc" -eq 3 ]; then
+		printf '%s\n' "$run_out" | tail -1 | sed 's/^/    /'
+		skip "未安装 lupa（pip install lupa 后生效）"
+	else
+		bad "有接口无法被调度"
+		printf '%s\n' "$run_out" | head -10 | sed 's/^/        /'
+	fi
+fi
+
 head_ "7e2. 云端列表的空状态与页面提示语"
 if [ -f tools/tests/cloud-ls.sh ]; then
 	if out="$(sh tools/tests/cloud-ls.sh 2>&1)"; then

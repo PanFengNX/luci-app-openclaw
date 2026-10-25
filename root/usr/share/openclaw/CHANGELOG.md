@@ -1,8 +1,48 @@
-<!-- version: 1.8.30 -->
+<!-- version: 1.8.31 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.31
+
+**修复 1.8.28~1.8.30 一直存在的致命错误：所有接口 500。**
+
+1.8.28 我把 57 个端点从 `call("api_xxx")` 改成了
+`call(guarded("xxx", api_xxx))`，想用一层包住来加 POST 校验。但 LuCI 的
+`call()` **只接受字符串函数名**：
+
+```lua
+local function _call(self, ...)
+    local func = getfenv()[self.name]     -- 按名字查环境
+    assert(func ~= nil, 'Cannot resolve function "' .. self.name ..
+           '". Is it misspelled or local?')
+```
+
+传函数对象进去，`getfenv()[函数]` 得到 `nil`，assert 直接抛异常 ——
+**每一个 API 请求都 500**。而页面模板不走 `call()`，所以界面能正常渲染，
+只是所有数据都读不到：挂载点空、程序位置永远「读取中…」、版本列表
+「服务无响应」、模型下拉空、网盘状态失败。
+
+1.8.29 我修的是同一个函数的另一个独立缺陷（`out` 的前向引用），
+没有触到这条，所以症状照旧 —— 这次用真实 Lua 5.1 把每条路由跑了一遍才定位到。
+
+修法：注册改回 `call("api_xxx")`；POST 校验改为在文件末尾把包环境里的
+`api_*` 统一换成守卫版（`getfenv(1)[name] = guarded(name, fn)`）。
+集中式校验保留了，但不再试图把函数对象塞给 `call()`。
+
+新增两项回归（都接进 `verify-project.sh`）：
+
+- `tools/tests/lua-dispatch.py` — 静态检查，`call()` 的参数必须是字符串字面量，
+  且不能指向文件局部函数（`getfenv()` 看不到局部函数）。
+- `tools/tests/lua-dispatch-run.py` — 用真实 Lua 5.1（`lupa`）加载控制器，
+  模拟 LuCI 的 `module`/`entry`/`call`/`_call`/`setfenv`，把 **57 条 API 路由
+  逐条 dispatch 两次（GET + POST）**，任何一条抛异常即失败。
+
+对照验证：修复前 57 条全部失败，修复后 57 条全部通过。
+
+这类错误的共同点值得记住：**语法合法、单元测试通过、页面能渲染，只有真正
+调度一次才会暴露。** 所以这次不是再改一遍代码，而是补上了能跑的验证。
 
 ## 1.8.30
 
