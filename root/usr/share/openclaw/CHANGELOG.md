@@ -1,8 +1,91 @@
-<!-- version: 1.8.36 -->
+<!-- version: 1.8.38 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.38
+
+**chown 那条告警：我上一轮的归因是错的，这次改成能查到原因。**
+
+上一轮我把「无法把 /SSD/OpenClaw/home 的属主改为 openclaw」归因为
+"exfat/ntfs 不支持属主"。但同一份日志里，OpenClaw 报的是
+`has owner uid 998, expected uid 0` —— **它能读出 uid 998**，说明该分区
+完全支持属主，不是 exfat/ntfs。归因错了。
+
+真正的问题是我们把报错丢掉了：`chown -R ... 2>/dev/null || _warn_chown`，
+只留一句"失败了"，永远查不出为什么。现在 `_warn_chown` 会重新执行一次并
+**带出第一条真实报错**，例如只读挂载、inode 用尽、某个子目录不可改。
+（exfat/ntfs 上仍按文件系统能力降为说明性提示，那种情况确实无从修复。）
+
+要判断是"OpenClaw 要这么高权限"还是"设置问题"，答案是：**都不是。**
+`openclaw` 这个专用用户是**本插件**主动选择的（`procd_set_param user`），
+不是 OpenClaw 的要求；属主修正也是本插件做的。所以这条告警反映的是
+"我们改不了这个目录的属主"，而不是"OpenClaw 权限太高"或"你配错了"。
+
+**备份范围文案与实际不符（你截图里那句）。**
+
+确认框写「配置 + 会话 + 工作区」，但归档实际还有**插件清单**与
+**定时任务**两样（1.8.34 加的）。文案不改的话，用户会以为恢复后插件也在里面 ——
+而插件装在程序目录、不在备份内，只能记清单。现在确认框写明：
+
+```
+本次备份范围：配置 + 会话 + 工作区
+另外还会记录：插件清单、定时任务（备份计划）
+不包含：日志、缓存、node_modules
+注意：插件本体装在程序目录，不在备份内。恢复后需按清单重装。
+```
+
+实测确认归档确实包含 `plugins.txt` / `crontab.txt` / `sessions` / `workspace`。
+
+**关于 `openclaw-watchdog` 的 cron.err：**
+
+`crond[13218]: USER root pid 7797 cmd /usr/bin/openclaw-watchdog` —— 这个
+二进制**不是本插件安装的**（本插件只装 `/usr/bin/openclaw` 一个）。它来自
+别处（旧脚本或手工放置），属于 `cron.err` 级别的执行失败。本插件不接管它；
+若要清理，请确认来源后自行删除对应的 crontab 行与文件。
+
+## 1.8.37
+
+**升级成功了（2026.10.6 → 2026.10.7，服务已起来），但日志暴露三处遗留问题。**
+
+### 1. `doctor` / `gateway status` / 插件安装都被拒
+
+日志里：
+
+```
+Unsafe fallback OpenClaw temp dir "/SSD/OpenClaw/home/.cache/openclaw-0";
+has owner uid 998, expected uid 0
+Doctor could not enter maintenance. failed to acquire gateway state ownership
+```
+
+根因是**执行身份不一致**：所有 OpenClaw CLI 都以 **root** 运行，而网关以
+**uid 998** 运行。OpenClaw 的临时目录名是 `openclaw-<uid>`，并且会
+**校验它属于当前进程的 uid**（防符号链接 / 共享临时目录攻击）。于是：
+
+1. root 跑 → 建出 `openclaw-0`；
+2. 我们的 `oc_fix_perms` 又 `chown -R` 把整个 home 改成 998；
+3. 下次 root 再跑 → 看到"自己的临时目录属于 998" → 拒绝一切需要状态的操作。
+
+修法两步：
+- 新增 `oc_as_user()`，`doctor` / `config validate` / `gateway status --deep` /
+  插件安装全部**以网关用户执行**，uid 自始至终一致；
+- 升级前清掉历史遗留的 `openclaw-<uid>` 缓存目录（它只是缓存，重建无害）——
+  已经落在设备上的 `openclaw-0` 靠这一步清掉，不然修了代码也仍然报错。
+
+### 2. 插件安装失败的原因被藏起来了
+
+日志只有一句 `OpenClaw config is invalid`，然后 `WARN: DeepSeek 插件安装失败`。
+真正的键是 `channels.qqbot: unknown channel id: qqbot` 与
+`agents.defaults.heartbeat.target: unknown heartbeat target: qqbot` ——
+**旧版残留的通道配置**（不是本插件写的），2026.10 已不认这个通道 id。
+现在 `doctor` 之后会跑 `openclaw config validate`，把**具体哪个键无效**
+写进安装日志，并给出处理建议。
+
+### 3. `WARN: 未找到 timeout 命令`
+
+这条只是提示。本机 busybox 没有 `timeout`，`install.sh` 里已用
+`run_with_timeout` 兜底（exec 了 GNU timeout，不存在时退化为不设上限）。
 
 ## 1.8.36
 

@@ -1351,6 +1351,34 @@ oc_fs_supports_fowner() {
 	esac
 }
 
+oc_as_user() {
+	# oc_as_user <cmd> [args...] —— 以网关用户身份执行命令
+	#
+	# 为什么必须这样：OpenClaw 的临时目录是 <cache>/openclaw-<uid>，
+	# 并且**校验它属于当前进程的 uid**（防符号链接与共享临时目录攻击）。
+	# 我们以 root 跑 CLI 时会创建 openclaw-0，而 oc_fix_perms 的 chown -R
+	# 又把它改成网关用户（998）—— 于是下次 root 再跑就报：
+	#   Unsafe fallback OpenClaw temp dir "...openclaw-0"; has owner uid 998,
+	#   expected uid 0
+	# 然后拒绝一切需要状态的操作（doctor、gateway status、插件安装）。
+	# 以网关用户执行，uid 自始至终一致，这个冲突不存在。
+	#
+	# 已经是目标用户时直接 exec，不套 su（省一层进程，也避免 su 的环境差异）。
+	local u="${OC_USER:-}"
+	[ -n "$u" ] || { "$@"; return $?; }
+	[ "$(id -u 2>/dev/null)" = "$(id -u "$u" 2>/dev/null)" ] && { "$@"; return $?; }
+	grep -q "^${u}:" /etc/passwd 2>/dev/null || { "$@"; return $?; }
+
+	# busybox su 与 util-linux su 都支持 -s / -c；用 sh -c 包一层以支持
+	# 带参数的命令（su -c 只接一个字符串）。
+	local quoted="" a
+	for a in "$@"; do
+		quoted="$quoted $(printf '%s' "$a" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")"
+	done
+	# shellcheck disable=SC2086
+	su -s /bin/sh "$u" -c "$quoted" 2>/dev/null
+}
+
 oc_fix_perms() {
 	local base ocdir
 	base="$(oc_base_dir)"

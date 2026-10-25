@@ -177,13 +177,25 @@ oc_home()     { printf '%s/home' "$(oc_base_dir)"; }
 # 权限修正失败不阻止启动（权限问题不该让服务起不来），但必须留下痕迹：
 # 静默吞掉的结果是网关以错误的权限运行，日志里却只有一行正常的 started。
 _warn_chown() {
-	# exfat / vfat / ntfs 不支持设置属主，chown 必然失败 —— 那不是故障，
+	# exfat / vfat / ntfs 没有 uid/gid 语义，chown 必然失败 —— 那不是故障，
 	# 用户也无从修复。这类文件系统上把话改成说明性的，别冒充告警。
 	if ! oc_fs_supports_fowner "$1"; then
 		logger -t openclaw "说明：$1 所在文件系统不支持设置属主（exfat/vfat/ntfs），已跳过 chown；网关改用文件权限位访问"
 		return 0
 	fi
-	logger -t openclaw "警告：无法把 $1 的属主改为 $OC_USER，网关可能因权限不足失败"
+	# 文件系统**支持**属主却失败了，说明是真问题（只读挂载、inode 用尽、
+	# 有个目录被别的进程锁住、或某个子文件不可改）。此前一律 2>/dev/null，
+	# 导致只能看到"失败了"、永远查不出为什么 —— 这是本项目反复踩过的坑：
+	# 静默吞掉错误 = 永远找不到根因。这里把**第一条真实报错**带出来。
+	local why=""
+	if [ -d "$1" ]; then
+		why="$(chown -R "$OC_USER:$OC_USER" "$1" 2>&1 | head -n 1)"
+	fi
+	if [ -n "$why" ]; then
+		logger -t openclaw "警告：无法把 $1 的属主改为 $OC_USER：$why"
+	else
+		logger -t openclaw "警告：无法把 $1 的属主改为 $OC_USER，网关可能因权限不足失败"
+	fi
 }
 
 _warn_chmod() {

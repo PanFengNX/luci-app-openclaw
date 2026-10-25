@@ -386,6 +386,38 @@ check('/proc/mounts' in lib8[lib8.index('oc_fs_supports_fowner()'):][:2000],
 check('oc_fs_supports_fowner' in init8, 'init.d 用它决定是否 chown')
 check('不支持设置属主' in init8, '不支持时给说明性提示而不是故障告警')
 
+# ---- OpenClaw CLI 必须以网关用户运行 ----
+# 它以 uid 校验临时目录 <cache>/openclaw-<uid> 的属主；root 跑会创建
+# openclaw-0，再被 chown 成 998，随后一切需要状态的操作都被拒绝。
+lib9 = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
+ins9 = (proj / 'root/usr/libexec/openclaw/install.sh').read_text(encoding='utf-8')
+check('oc_as_user()' in lib9, '有 oc_as_user（以网关用户执行）')
+check('su -s /bin/sh' in lib9, 'oc_as_user 用 su 切用户')
+doc9 = ins9[ins9.index('run_doctor_after_upgrade() {'):]
+doc9 = doc9[:doc9.index('\n}\n')]
+check('oc_as_user' in doc9, 'doctor 以网关用户运行（否则状态库归属冲突）')
+check('config validate' in doc9, 'doctor 后验配置并把具体键写进日志')
+deep9 = ins9[ins9.index('gateway status --deep'):]
+check('oc_as_user' in deep9[:400], 'gateway status 以网关用户运行')
+_pi = ins9.index('plugins install @openclaw/deepseek-provider')
+check('oc_as_user' in ins9[max(0, _pi - 300):_pi], '插件安装以网关用户运行')
+check('openclaw-*' in ins9, '升级前清理遗留的 openclaw-<uid> 临时目录')
+
+# ---- chown 失败要能查到原因（不能只有"失败了"）----
+init10 = (proj / 'root/etc/init.d/openclaw').read_text(encoding='utf-8')
+_wc = init10[init10.index('_warn_chown() {'):]
+_wc = _wc[:_wc.index('\n}\n')]
+check('2>&1' in _wc, '_warn_chown 会捕获真实报错（此前 2>/dev/null 吞掉了原因）')
+check('不支持设置属主' in _wc, 'exfat/ntfs 上仍降为说明性提示')
+
+# ---- 备份范围文案必须与实际归档一致 ----
+bkh = (proj / 'luasrc/view/openclaw/backup.htm').read_text(encoding='utf-8')
+check('另外还会记录：插件清单、定时任务' in bkh, '备份确认框说明包含插件清单与定时任务')
+check('插件本体装在程序目录，不在备份内' in bkh, '备份确认框说明插件不在备份内（需重装）')
+bks = (proj / 'root/usr/libexec/openclaw/backup.sh').read_text(encoding='utf-8')
+check('$stage/plugins.txt' in bks, '归档确实写入 plugins.txt')
+check('$stage/crontab.txt' in bks, '归档确实写入 crontab.txt')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

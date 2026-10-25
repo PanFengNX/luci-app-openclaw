@@ -874,7 +874,9 @@ install_default_providers() {
 			# NOTE: never pipe this through `head`. `tee ... | head -n 20`
 			# closes the pipe after 20 lines, the writer takes SIGPIPE and the
 			# plugin install is cut off mid-way while still reporting success.
-			if "$OC" plugins install @openclaw/deepseek-provider >>"$OC_INSTALLLOG" 2>&1; then
+			# 同 doctor：以网关用户执行，避免 openclaw-<uid> 临时目录属主冲突。
+			if oc_as_user env HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+				"$OC" plugins install @openclaw/deepseek-provider >>"$OC_INSTALLLOG" 2>&1; then
 				ilog "DeepSeek 插件安装完成"
 			else
 				ilog "WARN: DeepSeek 插件安装失败（可稍后在模型页重试）"
@@ -981,8 +983,8 @@ autostart_service() {
 				# 官方升级流程的最后一步：`openclaw gateway status --deep`
 				# 端口通只说明进程在听，不说明网关自己认为健康（插件加载失败、
 				# schema 未迁移完都可能仍然监听）。这一步把结论记进日志。
-				_deep="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
-					oc_timeout 60 "$OC_DIR/bin/openclaw" gateway status --deep 2>&1)"
+				_deep="$(oc_as_user env HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+					"$OC_DIR/bin/openclaw" gateway status --deep 2>&1)"
 				if [ -n "$_deep" ]; then
 					printf '%s\n' "$_deep" | tail -n 10 | while IFS= read -r _l; do
 						[ -n "$_l" ] && ilog "  status| $_l"
@@ -1021,13 +1023,18 @@ run_doctor_after_upgrade() {
 	#
 	# 用 --fix（与官方"从极旧版本升级"的桥接步骤一致）：只跑只读体检不会改配置。
 	# 失败不判死：doctor 在个别问题上会返回非零，但那不代表安装失败。
-	local oc out rc
+	local oc out rc vout vrc
 	oc="$OC_DIR/bin/openclaw"
 	[ -x "$oc" ] || { ilog "跳过 doctor：未找到 $oc"; return 0; }
 
 	ilog "运行 openclaw doctor --fix（让 OpenClaw 修正自身配置，官方升级流程要求）"
-	out="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
-		oc_timeout 180 "$oc" doctor --fix 2>&1)"
+	# 以**网关用户**执行，不是 root：OpenClaw 会校验临时目录
+	# <cache>/openclaw-<uid> 的属主等于当前进程 uid。root 跑会创建
+	# openclaw-0，而 oc_fix_perms 的 chown -R 又把它改成 998，
+	# 下次 root 再跑就报 "has owner uid 998, expected uid 0" 并拒绝一切
+	# 需要状态的操作。以 998 跑，uid 自始至终一致。
+	out="$(oc_as_user env HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+		"$oc" doctor --fix 2>&1)"
 	rc=$?
 	if [ "$rc" -eq 0 ]; then
 		ilog "doctor --fix 完成"
@@ -1038,11 +1045,27 @@ run_doctor_after_upgrade() {
 	[ -n "$out" ] && printf '%s\n' "$out" | tail -n 20 | while IFS= read -r _l; do
 		[ -n "$_l" ] && ilog "  doctor| $_l"
 	done
+
+	# doctor 之后验一次配置。无效时把**具体键**写进日志：
+	# 后面插件安装会因此失败，而它只会说 "config is invalid"，
+	# 用户无从知道要改什么。典型来源是旧版残留的通道 id（如 qqbot）。
+	vout="$(oc_as_user env HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+		"$oc" config validate 2>&1)"
+	vrc=$?
+	if [ "$vrc" -ne 0 ] && [ -n "$vout" ]; then
+		ilog "WARN: 配置校验未通过，以下是具体问题（插件安装可能因此失败）："
+		printf '%s\n' "$vout" | grep -E '^\s*-|unknown|invalid|Problem' | head -n 12 | \
+			while IFS= read -r _l; do [ -n "$_l" ] && ilog "  config| $_l"; done
+		ilog "  处理建议：在「日志」页导出诊断包，或 SSH 执行 openclaw config validate 查看完整原因"
+	else
+		ilog "配置校验通过"
+	fi
 	return 0
 }
 
 # ---------------------------------------------------------------- main
 main() {
+	local _cache_dir _d
 	stage_begin "检查环境并准备目录"
 	preflight
 	stage_end
@@ -1063,6 +1086,20 @@ main() {
 	# 官方安装器在升级已有安装后必跑 doctor；放在写配置之前，
 	# 让它先修好 OpenClaw 自己的 schema，我们再补自己的键。
 	stage_begin "让 OpenClaw 修正自身配置（doctor --fix）"
+	# 先清掉历史遗留的 openclaw-<uid> 临时目录。
+	# 背景：这些目录由**某个 uid** 创建，而 oc_fix_perms 的 chown -R 会把
+	# 属主改成网关用户；此后那个 uid 再运行就会报
+	#   Unsafe fallback OpenClaw temp dir "...openclaw-0"; has owner uid 998,
+	#   expected uid 0
+	# 并拒绝 doctor / gateway status / 插件安装。
+	# 它们只是缓存，删掉无害，正确 uid 下次运行会重建。
+	_cache_dir="$HOME_DIR/.cache"
+	if [ -d "$_cache_dir" ]; then
+		for _d in "$_cache_dir"/openclaw-*; do
+			[ -d "$_d" ] || continue
+			rm -rf "$_d" 2>/dev/null || true
+		done
+	fi
 	run_doctor_after_upgrade
 	stage_end
 
