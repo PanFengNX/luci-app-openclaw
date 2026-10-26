@@ -400,15 +400,24 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
 <div class="oc-card">
   <h3>OpenClaw CLI</h3>
   <div class="oc-hint">
-    在网关环境中执行 <code>openclaw &lt;子命令&gt;</code>（无需写 openclaw 前缀）。例如：
-    <code>status</code>、<code>plugins list</code>、<code>models list --provider zai</code>、
-    <code>config set gateway.bind lan</code>、<code>gateway restart</code>、<code>skills list</code>。
-    单条命令超时 120 秒。<br>
-    出于安全考虑，只允许白名单内的子命令：status、version、help、doctor、health、update、models、
-    providers、tools、mcp、devices、plugins、channels、gateway、config、agents、sessions、cron、
-    skills、logs、onboard、message、memory、workspace；也支持 <code>--version</code> 与
-    <code>--help</code>。参数中不允许出现 <code>$ ` ; | &amp; &lt; &gt; ( ) { } ! \</code>。<br>
+    在网关环境中执行 <code>openclaw &lt;子命令&gt;</code>。带不带 <code>openclaw</code>
+    前缀都可以（照着官方文档整条粘进来就行）。例如：
+    <code>status</code>、<code>gateway auth-token --show</code>、
+    <code>plugins list</code>、<code>models list --provider zai</code>、
+    <code>config set gateway.bind lan</code>、<code>security audit</code>、
+    <code>skills list</code>。单条命令超时 120 秒。<br>
+    出于安全考虑，只允许白名单内的子命令：status、version、help、doctor、health、update、
+    models、providers、tools、mcp、devices、plugins、channels、gateway、config、agents、
+    agent、sessions、cron、skills、logs、onboard、message、memory、workspace、security、
+    secrets、tasks、nodes、pairing、qr、hooks、webhooks、dns、docs、directory、wiki、
+    sandbox、approvals、acp、infer、capability、completion、backup、system、dashboard；
+    也支持 <code>--version</code> 与 <code>--help</code>。参数中不允许出现
+    <code>$ ` ; | &amp; &lt; &gt; ( ) { } ! \</code>。<br>
     不在白名单里的子命令会直接拒绝 —— 这条线是防止「命令行」变成任意 root 执行的唯一屏障。
+    <b>reset / uninstall / migrate / tui / chat / browser / exec-policy / node</b>
+    是故意不加的：前三个不可逆，中间三个在非交互环境里会挂住，后两个能绕过这条线。<br>
+    <code>gateway auth-token --show</code> 这类命令只在交互式终端下输出，这里会用
+    <code>script(1)</code> 造一个伪终端来跑；本机没有 script 时会明确告诉你，而不是静默空白。
   </div>
   <div class="oc-row">
     <label for="cmd">命令</label>

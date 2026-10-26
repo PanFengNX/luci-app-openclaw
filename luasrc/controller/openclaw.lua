@@ -615,6 +615,37 @@ local RUN_CMDS = {
 	tools = true,      -- 列出可用工具（排查工具调用时最常用）
 	mcp = true,        -- 列出 / 增删 MCP 服务器（本地配置，可回退）
 	devices = true,    -- 局域网配对：list 只读，approve 与设置页的按钮等价
+	-- 2026-10-26 补充：按官方 CLI 命令树逐个核对后补上的诊断/运维子命令。
+	-- 判据仍然只有一条：它能不能绕过 q() 变成一条 shell 命令。下面这些都不能
+	-- —— 它们只做 openclaw 自己的事，参数仍然逐 token 单引号转义。
+	security = true,   -- security audit：配置与文件权限体检，排障第一步
+	secrets = true,    -- secrets audit / reload：密钥解析状态（不回显明文）
+	tasks = true,      -- 任务清单
+	nodes = true,      -- 已配对节点的状态（只查，不启动进程）
+	pairing = true,    -- 配对请求 list / approve，与设置页按钮等价
+	qr = true,         -- 配对二维码
+	hooks = true,      -- 钩子清单
+	webhooks = true,   -- webhook 清单
+	dns = true,        -- DNS 配置查询
+	docs = true,       -- 文档入口
+	directory = true,  -- 目录（self / peers / groups）
+	wiki = true,       -- 知识库检索
+	sandbox = true,    -- 沙箱清单 / explain
+	approvals = true,  -- 审批策略查看
+	agent = true,      -- 单次 agent 调用，与 message 同类
+	acp = true,        -- ACP 桥
+	capability = true, -- 能力探测（infer 的别名）
+	infer = true,
+	completion = true, -- 生成补全脚本
+	backup = true,     -- openclaw 自己的 backup create / verify
+	system = true,     -- system presence / heartbeat
+	dashboard = true,  -- 打印 Control UI 地址（不打开浏览器）
+	-- 故意**不**加（写在这里，下次不要再纠结一遍）：
+	--   reset / uninstall / migrate     删数据、卸载、迁移，破坏性且不可逆
+	--   tui / chat / setup / configure  交互式，非 TTY 下会挂满 120 秒且拿不到东西
+	--   browser                         有 evaluate 子命令，等于在浏览器里跑任意 JS
+	--   exec-policy                     改的正是"允许执行什么"，等于绕过这条线
+	--   node                            能启动 node host 进程（nodes 只查状态）
 	["--version"] = true, ["--help"] = true   -- 不带子命令的两种常规问法
 }
 
@@ -622,6 +653,13 @@ function api_run()
 	local cmd = tostring(http.formvalue("cmd") or "status")
 	local argv = {}
 	for tok in cmd:gmatch("%S+") do argv[#argv + 1] = tok end
+	-- 允许照官方文档写全名：`openclaw gateway auth-token --show` 直接粘进来时
+	-- argv[1] 是 "openclaw"，会被白名单当成未知子命令拒掉。它本来就是我们
+	-- 自己的程序名，剥掉即可（cli.sh 里还有一层同样的处理，两处都要有：
+	-- 这一层不做的话，请求根本到不了 cli.sh）。
+	if argv[1] == "openclaw" or argv[1] == "/usr/bin/openclaw" then
+		table.remove(argv, 1)
+	end
 	local sub = argv[1] or ""
 	if not RUN_CMDS[sub] then
 		out({ ok = false, output = "不支持的命令：" .. sub })

@@ -1186,6 +1186,38 @@ oc_rand_hex() {
 	fi
 }
 
+oc_pty_run() {
+	# oc_pty_run <seconds> <cmd...> —— 在伪终端里执行命令并回传其输出
+	#
+	# 为什么需要它：`openclaw gateway auth-token --show` 会检查 stdout 是不是
+	# TTY，不是就**拒绝打印**（官方行为，防止凭据静默进入管道与日志）。
+	# 而 LuCI 侧只能用命令替换捕获，永远不是 TTY —— 于是命令执行成功、
+	# 输出为空，表现为「这条命令用不了」。script(1) 能造一个 pty，
+	# 让这类命令认为自己在交互式终端里。
+	#
+	# 没有 script 时**绝不假装成功**：返回 127，由调用方给出可读提示。
+	# 否则用户只看到一片空白，会以为命令没生效。
+	local t="$1"; shift
+	local out rc qcmd a
+
+	command -v script >/dev/null 2>&1 || return 127
+
+	# script -c 只接受**一个**命令串，所以这里必须拼字符串。
+	# 每个参数单独单引号转义 —— 不转义等于把参数当命令解析，
+	# 与 api_run 的逐 token 单引号是同一条纪律。
+	qcmd=""
+	for a in "$@"; do
+		qcmd="$qcmd $(printf '%s' "$a" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")"
+	done
+
+	out="$(oc_timeout "$t" script -q -c "$qcmd" /dev/null 2>&1)"
+	rc=$?
+	# pty 会把 \n 变成 \r\n；脚本头部还可能带 ANSI 颜色。
+	# 与 cmd_log 的清理口径一致：先去掉 ESC，再剥掉 [..m 形式的样式码。
+	printf '%s\n' "$out" | tr -d '\r' | tr -d '\033' | sed 's/\[[0-9;]*[A-Za-z]//g'
+	return $rc
+}
+
 oc_rmtree() {
 	# oc_rmtree <path> -> 删除目录内容与目录本身；不存在时静默成功。
 	#

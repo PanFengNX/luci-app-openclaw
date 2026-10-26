@@ -813,6 +813,15 @@ cmd_run() {
 	shift
 	if ! installed; then printf 'OpenClaw 未安装\n'; return 1; fi
 
+	# 允许照官方文档写全名。页面写了「无需写 openclaw 前缀」，但用户看文档时
+	# 拿到的就是 `openclaw gateway auth-token --show` —— 直接粘进来时
+	# argv[1] 是 "openclaw"，会被下面的白名单当成未知子命令拒掉。
+	# 与其让人去删前缀，不如在这里剥掉：它本来就是我们自己的程序名。
+	case "${1:-}" in
+		openclaw|/usr/bin/openclaw) shift ;;
+	esac
+	[ $# -gt 0 ] || { printf '缺少子命令（例如 status）\n'; return 1; }
+
 	# Second gate. The controller already whitelists the sub-command and
 	# single-quotes every token, so nothing here can reach a shell - but if a
 	# future caller forgets to quote, these characters are what turn an
@@ -833,11 +842,41 @@ cmd_run() {
 	# 恒为 0，openclaw 的真实失败被吞掉（终端页里失败的 config set /
 	# doctor 都显示成功）。
 	local _out _rc
-	_out="$(HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-		oc_timeout 120 "$(oc_oc_bin)" "$@" 2>&1)"
-	_rc=$?
+	if run_needs_tty "$@"; then
+		# 这类命令只在 TTY 下肯输出（见 oc_pty_run 的说明）。
+		_out="$(HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+			oc_pty_run 120 "$(oc_oc_bin)" "$@")"
+		_rc=$?
+		if [ "$_rc" -eq 127 ]; then
+			printf '这条命令需要一个交互式终端，而本机没有 script(1) 可以模拟。\n'
+			printf '请在 SSH 里直接执行：openclaw %s\n' "$*"
+			return 127
+		fi
+	else
+		_out="$(HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+			oc_timeout 120 "$(oc_oc_bin)" "$@" 2>&1)"
+		_rc=$?
+	fi
 	printf '%s\n' "$_out" | tail -n 200
 	return $_rc
+}
+
+run_needs_tty() {
+	# 哪些子命令必须在伪终端里跑。
+	#
+	# 判据不是"重不重要"，而是"它会不会检查 stdout 是不是 TTY"。
+	# 目前已知两类：
+	#   * gateway auth-token  —— 打印网关凭据，官方明确拒绝管道/重定向
+	#   * qr / pairing qr     —— 二维码要靠终端等宽字体渲染
+	# 其它命令在管道里都能正常输出，不必绕 pty（绕了反而会把 \n 变 \r\n）。
+	case "${1:-} ${2:-}" in
+		"gateway auth-token"*) return 0 ;;
+		"pairing qr"*)         return 0 ;;
+	esac
+	case "${1:-}" in
+		qr) return 0 ;;
+	esac
+	return 1
 }
 
 cmd_snapshot() {

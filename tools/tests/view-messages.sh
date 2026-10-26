@@ -528,6 +528,48 @@ check('function clPhaseFail(' not in bh12, '不再有 clPhaseFail（会误标阶
 check('function clResumeBackup(' in bh12, '页面加载时接续正在跑的任务')
 check('clResumeBackup();' in bh12, '加载时调用接续')
 
+# ---- 命令行白名单 + 需要 TTY 的命令 ----
+# 用户反馈 `gateway auth-token --show` 用不了。查证后是两层原因，都不在白名单本身：
+#   1) 照官方文档敲全名时 argv[1] 是 "openclaw"，被当成未知子命令拒掉；
+#   2) 该命令拒绝非交互式输出（官方行为），而捕获必然是管道。
+ctrl15 = (proj / 'luasrc/controller/openclaw.lua').read_text(encoding='utf-8')
+cli15  = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
+lib15  = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
+term15 = (proj / 'luasrc/view/openclaw/terminal.htm').read_text(encoding='utf-8')
+
+# 前缀剥离必须两层都有：Lua 层不做，请求根本到不了 cli.sh
+check('argv[1] == "openclaw"' in ctrl15, '控制器剥掉 openclaw 前缀')
+check('openclaw|/usr/bin/openclaw) shift' in cli15, 'cli.sh 也剥掉 openclaw 前缀')
+
+# pty：只有 script(1) 能造 TTY；缺失时必须明说，不能静默空白
+check('oc_pty_run()' in lib15, 'lib 有 oc_pty_run（伪终端执行）')
+_pty = lib15[lib15.index('oc_pty_run() {'):]
+_pty = _pty[:_pty.index(chr(10) + '}' + chr(10))]
+check('command -v script' in _pty, '没有 script 时返回 127（不假装成功）')
+check('return 127' in _pty, '缺 script 的返回值可判定')
+check("sed \"s/'/'\\\\\\\\''/g" in _pty or "s/'/" in _pty, '参数逐个单引号转义后才拼串')
+check('oc_timeout "$t" script' in _pty, 'pty 执行同样受超时约束')
+
+check('run_needs_tty()' in cli15, 'cli.sh 有 run_needs_tty')
+check('"gateway auth-token"*) return 0' in cli15, 'gateway auth-token 走 pty')
+check('oc_pty_run 120' in cli15, 'cmd_run 对这类命令改用 oc_pty_run')
+check('请在 SSH 里直接执行' in cli15, '缺 script 时给出可操作提示')
+
+# 白名单：新增的必须是"不能变成 shell 命令"的；危险的一个都不能进
+for _c in ('security', 'secrets', 'tasks', 'nodes', 'pairing', 'qr', 'hooks',
+           'webhooks', 'dns', 'docs', 'directory', 'wiki', 'sandbox',
+           'approvals', 'agent', 'acp', 'capability', 'infer', 'completion',
+           'backup', 'system', 'dashboard'):
+    check(('	%s = true' % _c) in ctrl15 or (' %s = true' % _c) in ctrl15,
+          '白名单含 %s' % _c)
+for _c in ('reset', 'uninstall', 'migrate', 'tui', 'browser', 'exec-policy'):
+    check(('\n\t%s = true' % _c) not in ctrl15, '白名单**不含** %s（故意排除）' % _c)
+
+# 页面说明必须与白名单一致：写了却不放行 = 骗人
+check('gateway auth-token --show' in term15, '页面示例含 auth-token --show')
+check('security' in term15 and 'pairing' in term15, '页面列出新增的子命令')
+check('script(1)' in term15, '页面说明 pty 机制')
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

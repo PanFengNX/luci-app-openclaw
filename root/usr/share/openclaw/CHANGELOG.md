@@ -1,8 +1,55 @@
-<!-- version: 1.8.41 -->
+<!-- version: 1.8.42 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.42
+
+**`gateway auth-token --show` 用不了 —— 原因有两层，都不在白名单本身。**
+
+### 第一层：照官方文档敲全名会被拒
+
+页面写着「无需写 openclaw 前缀」，但用户看官方文档拿到的就是
+`openclaw gateway auth-token --show`。整条粘进来时 `argv[1]` 是 `openclaw`，
+被白名单当成未知子命令拒掉，报「不支持的命令：openclaw」。
+
+现在两层都会剥掉这个前缀（Lua 控制器 + cli.sh）——它本来就是我们自己的程序名，
+让人手动删前缀没有道理。
+
+### 第二层：这条命令拒绝非交互式输出
+
+官方行为：`auth-token --show` 会检查 stdout 是不是 TTY，不是就**拒绝打印**，
+防止凭据静默进入管道与日志。而 LuCI 侧只能用命令替换捕获，永远不是 TTY ——
+于是命令执行成功、输出为空，表现为「这条命令用不了」。
+
+新增 `oc_pty_run()`：用 `script(1)` 造一个伪终端再执行。**没有 script 时
+返回 127 并明确告知**「请在 SSH 里直接执行」，绝不静默给一片空白。
+目前只有两类命令走 pty：`gateway auth-token`（打印凭据）与 `qr`/`pairing qr`
+（二维码要靠等宽字体渲染）。其它命令绕 pty 只会把换行变成 CRLF，没有好处。
+
+### 白名单按官方命令树补了一批
+
+新增：`security`、`secrets`、`tasks`、`nodes`、`pairing`、`qr`、`hooks`、
+`webhooks`、`dns`、`docs`、`directory`、`wiki`、`sandbox`、`approvals`、
+`agent`、`acp`、`capability`、`infer`、`completion`、`backup`、`system`、
+`dashboard`（共 48 项）。
+
+判据仍然只有一条：**它能不能绕过逐 token 的单引号转义、变成一条 shell 命令**。
+上面这些都不能 —— 它们只做 openclaw 自己的事。
+
+### 故意不加的（写进代码注释，下次不要再纠结）
+
+| 子命令 | 为什么
+| --- | ---
+| `reset` / `uninstall` / `migrate` | 删数据、卸载、迁移，破坏性且不可逆 |
+| `tui` / `chat` / `setup` / `configure` | 交互式，非 TTY 下会挂满 120 秒且什么都拿不到 |
+| `browser` | 有 `evaluate` 子命令，等于在浏览器里跑任意 JS |
+| `exec-policy` | 改的正是「允许执行什么」，等于绕过这条线 |
+| `node` | 能启动 node host 进程（`nodes` 只查状态，所以留了 `nodes`） |
+
+页面说明同步更新，并加了回归断言：**写了却不放行 = 骗人**，
+所以白名单与页面文案必须一致。
 
 ## 1.8.41
 
