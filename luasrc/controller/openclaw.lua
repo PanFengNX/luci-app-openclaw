@@ -61,6 +61,9 @@ local READ_ONLY = {
 	providers = true, backups = true, backup_log = true,
 	devices_pending = true,
 	cloud_status = true, cloud_install_poll = true, cloud_ls = true,
+	-- overview：备份页要的全部只读状态，一次脚本启动返回。
+	-- 替代原先并发的 status + pass-status + encrypt-status + schedule-status。
+	cloud_overview = true,
 	cloud_pass_status = true, cloud_encrypt_status = true,
 	cloud_schedule_status = true, cloud_cli_check = true, export = true,
 }
@@ -137,6 +140,7 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "restore"}, call("api_restore")).leaf = true
 	-- 百度网盘云备份：业务全部在 cloud.sh 里，这里只做参数校验与透传
 	entry({"admin", "services", "openclaw", "api", "cloud_status"},  call("api_cloud_status")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "cloud_overview"}, call("api_cloud_overview")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_install"}, call("api_cloud_install")).leaf = true
 	-- 后台安装 + 轮询：请求只负责启动 worker，进度从 cloud.sh 的日志文件读
 	entry({"admin", "services", "openclaw", "api", "cloud_install_bg"}, call("api_cloud_install_bg")).leaf = true
@@ -1352,7 +1356,19 @@ local function file_exists(p)
 end
 
 function api_cloud_status()
-	cloud_reply(cloud_exec("status"))
+	-- --fresh：绕过状态缓存。页面上「刷新」按钮要的是实时值。
+	local args = http.formvalue("fresh")
+	cloud_reply(cloud_exec(args == "1" and "status --fresh" or "status"))
+end
+
+
+-- 备份页的合并只读查询。原先页面加载会并发打 4 个端点，每个都独立启动
+-- 一次 cloud.sh（lib 2060 行 + 本体 3900 行），在路由器上光解析就要可观的时间，
+-- 还要排队抢 uhttpd 的 worker —— 用户看到的是「一直读取中」。
+-- 现在合成一次调用。
+function api_cloud_overview()
+	local args = http.formvalue("fresh")
+	cloud_reply(cloud_exec(args == "1" and "overview --fresh" or "overview"))
 end
 
 function api_cloud_install()

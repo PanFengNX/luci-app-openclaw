@@ -860,6 +860,7 @@ var API = {
   backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
   restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>',
   cloud_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_status")%>',
+  cloud_overview: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_overview")%>',
   cloud_install: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_install")%>',
   cloud_install_bg: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_install_bg")%>',
   cloud_install_poll: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","cloud_install_poll")%>',
@@ -1286,19 +1287,22 @@ function dpRender(){
   }
 }
 
+function dpApply(r){
+  var d = jp((r && r.data) || '{}', {});
+  if (r && r.ok && typeof d.set === 'boolean'){
+    DP.known = true;
+    DP.set = d.set;
+    clErr('delpass-err', '');
+  } else {
+    DP.known = false;
+    clErr('delpass-err', '读取删除密码状态失败' + clNet(r));
+  }
+  dpRender();
+}
+
+
 function dpStatus(){
-  get(API.delpass_status, function(r){
-    var d = jp((r && r.data) || '{}', {});
-    if (r && r.ok && typeof d.set === 'boolean'){
-      DP.known = true;
-      DP.set = d.set;
-      clErr('delpass-err', '');
-    } else {
-      DP.known = false;
-      clErr('delpass-err', '读取删除密码状态失败' + clNet(r));
-    }
-    dpRender();
-  });
+  get(API.delpass_status, dpApply);
 }
 
 function dpSetDialog(){
@@ -1415,7 +1419,7 @@ $('btn-backup').onclick = function(){
   });
 };
 
-$('btn-bk-refresh').onclick = loadBackups;
+$('btn-bk-refresh').onclick = function(){ loadOverview(true); };
 
 $('btn-bk-upload').onclick = function(){
   var f = $('bk-file').files && $('bk-file').files[0];
@@ -1642,54 +1646,65 @@ function clRender(){
 }
 
 // ---------------------------------------------------------------- 只读查询
+// 组件状态：只负责把服务端结果落进 CL 并重绘（不发起请求）。
+// 拆成「应用」与「拉取」两层，是为了让合并端点 overview 能一次拿到全部
+// 状态后逐个分发 —— 否则 overview 得复用 clStatus()，而那是会再发请求的。
+function clApplyStatus(r){
+  CL.statusTried = true;
+  if (!r || !r.ok){
+    CL.statusKnown = false;
+    CL.installed = false;
+    CL.executable = false;
+    CL.logged = false;
+    CL.authUncertain = false;
+    clErr('cl-err1', ((r && r.error) || '读取网盘组件状态失败') + clNet(r));
+    clRender();
+    return;
+  }
+  var d    = r.data || {};
+  var cli  = d.cli || {};
+  var auth = d.auth || {};
+  CL.statusKnown = true;
+  CL.installed   = (cli.installed === true);
+  // executable 是新增字段：老后端不返回时按 installed 兜底，避免把
+  // 「字段缺失」误判成「损坏」而把正常用户赶去重装。
+  CL.executable  = (cli.executable === undefined || cli.executable === null)
+    ? CL.installed : (cli.executable === true);
+  CL.logged      = (auth.logged_in === true);
+  CL.authUncertain = (auth.uncertain === true);
+  CL.arch        = d.arch || '';
+  CL.verText     = clVersion(cli.version);
+  $('cl-user').textContent = auth.user || '（后端未返回用户名）';
+  $('cl-exp').textContent  = auth.expires || '未知';
+  // 组件更新后如果后端报告「登录信息丢失」，这条 warn 要保留在第一步，
+  // 不能被下面的「读取成功就清空错误区」抹掉。显示一次后即清掉，
+  // 之后再刷新状态就按真实登录态显示。
+  var warn = CL.cliWarn;
+  CL.cliWarn = '';
+  clErr('cl-err1', warn || '');
+  clRender();
+}
+
+
+// 单独刷新组件状态（操作完成后的局部刷新用）。
 function clStatus(){
   get(API.cloud_status, function(r){
-    CL.statusTried = true;
-    if (!r || !r.ok){
-      CL.statusKnown = false;
-      CL.installed = false;
-      CL.executable = false;
-      CL.logged = false;
-      CL.authUncertain = false;
-      clErr('cl-err1', ((r && r.error) || '读取网盘组件状态失败') + clNet(r));
-      clRender();
-      // 组件状态读不到时仍然把本地备份列出来 —— 本地备份不依赖网盘组件，
-      // 因为网盘坏了就不让人看到（也恢复不了）本地备份，是没有道理的。
-      loadBackups();
-      return;
-    }
-    var d    = r.data || {};
-    var cli  = d.cli || {};
-    var auth = d.auth || {};
-    CL.statusKnown = true;
-    CL.installed   = (cli.installed === true);
-    // executable 是新增字段：老后端不返回时按 installed 兜底，避免把
-    // 「字段缺失」误判成「损坏」而把正常用户赶去重装。
-    CL.executable  = (cli.executable === undefined || cli.executable === null)
-      ? CL.installed : (cli.executable === true);
-    CL.logged      = (auth.logged_in === true);
-    CL.authUncertain = (auth.uncertain === true);
-    CL.arch        = d.arch || '';
-    CL.verText     = clVersion(cli.version);
-    $('cl-user').textContent = auth.user || '（后端未返回用户名）';
-    $('cl-exp').textContent  = auth.expires || '未知';
-    // 组件更新后如果后端报告「登录信息丢失」，这条 warn 要保留在第一步，
-    // 不能被下面的「读取成功就清空错误区」抹掉。显示一次后即清掉，
-    // 之后再刷新状态就按真实登录态显示。
-    var warn = CL.cliWarn;
-    CL.cliWarn = '';
-    clErr('cl-err1', warn || '');
-    clRender();
-    // 本地 + 云端合并成一个列表，由 bkLoadCloud 自行判断登录态，
-    // bkRenderList 负责「未登录 / 未安装 / 读取失败」的空状态文案。
+    clApplyStatus(r);
+    // 组件状态读不到时也要把本地备份列出来 —— 本地备份不依赖网盘组件，
+    // 因为网盘坏了就不让人看到（也恢复不了）本地备份，是没有道理的。
     loadBackups();
-    // 到达页面就自动查一次组件更新（只读探测，不下载）。
-    // 装好且可执行才查：文件缺失时"有没有新版本"没有意义。
-    if (CL.installed && CL.executable && !CL.cliAutoChecked && !CL.busy){
-      CL.cliAutoChecked = true;
-      clCliCheck(true);
-    }
+    clMaybeCliCheck();
   });
+}
+
+
+// 装好且可执行才自动查一次更新（只读探测，不下载）。
+// 文件缺失时「有没有新版本」没有意义。
+function clMaybeCliCheck(){
+  if (CL.installed && CL.executable && !CL.cliAutoChecked && !CL.busy){
+    CL.cliAutoChecked = true;
+    clCliCheck(true);
+  }
 }
 
 // 加密区渲染：开关 / 三态药丸 / 口令区显隐 / 第三步的「本次上传」提示。
@@ -1738,19 +1753,22 @@ function clRenderEncrypt(){
   }
 }
 
+function clApplyEncrypt(r){
+  if (r && r.ok && r.data){
+    CL.encKnown = true;
+    CL.encOn    = (r.data.enabled === true);
+    CL.passSet  = (r.data.pass_set === true);
+  } else {
+    CL.encKnown = false;
+    clErr('cl-err-pass', '读取加密设置失败' + clNet(r));
+  }
+  clRenderEncrypt();
+  clRender();
+}
+
+
 function clEncryptStatus(){
-  get(API.cloud_encrypt_status, function(r){
-    if (r && r.ok && r.data){
-      CL.encKnown = true;
-      CL.encOn    = (r.data.enabled === true);
-      CL.passSet  = (r.data.pass_set === true);
-    } else {
-      CL.encKnown = false;
-      clErr('cl-err-pass', '读取加密设置失败' + clNet(r));
-    }
-    clRenderEncrypt();
-    clRender();
-  });
+  get(API.cloud_encrypt_status, clApplyEncrypt);
 }
 
 // 勾选 / 取消开关：立刻写 UCI。取消时只隐藏口令区，绝不自动清除已保存的口令。
@@ -1829,33 +1847,35 @@ function clSchNote(){
   el.textContent = parts.join(' ');
 }
 
+function clApplySchedule(r){
+  if (!r || !r.ok){
+    $('cl-sch-hint').textContent = '读取定时设置失败' + clNet(r);
+    return;
+  }
+  var d = r.data || {};
+  $('cl-sch-enabled').checked = (d.enabled === true);
+  $('cl-sch-period').value = (d.period === 'weekly') ? 'weekly' : 'daily';
+  var wd = parseInt(d.weekday, 10);
+  if (isNaN(wd) || wd < 0 || wd > 6) wd = 0;
+  $('cl-sch-weekday').value = String(wd);
+  var hh = parseInt(d.hour, 10);
+  var mm = parseInt(d.minute, 10);
+  if (isNaN(hh) || hh < 0 || hh > 23) hh = 4;
+  if (isNaN(mm) || mm < 0 || mm > 59) mm = 30;
+  $('cl-sch-time').value = ('0' + hh).slice(-2) + ':' + ('0' + mm).slice(-2);
+  var kp = parseInt(d.keep, 10);
+  $('cl-sch-keep').value = (isNaN(kp) || kp < 1 || kp > 30) ? 7 : kp;
+  clSchSyncWeekday();
+  // crontab 行由后端给出；为空说明当前没有任何生效的定时任务。
+  $('cl-sch-hint').textContent = (d.line && String(d.line).length)
+    ? ('当前 crontab：' + d.line)
+    : '当前未启用';
+  clRenderSch();
+  clSchNote();
+}
+
 function clSchStatus(){
-  get(API.cloud_schedule_status, function(r){
-    if (!r || !r.ok){
-      $('cl-sch-hint').textContent = '读取定时设置失败' + clNet(r);
-      return;
-    }
-    var d = r.data || {};
-    $('cl-sch-enabled').checked = (d.enabled === true);
-    $('cl-sch-period').value = (d.period === 'weekly') ? 'weekly' : 'daily';
-    var wd = parseInt(d.weekday, 10);
-    if (isNaN(wd) || wd < 0 || wd > 6) wd = 0;
-    $('cl-sch-weekday').value = String(wd);
-    var hh = parseInt(d.hour, 10);
-    var mm = parseInt(d.minute, 10);
-    if (isNaN(hh) || hh < 0 || hh > 23) hh = 4;
-    if (isNaN(mm) || mm < 0 || mm > 59) mm = 30;
-    $('cl-sch-time').value = ('0' + hh).slice(-2) + ':' + ('0' + mm).slice(-2);
-    var kp = parseInt(d.keep, 10);
-    $('cl-sch-keep').value = (isNaN(kp) || kp < 1 || kp > 30) ? 7 : kp;
-    clSchSyncWeekday();
-    // crontab 行由后端给出；为空说明当前没有任何生效的定时任务。
-    $('cl-sch-hint').textContent = (d.line && String(d.line).length)
-      ? ('当前 crontab：' + d.line)
-      : '当前未启用';
-    clRenderSch();
-    clSchNote();
-  });
+  get(API.cloud_schedule_status, clApplySchedule);
 }
 
 function clSchSave(){
@@ -2617,7 +2637,10 @@ $('btn-cl-loginurl').onclick   = clLoginUrl;
 $('btn-cl-logincode').onclick  = clLoginCode;
 $('btn-cl-logout').onclick     = clLogout;
 $('btn-cl-backup').onclick     = clBackup;
-$('btn-cl-refresh').onclick    = function(){ loadBackups(); };
+// 「刷新列表」其实该刷新整页状态：列表来自 loadOverview 之后的分发，
+// 单独刷新列表会留下一个「状态是旧、列表是新」的不一致页面。
+// 带 fresh=1 绕过状态缓存 —— 用户点刷新就是不信缓存。
+$('btn-cl-refresh').onclick    = function(){ loadOverview(true); };
 $('btn-cl-pass-save').onclick  = clPassSave;
 $('btn-cl-pass-clear').onclick = clPassClear;
 $('cl-enc-on').onchange        = clEncryptToggle;
@@ -2627,7 +2650,44 @@ $('btn-cl-sch-save').onclick   = clSchSave;
 
 // 初始渲染 + 只读查询（不会触发任何上传 / 下载）
 clRender();
-clStatus();
+
+// 一次请求拿到全部只读状态。
+//
+// 原先这里是四次独立请求（status / encrypt-status / schedule-status，
+// 外加删除密码状态），每个都要单独启动一次 cloud.sh —— lib.sh 2060 行
+// 加本体 3900 行，每启动一次都要把 6000 行 shell 解析一遍。路由器上
+// 这不是可以忽略的开销，而且四个请求还会排队抢 uhttpd 的 worker。
+// 于是「刷新」要等好几秒，页面上一直显示「读取中」。
+//
+// 现在合成一次调用，结果在这里分发到各自的「应用」函数。
+function loadOverview(fresh){
+  var url = API.cloud_overview + (fresh ? '?fresh=1' : '');
+  get(url, function(r){
+    var d = (r && r.ok && r.data) ? r.data : null;
+    if (!d){
+      // 拿不到就按「读取失败」渲染各处，而不是让页面停在「读取中」——
+      // 停在读取中和真的在读，用户分不出区别。
+      clApplyStatus(r);
+      clApplyEncrypt({ ok:false, error: (r && r.error) || '读取状态失败' });
+      clApplySchedule({ ok:false, error: (r && r.error) || '读取状态失败' });
+      dpApply({ ok:false, error: (r && r.error) || '读取状态失败' });
+      loadBackups();
+      return;
+    }
+
+    // 分发。每个 Apply 都只碰自己的 DOM 区域，顺序无关。
+    clApplyStatus(r);
+    clApplyEncrypt({ ok:true, data: d.encrypt || {} });
+    clApplySchedule({ ok:true, data: d.schedule || {} });
+    dpApply({ ok:true, data: d.delpass || {} });
+
+    loadBackups();
+    clMaybeCliCheck();
+  });
+}
+
+loadOverview(false);
+
 // 上次的备份可能还在跑（用户刷新了页面 / 从别的标签页回来）。
 // 加载时先问一次：running 就接着显示进度，不要让用户对着一个
 // 什么都不知道的页面等。
@@ -2646,8 +2706,6 @@ function clResumeBackup(){
     clPollBackup();
   });
 }
-clEncryptStatus();
-clSchStatus();
 
 // 日志区的复制 / 导出
 ocBindLogTools('btn-clout-copy', 'btn-clout-export', 'cl-out', 'openclaw-cloud');

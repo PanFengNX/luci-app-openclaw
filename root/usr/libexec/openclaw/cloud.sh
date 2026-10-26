@@ -84,6 +84,21 @@ OC_CLOUD_PASS="$OC_CLOUD_ROOT/pass"
 OC_CLOUD_BIN="$OC_CLOUD_DIR/bdpan"
 OC_CLOUD_VERSION_FILE="$OC_CLOUD_DIR/.installed-version"
 OC_CLOUD_REMOTE="openclaw-backups"
+
+# 状态缓存：status 里的 `bdpan whoami` 是**联网**调用（25 秒上限，失败还会
+# 再试一次不带 --json 的），而备份页每次打开都会问一次 status。
+# 实测：组件在、但网盘侧慢或不通时，光这一项就能把页面卡到几十秒，
+# 用户看到的是「一直读取中」。
+#
+# 缓存整份 JSON 而不是只缓存登录态：status 的字段（版本、路径、用户名、
+# 到期时间）在一次会话内几乎不变，而重算其中任何一个都要再起一次 5900 行
+# 的脚本。TTL 用 OC_CLOUD_STATUS_TTL。
+#
+# 失效点（这些操作会改变 status 的任一字段）：
+#   安装 / 更新组件、登录、登出 —— 见 cloud_status_cache_drop。
+# 另外 cache 目录若不可写就静默跳过缓存，行为退回原样（慢但不坏）。
+OC_CLOUD_STATUS_CACHE="$OC_RUNDIR/cloud-status.json"
+OC_CLOUD_STATUS_TTL="${OC_CLOUD_STATUS_TTL:-30}"
 OC_CLOUD_DEFAULT_VERSION="3.7.3"
 # 官方没有版本清单接口（installer/latest/...、latest.json、version.json 都是 404），
 # 只能按候选版本逐个探测安装器 URL 是否存在。候选按版本升序排列。
@@ -911,8 +926,125 @@ cmd_set_encrypt() {
 	printf '{"ok":true,"enabled":%s}\n' "$rc"
 }
 
+# ---------------------------------------------------------------- overview
+cmd_overview() {
+	# 备份页需要的全部只读状态，**一次脚本启动**全部返回。
+	#
+	# 为什么要有这个命令：备份页原先并发打 4 个端点（status / pass-status /
+	# encrypt-status / schedule-status），每个都独立启动一次本脚本 ——
+	# lib.sh 2060 行 + 本文件 3900 行，每启动一次都要把 6000 行 shell 解析一遍。
+	# 在路由器上这不是可以忽略的开销，而且 4 个请求还会排队抢 uhttpd 的 worker。
+	#
+	# 输出结构与 status 保持兼容（顶层 cli / auth 字段不变），另外加
+	# encrypt / pass / schedule 三个子对象。这样前端只需要换一个端点地址，
+	# 解析逻辑基本不动。
+	#
+	# 参数：--fresh 透传给 cmd_status（绕过状态缓存）。
+	local fresh="" base
+	[ "${1:-}" = "--fresh" ] && fresh="--fresh"
+
+	# status 部分：直接复用，避免两处各拼一份（迟早会不一致）。
+	if [ -n "$fresh" ]; then
+		base="$(cmd_status --fresh)"
+	else
+		base="$(cmd_status)"
+	fi
+
+	# status 失败时**必须整包失败**。它的错误是 {"ok":false,"error":"..."}，
+	# 格式与成功时不同 —— 直接往下拼会产出
+	#   {"ok":true,{"ok":false,... —— 非法 JSON，前端解析失败后整页状态全空。
+	# 而「组件未安装」正是最常见的情形（刚装上插件就是这个状态），
+	# 所以这条路径一定会被走到。
+	case "$base" in
+		*'"ok":false'*)
+			# 原样透传 status 的失败结果：错误文案已经在里面了。
+			printf '%s\n' "$base"
+			exit 1 ;;
+	esac
+
+	# 到这里 base 一定是 {"ok":true,...}，剥掉外层只留字段，
+	# 好把三块新内容拼进同一个对象。用 sed 去掉首尾 —— 输入格式固定，
+	# 够用且不必引入 jq。
+	base="$(printf '%s' "$base" | sed -e 's/^{"ok":true,//' -e 's/}$//')"
+
+	# pass / encrypt 共用 cloud_pass_present，不重复判断
+	local pass_set=false enc_on=false
+	cloud_pass_present && pass_set=true
+	[ "$(cloud_encrypt_enabled)" = "1" ] && enc_on=true
+
+	# 删除密码是否已设置。走的是 lib.sh 的同一个函数（cli.sh 的
+	# delpass-status 用的也是它），所以两处判据不会分叉。
+	local dp_set=false
+	if command -v oc_delpass_present >/dev/null 2>&1; then
+		oc_delpass_present && dp_set=true
+	fi
+
+	# schedule
+	cloud_sched_vals
+	local sch_installed=false sch_line
+	sch_line="$(cloud_cron_line)"
+	[ -n "$sch_line" ] && sch_installed=true
+
+	printf '{"ok":true,%s,"encrypt":{"enabled":%s,"pass_set":%s},"pass":{"set":%s},"delpass":{"set":%s},"schedule":{"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"installed":%s,"line":"%s"}}\n' \
+		"$base" "$enc_on" "$pass_set" "$pass_set" "$dp_set" \
+		"$OC_SCH_ENABLED" "$OC_SCH_PERIOD" "$OC_SCH_WEEKDAY" "$OC_SCH_HOUR" \
+		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$sch_installed" "$(jstr "$sch_line")"
+}
+
+# ---------------------------------------------------------------- status cache
+clock_status_cache_read() {
+	# 命中则把缓存的 JSON 打到 stdout 并返回 0；未命中返回 1。
+	#
+	# 判新鲜度用 oc_mtime（stat -c %Y），**不要用 date -r** ——
+	# busybox 的 date 没有 -r，配上 || echo 0 会静默得到 0，
+	# age 恒等于当前时间，缓存永不命中。这一点在 versions.sh 里已经踩过。
+	local f="$OC_CLOUD_STATUS_CACHE" now mt age
+	[ -s "$f" ] || return 1
+	mt="$(oc_mtime "$f")"
+	[ -n "$mt" ] || return 1
+	now="$(date +%s 2>/dev/null)"
+	case "$now" in ''|*[!0-9]*) return 1 ;; esac
+	age=$(( now - mt ))
+	[ "$age" -ge 0 ] || return 1
+	# 不能拿未来的时间当新鲜（时钟被改过）
+	[ "$age" -lt "$OC_CLOUD_STATUS_TTL" ] || return 1
+	cat "$f" 2>/dev/null
+}
+
+clock_status_cache_write() {
+	# clock_status_cache_write <json>；失败静默（缓存只是优化）。
+	# 原子写：先写同目录临时文件再 mv，避免半截 JSON 被下一次读走。
+	local json="$1" d tmp
+	d="$(dirname "$OC_CLOUD_STATUS_CACHE")"
+	[ -d "$d" ] || mkdir -p "$d" 2>/dev/null || return 1
+	tmp="$OC_CLOUD_STATUS_CACHE.$$"
+	rm -f "$tmp" 2>/dev/null
+	printf '%s\n' "$json" >"$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+	mv -f "$tmp" "$OC_CLOUD_STATUS_CACHE" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+	return 0
+}
+
+clock_status_cache_drop() {
+	# 使缓存失效。由会改状态的操作调用（装 / 更新组件、登录、登出）。
+	rm -f "$OC_CLOUD_STATUS_CACHE" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------- status
 cmd_status() {
+	# 参数：--fresh 强制重新探测（忽略缓存）。
+	# 默认走缓存：`bdpan whoami` 是联网调用，而备份页每次打开都问一次。
+	# 只有明确要实时值的调用方（cli-update 之后自查）才传 --fresh。
+	local force=0
+	[ "${1:-}" = "--fresh" ] && force=1
+
+	if [ "$force" = "0" ]; then
+		local _c
+		if _c="$(clock_status_cache_read)"; then
+			printf '%s\n' "$_c"
+			return 0
+		fi
+	fi
+
 	local arch bin installed=false executable=false path="" ver="" logged=false user="" expires="" raw=""
 	local uncertain=false tmp rc k
 
@@ -991,11 +1123,16 @@ cmd_status() {
 		rm -f "$tmp" 2>/dev/null
 	fi
 
-	printf '{"ok":true,"arch":"%s","cli":{"installed":%s,"executable":%s,"path":"%s","version":"%s"},"auth":{"logged_in":%s,"uncertain":%s,"user":"%s","expires":"%s","raw":"%s"},"remote_dir":"%s","root":"%s","dir":"%s","home":"%s"}\n' \
+	local _json
+	_json="$(printf '{"ok":true,"arch":"%s","cli":{"installed":%s,"executable":%s,"path":"%s","version":"%s"},"auth":{"logged_in":%s,"uncertain":%s,"user":"%s","expires":"%s","raw":"%s"},"remote_dir":"%s","root":"%s","dir":"%s","home":"%s"}' \
 		"$arch" "$installed" "$executable" "$(jstr "$path")" "$(jstr "$ver")" \
 		"$logged" "$uncertain" "$(jstr "$user")" "$(jstr "$expires")" "$(jstr "$raw")" \
 		"$(jstr "$OC_CLOUD_REMOTE")" "$(jstr "$OC_CLOUD_ROOT")" \
-		"$(jstr "$OC_CLOUD_DIR")" "$(jstr "$OC_CLOUD_HOME")"
+		"$(jstr "$OC_CLOUD_DIR")" "$(jstr "$OC_CLOUD_HOME")")"
+	printf '%s\n' "$_json"
+	# 只在探测成功时写缓存。上面任一失败都会提前 cloud_fail 退出，
+	# 能走到这里的都是完整结果。
+	clock_status_cache_write "$_json"
 }
 
 # ---------------------------------------------------------------- install-cli
@@ -1556,6 +1693,9 @@ cloud_install_version() {
 }
 
 cmd_install_cli() {
+	# 这次操作会改变 status 的字段（版本 / 登录态 / 用户名），
+	# 让状态缓存立即失效，否则页面会拿旧结论显示最多 TTL 秒。
+	clock_status_cache_drop
 	# 首次安装：版本取 UCI main.bdpan_version（缺省用 OC_CLOUD_DEFAULT_VERSION）。
 	local arch ver
 
@@ -1873,6 +2013,9 @@ cmd_cli_check() {
 }
 
 cmd_cli_update() {
+	# 这次操作会改变 status 的字段（版本 / 登录态 / 用户名），
+	# 让状态缓存立即失效，否则页面会拿旧结论显示最多 TTL 秒。
+	clock_status_cache_drop
 	# 更新组件：版本来源 = 参数 > cli-check 探测到的 latest。
 	# 只写 $OC_CLOUD_DIR；$OC_CLOUD_HOME 与 $OC_CLOUD_PASS 全程只 stat，不写不删。
 	local want="${1:-}" latest current from to bak oldbin restored err warn=""
@@ -2112,6 +2255,9 @@ cloud_whoami_user() {
 }
 
 cmd_login_code() {
+	# 这次操作会改变 status 的字段（版本 / 登录态 / 用户名），
+	# 让状态缓存立即失效，否则页面会拿旧结论显示最多 TTL 秒。
+	clock_status_cache_drop
 	local code="${1:-}" bin tmp rc out user
 
 	[ -n "$code" ] || cloud_fail "缺少授权码"
@@ -2140,6 +2286,9 @@ cmd_login_code() {
 }
 
 cmd_logout() {
+	# 这次操作会改变 status 的字段（版本 / 登录态 / 用户名），
+	# 让状态缓存立即失效，否则页面会拿旧结论显示最多 TTL 秒。
+	clock_status_cache_drop
 	local bin tmp rc out
 
 	bin="$(cloud_bin_ready)" || cloud_fail "请先安装网盘组件"
@@ -3810,7 +3959,8 @@ cmd_backup_run() {
 
 # ---------------------------------------------------------------- dispatch
 case "${1:-}" in
-	status)      cmd_status ;;
+	status)      cmd_status "$@" ;;
+	overview)    cmd_overview "$@" ;;
 	install-cli) cmd_install_cli ;;
 	install-cli-bg) shift; cmd_install_cli_bg "$@" ;;
 	install-cli-poll) cmd_install_cli_poll ;;

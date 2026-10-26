@@ -674,6 +674,74 @@ check("cl-pass-new" not in bhd, "页面上不再有常驻口令输入框")
 check("cl-pass-new2" not in bhd, "页面上不再有常驻确认口令框")
 check("needConfirm: true" in bhd, "弹窗内做两次输入一致性校验")
 
+# ---- 备份页加载性能：一次请求拿全部状态 ----
+# 原先页面加载并发打 4 个端点，每个独立启动一次 cloud.sh（lib 2060 行 +
+# 本体 3900 行）。路由器上光解析就要可观的时间，四个请求还要抢 uhttpd 的
+# worker —— 用户看到「一直读取中」。
+cs13  = (proj / "root/usr/libexec/openclaw/cloud.sh").read_text(encoding="utf-8")
+bh13  = (proj / "luasrc/view/openclaw/backup.htm").read_text(encoding="utf-8")
+ctl13 = (proj / "luasrc/controller/openclaw.lua").read_text(encoding="utf-8")
+
+check("cmd_overview()" in cs13, "cloud.sh 有合并命令 overview")
+check("overview)" in cs13, "overview 已注册分发")
+check("function api_cloud_overview" in ctl13, "控制器有 cloud_overview 端点")
+check("cloud_overview = true" in ctl13, "overview 在只读白名单里")
+check("cloud_overview:" in bh13, "前端 API 表有 cloud_overview")
+check("function loadOverview(" in bh13, "前端有一次加载全部状态的入口")
+check("loadOverview(false);" in bh13, "页面加载调它一次")
+
+# 启动块不能再有那四个独立请求
+_boot = bh13[bh13.index("// 初始渲染 + 只读查询"):]
+_boot = _boot[:_boot.index("</script>")]
+for _f in ("clStatus();", "clEncryptStatus();", "clSchStatus();", "dpStatus();"):
+    check(_f not in _boot, "启动块不再单独调用 " + _f)
+
+# 拆成「应用」+「拉取」两层才能被 overview 分发
+for _f in ("clApplyStatus", "clApplyEncrypt", "clApplySchedule", "dpApply"):
+    check("function " + _f + "(" in bh13, "有 " + _f + "（只应用不拉取）")
+check("clApplyStatus(r)" in bh13, "loadOverview 分发组件状态")
+check("clApplyEncrypt(" in bh13, "loadOverview 分发加密状态")
+check("clApplySchedule(" in bh13, "loadOverview 分发定时状态")
+check("dpApply(" in bh13, "loadOverview 分发删除密码状态")
+
+# dpStatus 此前定义了但从未被调用 —— 删除密码状态永远停在「读取中」
+check("dpApply(" in bh13[bh13.index("function loadOverview("):][:2000],
+      "删除密码状态确实被加载（此前 dpStatus 从未被调用，是 1.8.43 的疏漏）")
+
+# 刷新按钮要绕缓存（用户点刷新就是不信缓存）
+check("loadOverview(true)" in bh13, "刷新按钮带 fresh=1")
+check("cloud_status(fresh)" not in bh13, "旧的 cloud_status 端点不再被页面调用")
+
+# ---- 状态缓存：whoami 是联网调用，不能每次刷新都跑 ----
+check("clock_status_cache_read()" in cs13, "有状态缓存读")
+check("clock_status_cache_write()" in cs13, "有状态缓存写")
+check("clock_status_cache_drop()" in cs13, "有缓存失效")
+check("OC_CLOUD_STATUS_TTL" in cs13, "TTL 可配")
+_rd = cs13[cs13.index("clock_status_cache_read() {"):]
+_rd = _rd[:_rd.index(NL + "}" + NL)]
+check("oc_mtime" in _rd, "新鲜度用 oc_mtime 判断")
+# 注释里写了「不要用 date -r」，所以只看代码行
+_rd_code = NL.join(l.split("#", 1)[0] for l in _rd.splitlines())
+check("date -r" not in _rd_code, "代码里不用 date -r（busybox 没有 -r，会静默恒过期）")
+_wr = cs13[cs13.index("clock_status_cache_write() {"):]
+_wr = _wr[:_wr.index(NL + "}" + NL)]
+check("mv -f" in _wr, "缓存原子写（不留半截 JSON）")
+check(cs13.count("clock_status_cache_drop") >= 5,
+      "装/更新/登录/登出都会让缓存失效", "处数=%d" % cs13.count("clock_status_cache_drop"))
+
+# cmd_status 默认走缓存，但要能强制刷新
+check("--fresh" in cs13, "status 支持 --fresh 绕过缓存")
+
+# 关键：status 失败时 overview 必须整包失败。否则会拼出
+# {"ok":true,{"ok":false,... —— 非法 JSON，而「组件未安装」正是最常见场景。
+_ov = cs13[cs13.index("cmd_overview() {"):]
+_ov = _ov[:_ov.index(NL + "}" + NL)]
+check(chr(39) + chr(34) + "ok" + chr(34) + ":false" + chr(39) in _ov,
+      "overview 识别 status 的失败结果")
+_fail_i = _ov.index(chr(39) + chr(34) + "ok" + chr(34) + ":false" + chr(39))
+_strip_i = _ov.index("sed -e")
+check(_fail_i < _strip_i, "失败判定在拼接之前（顺序错了就是非法 JSON）")
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF
