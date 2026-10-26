@@ -126,6 +126,11 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "backup_create"}, call("api_backup_create")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_verify"}, call("api_backup_verify")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_delete"}, call("api_backup_delete")).leaf = true
+	-- 删除密码（本地 / 云端删除的二次确认）。与加密口令完全独立：
+	-- 加密口令要能还原原文所以只能明文存；删除密码只判"是否同意删除"，只存哈希。
+	entry({"admin", "services", "openclaw", "api", "delpass_status"}, call("api_delpass_status")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "delpass_set"}, call("api_delpass_set")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "delpass_clear"}, call("api_delpass_clear")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_log"}, call("api_backup_log")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_upload"}, call("api_backup_upload")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_download"}, call("api_backup_download")).leaf = true
@@ -172,6 +177,13 @@ local function run_rc(args)
 	-- Output is discarded so it cannot leak into the HTTP response body.
 	return sys.call(args .. " >/dev/null 2>&1") == 0
 end
+
+-- 删除密码闸门的前向声明。实现放在 write_private 之后（那里才有 stdin
+-- 私有通道），而 api_backup_delete 在文件更早处就要调用它 —— Lua 5.1 是
+-- 词法作用域，不在这里先声明的话，前面的引用会解析成全局查找（nil），
+-- 删除接口直接 "attempt to call a nil value" 并返回 500。
+-- 本项目已经因为这个踩过两次（out、RUNDIR），这里不再重复。
+local delpass_gate
 
 local function q(s)
 	if not s then return "''" end
@@ -1051,9 +1063,21 @@ function api_backup_verify()
 end
 
 function api_backup_delete()
+	-- 必须 POST：删除是破坏性动作，不能被 <img src> 之类的跨站 GET 触发。
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
 	local f = http.formvalue("file") or ""
 	if not f:match(SAFE_NAME) then
 		out({ ok = false, error = "非法的备份文件名" })
+		return
+	end
+	-- 删除密码闸门。**校验必须在服务端**：前端弹框只是交互，
+	-- 直接构造一个 POST 就能绕过，那样这个功能等于不存在。
+	local okp, perr = delpass_gate(http.formvalue("pass"))
+	if not okp then
+		out({ ok = false, need_pass = true, error = perr })
 		return
 	end
 	local r = sh(SH .. " backup-delete " .. q(f))
@@ -1271,6 +1295,41 @@ local function write_private(text)
 	return tmp
 end
 
+-- 给 cli.sh 用的 stdin 通道（cloud_exec_stdin 只指向 cloud.sh）。
+-- 删除密码绝不能进 argv：/proc/<pid>/cmdline 是全局可读的。
+local function cli_exec_stdin(args, text)
+	local tmp = write_private(text)
+	if not tmp then return nil end
+	local raw = sh(SH .. " " .. args .. " < " .. q(tmp))
+	os.remove(tmp)
+	return raw
+end
+
+-- 删除备份前的统一闸门。本地删除与云端删除都必须先过这里 ——
+-- 只在前端弹框是没用的，直接 POST 就能绕过。
+-- 返回 (true) 放行 / (false, 消息) 拒绝。
+delpass_gate = function(pass)
+	pass = tostring(pass or "")
+	if pass:find("[%c]") then
+		return false, "密码不能包含换行或控制字符"
+	end
+	if #pass > 128 then
+		return false, "密码过长"
+	end
+	if pass == "" then
+		return false, "请输入删除密码"
+	end
+	local raw = cli_exec_stdin("delpass-verify", pass .. "\n")
+	if not raw then
+		return false, "临时目录不可用，无法校验删除密码"
+	end
+	if raw:find('"ok":true') then return true end
+	if raw:find('"unset":true') then
+		return false, "尚未设置删除密码。请先在下方「删除保护」里设置一个，再删除备份。"
+	end
+	return false, "删除密码不正确"
+end
+
 local function cloud_exec_stdin(args, text)
 	local tmp = write_private(text)
 	if not tmp then return '{"ok":false,"error":"临时目录不可用"}' end
@@ -1427,6 +1486,12 @@ function api_cloud_rm()
 		out({ ok = false, error = "非法的云端文件名" })
 		return
 	end
+	-- 与本地删除同一个闸门：两处用同一套判据，避免"改了一处漏了另一处"。
+	local okp, perr = delpass_gate(http.formvalue("pass"))
+	if not okp then
+		out({ ok = false, need_pass = true, error = perr })
+		return
+	end
 	cloud_reply(cloud_exec("rm " .. q(name)))
 end
 
@@ -1530,6 +1595,62 @@ function api_cloud_pass_clear()
 		return
 	end
 	cloud_reply(cloud_exec("clear-pass"))
+end
+
+-- ---------------------------------------------------------------- 删除密码
+-- 与加密口令是两套东西：
+--   * 加密口令用于解密备份内容，必须能还原，所以只能明文存 0600 文件；
+--   * 删除密码只判"你是否同意删除"，永远不需要还原，所以只存加盐哈希。
+-- 合成一套的后果是"改了删除密码，老备份就解不开了"，必须分开。
+function api_delpass_status()
+	cloud_reply(cloud_exec("delpass-status"))
+end
+
+function api_delpass_set()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	local pass = http.formvalue("pass") or ""
+	-- 与 cli.sh 的 delpass_validate 同口径（两处都校验：前端能被绕过，
+	-- 但服务端这一层不能只依赖脚本里的检查）。
+	if #pass < 6 or #pass > 128 then
+		out({ ok = false, error = "删除密码长度必须为 6-128 个字符" })
+		return
+	end
+	if pass:find("[%c]") then
+		out({ ok = false, error = "删除密码不能包含换行或控制字符" })
+		return
+	end
+	if pass:match("^%s*$") then
+		out({ ok = false, error = "删除密码不能全是空格" })
+		return
+	end
+	-- 改密码必须给旧密码：否则谁打开这个页面都能把保护换掉。
+	local raw = sh(SH .. " delpass-status")
+	if raw:find('"set":true') then
+		local old = http.formvalue("old") or ""
+		local okold, oerr = delpass_gate(old)
+		if not okold then
+			out({ ok = false, error = "原删除密码不正确：" .. oerr })
+			return
+		end
+	end
+	cloud_reply(cli_exec_stdin("delpass-set", pass .. "\n"))
+end
+
+function api_delpass_clear()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交" })
+		return
+	end
+	local old = http.formvalue("old") or ""
+	local okold, oerr = delpass_gate(old)
+	if not okold then
+		out({ ok = false, error = oerr })
+		return
+	end
+	cloud_reply(cli_exec_stdin("delpass-clear", old .. "\n"))
 end
 
 -- 上传前加密开关：是否加密由 UCI 的 main.cloud_encrypt 决定，口令只是必要条件。

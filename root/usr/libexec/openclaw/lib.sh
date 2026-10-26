@@ -1218,6 +1218,104 @@ oc_pty_run() {
 	return $rc
 }
 
+# ---------------------------------------------------------------- 删除密码
+# 删除备份（本地 / 云端）前的二次确认密码。与「加密口令」完全独立：
+#   * 加密口令用于解密备份内容，必须能还原成原文，所以只能明文存 0600 文件；
+#   * 删除密码只用于「你是不是真的要删」，永远不需要还原，所以**只存哈希**。
+# 两者共用一套存储会让「改了删除密码导致老备份解不开」，必须分开。
+#
+# 存储：$(oc_base_dir)/secure/delpass，目录 0700、文件 0600、root 属主。
+# 内容：<alg>:<hex>:<salt>
+#   alg 记录算法（sha256 / md5），验证时按存储的算法重算 —— 否则某天系统
+#   补上 sha256sum，之前用 md5 存的密码就再也验证不过。
+oc_delpass_dir()  { printf '%s/secure' "$(oc_base_dir)"; }
+oc_delpass_file() { printf '%s/delpass' "$(oc_delpass_dir)"; }
+
+oc_delpass_present() {
+	local f
+	f="$(oc_delpass_file)"
+	[ -f "$f" ] && [ -s "$f" ]
+}
+
+oc_delpass_hash_alg() {
+	# oc_delpass_hash_alg <alg> <salt> <pass> -> stdout 十六进制摘要
+	#
+	# 口令只经 stdin 进 printf 的参数位，不进 argv：/proc/<pid>/cmdline 全局可读。
+	# printf '%s%s' 不会解释参数里的反斜杠（POSIX 只对格式串做转义），
+	# 所以含 \ 的口令也能正确参与计算。
+	local alg="$1" salt="$2" pass="$3" hex
+	case "$alg" in
+		sha256)
+			command -v sha256sum >/dev/null 2>&1 || return 1
+			hex="$(printf '%s%s' "$salt" "$pass" | sha256sum 2>/dev/null | awk '{print $1}')" ;;
+		md5)
+			command -v md5sum >/dev/null 2>&1 || return 1
+			hex="$(printf '%s%s' "$salt" "$pass" | md5sum 2>/dev/null | awk '{print $1}')" ;;
+		*) return 1 ;;
+	esac
+	[ -n "$hex" ] || return 1
+	printf '%s' "$hex"
+}
+
+oc_delpass_set() {
+	# oc_delpass_set <pass> -> 0 成功 / 1 失败（不打印任何东西到 stdout）
+	local pass="$1" dir f salt alg h tmp
+	dir="$(oc_delpass_dir)"
+	f="$(oc_delpass_file)"
+	mkdir -p "$dir" 2>/dev/null || return 1
+	chmod 700 "$dir" 2>/dev/null || true
+
+	salt="$(oc_rand_hex 2>/dev/null)" || salt=""
+	[ -n "$salt" ] || return 1
+
+	if command -v sha256sum >/dev/null 2>&1; then alg=sha256; else alg=md5; fi
+	h="$(oc_delpass_hash_alg "$alg" "$salt" "$pass")" || return 1
+	[ -n "$h" ] || return 1
+
+	# 先写同目录临时文件再 mv：中断时不会留下半截密码文件（那会让用户
+	# 既删不掉也设不了新密码）。
+	tmp="$dir/.delpass.$$"
+	rm -f "$tmp" 2>/dev/null
+	if ! ( umask 077; printf '%s:%s:%s' "$alg" "$h" "$salt" >"$tmp" && echo >>"$tmp" ) 2>/dev/null; then
+		rm -f "$tmp" 2>/dev/null
+		return 1
+	fi
+	chmod 600 "$tmp" 2>/dev/null || true
+	if ! mv -f "$tmp" "$f" 2>/dev/null; then
+		rm -f "$tmp" 2>/dev/null
+		return 1
+	fi
+	chmod 600 "$f" 2>/dev/null || true
+	return 0
+}
+
+oc_delpass_verify() {
+	# oc_delpass_verify <pass> -> 0 匹配 / 1 不匹配或未设置
+	local pass="$1" f line alg want salt got
+	f="$(oc_delpass_file)"
+	oc_delpass_present || return 1
+	line="$(head -n 1 "$f" 2>/dev/null)"
+	alg="${line%%:*}"
+	line="${line#*:}"
+	want="${line%%:*}"
+	salt="${line#*:}"
+	[ -n "$alg" ] && [ -n "$want" ] && [ -n "$salt" ] || return 1
+	got="$(oc_delpass_hash_alg "$alg" "$salt" "$pass")" || return 1
+	[ -n "$got" ] || return 1
+	# 定长比较：本地 HTTP 界面上时序攻击不现实，但比较本身没有成本，
+	# 不做反而要在评审里解释「为什么这里可以例外」。
+	[ "${#got}" -eq "${#want}" ] || return 1
+	[ "$got" = "$want" ]
+}
+
+oc_delpass_clear() {
+	# 只删这一个文件；不存在也算成功（幂等）。
+	local f
+	f="$(oc_delpass_file)"
+	[ -e "$f" ] || [ -L "$f" ] || return 0
+	rm -f "$f" 2>/dev/null
+}
+
 oc_rmtree() {
 	# oc_rmtree <path> -> 删除目录内容与目录本身；不存在时静默成功。
 	#

@@ -1476,6 +1476,101 @@ cmd_backup_delete() {
 	sh "$OC_BACKUP" delete "$@"
 }
 
+# ---------------------------------------------------------------- 删除密码
+# 删除备份（本地 / 云端）的二次确认。**只在这一层做校验是不够的** ——
+# 真正的强制点在 LuCI 控制器（api_backup_delete / api_cloud_rm），
+# 这里提供的是同一套判据的实现，让 SSH 里也能设 / 验 / 清。
+#
+# 口令一律从 stdin 读：argv 在 /proc/<pid>/cmdline 里全局可读。
+# 与 cloud.sh 的 set-pass 同一口径（tr -d '\r' 兼容 CRLF，命令替换去掉行尾换行）。
+
+delpass_validate() {
+	# delpass_validate <pass> -> 0 合法 / 1 不合法（原因写进 DELPASS_ERR）
+	local pass="${1:-}"
+	DELPASS_ERR=""
+	if [ ${#pass} -lt 6 ] || [ ${#pass} -gt 128 ]; then
+		DELPASS_ERR="删除密码长度必须为 6-128 个字符"
+		return 1
+	fi
+	case "$pass" in
+		*[[:cntrl:]]*) DELPASS_ERR="删除密码不能包含换行或控制字符"; return 1 ;;
+	esac
+	case "$pass" in
+		*[![:space:]]*) ;;
+		*) DELPASS_ERR="删除密码不能全是空格"; return 1 ;;
+	esac
+	return 0
+}
+
+cmd_delpass_status() {
+	local set=false
+	oc_delpass_present && set=true
+	printf '{"ok":true,"set":%s}
+' "$set"
+}
+
+cmd_delpass_set() {
+	local pass
+	pass="$(tr -d '\r')"
+	delpass_validate "$pass" || {
+		printf '{"ok":false,"error":"%s"}
+' "$(oc_json_str "$DELPASS_ERR")"
+		exit 1
+	}
+	if ! oc_delpass_set "$pass"; then
+		printf '{"ok":false,"error":"无法保存删除密码（目录不可写或权限不足）"}
+'
+		exit 1
+	fi
+	printf '{"ok":true}
+'
+}
+
+cmd_delpass_verify() {
+	local pass
+	pass="$(tr -d '\r')"
+	if ! oc_delpass_present; then
+		printf '{"ok":false,"unset":true,"error":"尚未设置删除密码"}
+'
+		exit 1
+	fi
+	if ! oc_delpass_verify "$pass"; then
+		# 失败后固定延迟 1 秒：这个接口能被脚本反复调用，而 6 位口令的
+		# 搜索空间不大。1 秒/次把它从"秒级爆破"压到"小时级"，代价是
+		# 用户输错时多等 1 秒。
+		sleep 1 2>/dev/null || true
+		printf '{"ok":false,"error":"删除密码不正确"}
+'
+		exit 1
+	fi
+	printf '{"ok":true}
+'
+}
+
+cmd_delpass_clear() {
+	# 清除也要验旧密码：否则谁打开页面都能先把保护关掉再删。
+	local pass
+	pass="$(tr -d '\r')"
+	if ! oc_delpass_present; then
+		printf '{"ok":true}
+'
+		return 0
+	fi
+	if ! oc_delpass_verify "$pass"; then
+		sleep 1 2>/dev/null || true
+		printf '{"ok":false,"error":"删除密码不正确"}
+'
+		exit 1
+	fi
+	oc_delpass_clear || {
+		printf '{"ok":false,"error":"无法清除删除密码"}
+'
+		exit 1
+	}
+	printf '{"ok":true}
+'
+}
+
 cmd_backup_log() {
 	# 备份审计日志（只读）：输出 JSON 数组，按时间正序（最早的在前）。
 	# 用法 backup-log [N]：N 默认 50、上限 500，0 与非数字一律按 50。
@@ -2128,6 +2223,10 @@ case "${1:-}" in
 	backup-verify) cmd_backup_verify "$@" ;;
 	backup-delete) cmd_backup_delete "$@" ;;
 	backup-log)    cmd_backup_log "$@" ;;
+	delpass-status) cmd_delpass_status ;;
+	delpass-set)    cmd_delpass_set ;;
+	delpass-verify) cmd_delpass_verify ;;
+	delpass-clear)  cmd_delpass_clear ;;
 	backup-path)   sh "$OC_BACKUP" path ;;
 	restore)       cmd_restore "$@" ;;
 	cloud)         cmd_cloud "$@" ;;
@@ -2180,6 +2279,10 @@ Usage: openclaw.sh <command> [options]
   backups                   JSON array of existing backups
   backup-verify <file>      validate an archive WITHOUT restoring it
   backup-delete <file>      delete one backup
+  delpass-status            whether a delete password is set
+  delpass-set               set the delete password (reads stdin)
+  delpass-verify            verify the delete password (reads stdin)
+  delpass-clear             clear it, requires the current one (stdin)
   backup-log [n]            JSON array of backup audit records (oldest first,
                             default 50, max 500)
   backup-path               print the backup directory

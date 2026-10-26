@@ -101,13 +101,20 @@ if rv:
     check('ver-note' in rv, 'renderVersionStatus() 操作 #ver-note')
 
 # ---- 4) 云端列表失败要带出 error ----
-m = re.search(r'(?m)^function\s+clLoadList\s*\(', backup)
-check(m is not None, '取到 clLoadList()')
+# 云端列表已并入「本地 + 云端」合并视图：拉取在 bkLoadCloud，呈现空态与
+# 错误在 bkRenderList。原断言指向的 clLoadList 已被删除（合并后不再需要
+# 第二份列表），所以这里跟着挪，检查的还是同一件事：失败必须说出原因。
+m = re.search(r'(?m)^function\s+bkLoadCloud\s*\(', backup)
+check(m is not None, '取到 bkLoadCloud()')
 if m:
     seg = backup[m.start():m.start() + 1400]
     check('r.error' in seg, '云端列表失败时引用服务端 r.error')
     check("'读取云端列表失败'" in seg or '"读取云端列表失败"' in seg,
           '仍保留"读取云端列表失败"作为前缀')
+check('BK.cloudErr' in backup, '云端错误存进 BK.cloudErr')
+_rl = backup[backup.index('function bkRenderList('):]
+_rl = _rl[:_rl.index(chr(10) + '}' + chr(10))]
+check('BK.cloudErr' in _rl, 'bkRenderList 会把云端错误显示出来')
 
 # ---------------------------------------------------------------- 共享样式
 # 9 个视图的共享 <style> 必须逐字节一致（本页专属样式要另开块）。
@@ -569,6 +576,103 @@ for _c in ('reset', 'uninstall', 'migrate', 'tui', 'browser', 'exec-policy'):
 check('gateway auth-token --show' in term15, '页面示例含 auth-token --show')
 check('security' in term15 and 'pairing' in term15, '页面列出新增的子命令')
 check('script(1)' in term15, '页面说明 pty 机制')
+
+# ---- 删除密码：只存哈希、口令不进 argv、服务端强制 ----
+NL = chr(10)
+libd  = (proj / "root/usr/libexec/openclaw/lib.sh").read_text(encoding="utf-8")
+clid  = (proj / "root/usr/libexec/openclaw/cli.sh").read_text(encoding="utf-8")
+ctrld = (proj / "luasrc/controller/openclaw.lua").read_text(encoding="utf-8")
+bhd   = (proj / "luasrc/view/openclaw/backup.htm").read_text(encoding="utf-8")
+
+for _f in ("oc_delpass_dir", "oc_delpass_file", "oc_delpass_present",
+           "oc_delpass_hash_alg", "oc_delpass_set", "oc_delpass_verify",
+           "oc_delpass_clear"):
+    check(_f + "()" in libd, "lib 有 " + _f)
+
+# 删除密码只判「是否同意删除」，永远不需要还原 → 只能存哈希。
+# 与加密口令（必须能还原，只能明文存）是两套，混用会导致「改了删除密码老备份解不开」。
+_dp = libd[libd.index("oc_delpass_set() {"):]
+_dp = _dp[:_dp.index(NL + "}" + NL)]
+check("oc_delpass_hash_alg" in _dp, "set 走哈希而不是存明文")
+check("umask 077" in _dp, "写文件时 umask 077（默认私有）")
+check("chmod 600" in _dp, "文件权限 600")
+check("mv -f" in _dp, "先写临时文件再 mv（中断不留半截密码）")
+_hv = libd[libd.index("oc_delpass_verify() {"):]
+_hv = _hv[:_hv.index(NL + "}" + NL)]
+check("${#got}" in _hv, "verify 先比长度再比内容")
+
+# 口令绝不能进 argv：/proc/<pid>/cmdline 全局可读。
+_ha = libd[libd.index("oc_delpass_hash_alg() {"):]
+_ha = _ha[:_ha.index(NL + "}" + NL)]
+check("printf" in _ha and "| sha256sum" in _ha, "口令经 stdin 进哈希（不进 argv）")
+check(not any(("sha256sum " + chr(34)) in l for l in _ha.splitlines()),
+      "没有把口令当参数传给 sha256sum")
+
+# 存储算法要记下来：某天系统补上 sha256sum，之前用 md5 存的密码还得能验。
+check("alg:hex:salt" in libd or "alg" in _dp, "记录算法与盐")
+
+# CLI
+check("delpass_validate()" in clid, "cli 有 delpass_validate")
+for _c in ("cmd_delpass_status", "cmd_delpass_set", "cmd_delpass_verify", "cmd_delpass_clear"):
+    check(_c + "()" in clid, "cli 有 " + _c)
+check("delpass-status)" in clid and "delpass-set)" in clid, "子命令已注册分发")
+_vs = clid[clid.index("cmd_delpass_verify() {"):]
+_vs = _vs[:_vs.index(NL + "}" + NL)]
+check("sleep 1" in _vs, "验证失败固定延迟（压住脚本化爆破）")
+_cs = clid[clid.index("cmd_delpass_clear() {"):]
+_cs = _cs[:_cs.index(NL + "}" + NL)]
+check("oc_delpass_verify" in _cs, "清除也要验旧密码（否则谁都能把保护关掉）")
+
+# 控制器：这是真正的强制点
+check("local delpass_gate" in ctrld, "有 delpass_gate 前向声明")
+_decl = ctrld.index("local delpass_gate")
+_del  = ctrld.index("function api_backup_delete()")
+check(_decl < _del, "前向声明在 api_backup_delete 之前（Lua 5.1 词法作用域）")
+check("cli_exec_stdin" in ctrld, "有给 cli.sh 用的 stdin 通道")
+_ce = ctrld[ctrld.index("local function cli_exec_stdin("):]
+_ce = _ce[:_ce.index(NL + "end" + NL)]
+check("write_private" in _ce, "口令经私有临时文件进 stdin")
+check("< " in _ce, "重定向进 stdin（不进 argv）")
+check(ctrld.count("delpass_gate(http.formvalue") >= 2,
+      "本地删除与云端删除都过同一道闸门")
+for _a in ("api_delpass_status", "api_delpass_set", "api_delpass_clear"):
+    check("function " + _a in ctrld, "有 " + _a)
+_aps = ctrld[ctrld.index("function api_delpass_set()"):]
+_aps = _aps[:_aps.index(NL + "end" + NL)]
+check("delpass_gate(old)" in _aps, "改密码必须先验旧密码")
+
+# 前端：删除走弹窗，且服务端拒绝时提示「还没设密码」而不是「密码错」
+check("function ocAskPass(" in bhd, "有密码弹窗 ocAskPass")
+check("function bkAskDelete(" in bhd, "删除前走 bkAskDelete")
+check("need_pass" in bhd, "识别 need_pass（未设密码 vs 密码错）")
+check("function dpStatus(" in bhd, "有删除密码状态查询")
+check("function dpSetDialog(" in bhd, "设置密码走弹窗")
+check("function dpClearDialog(" in bhd, "清除密码走弹窗")
+
+# ---- 本地 + 云端合并成一个列表 ----
+check("id=" + chr(34) + "bk-list" + chr(34) in bhd, "只有一个列表容器 bk-list")
+check("id=" + chr(34) + "cl-list" + chr(34) not in bhd, "旧的云端列表容器已移除")
+check("function bkRenderList(" in bhd, "有合并渲染 bkRenderList")
+check("function bkLoadLocal(" in bhd and "function bkLoadCloud(" in bhd,
+      "本地与云端各自拉取")
+check("src: " + chr(39) + "cloud" + chr(39) in bhd, "行带来源标记")
+check("bkUpload(e.ref)" in bhd, "本地行可直接上传（先本地备份再上传）")
+
+# ---- 秒表：按区块区分，否则云备份时本地卡片也跳秒 ----
+check("function bkTickStart(which)" in bhd, "秒表按区块启动")
+check("bkTickStart(" + chr(39) + "cl" + chr(39) + ")" in bhd, "云备份开自己的秒表")
+check("bkTickStart(" + chr(39) + "bk" + chr(39) + ")" in bhd, "本地备份开自己的秒表")
+check("id=" + chr(34) + "bk-elapsed" + chr(34) in bhd, "本地秒表元素")
+check("id=" + chr(34) + "cl-elapsed" + chr(34) in bhd, "云端秒表元素")
+check("querySelectorAll(" + chr(39) + ".oc-elapsed" + chr(39) + ")" not in bhd,
+      "不再一刀切更新所有秒表")
+
+# ---- 加密口令改成弹窗 ----
+check("ocAskPass({" in bhd[bhd.index("function clPassSave("):][:800],
+      "设置加密口令走弹窗")
+check("cl-pass-new" not in bhd, "页面上不再有常驻口令输入框")
+check("cl-pass-new2" not in bhd, "页面上不再有常驻确认口令框")
+check("needConfirm: true" in bhd, "弹窗内做两次输入一致性校验")
 
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
