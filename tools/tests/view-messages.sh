@@ -742,6 +742,24 @@ _fail_i = _ov.index(chr(39) + chr(34) + "ok" + chr(34) + ":false" + chr(39))
 _strip_i = _ov.index("sed -e")
 check(_fail_i < _strip_i, "失败判定在拼接之前（顺序错了就是非法 JSON）")
 
+# ---- 初始化顺序：不能在 var CL 赋值前调用 loadBackups ----
+# backup 页的 bkLoadCloud 读取 CL.logged；CL 是 var 赋值（不是函数声明），
+# 如果 loadBackups 在 CL 初始化之前执行，读取 undefined.logged 会抛 TypeError，
+# 导致整个脚本后半段停止，所有状态显示「读取中」。
+_cldef = backup.index("var CL = {")
+_clinit = backup.index("statusKnown: false", _cldef)
+_clready = backup.index("};", _clinit)
+# 只找顶层、无缩进的调用；函数体内 loadBackups 是正常的（恢复/上传后刷新）。
+_pre_cl = backup[:_cldef]
+_early_top_call = re.search(r'(?m)^loadBackups\\(\\);\\s*$', _pre_cl)
+check(_early_top_call is None,
+      "CL 初始化之前没有顶层 loadBackups()（否则 bkLoadCloud 读 CL.logged 会 TypeError）")
+_overview_call = backup.index("loadOverview(false);")
+check(_overview_call > _clready, "overview 首次调用在 CL 初始化之后")
+# 注释里写了「不再提前调用」，所以只看代码行
+lb_code = NL.join(l.split("#", 1)[0] for l in backup.splitlines())
+check("^loadBackups();" not in lb_code, "代码里不再提前调用 loadBackups")
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

@@ -1,8 +1,53 @@
-<!-- version: 1.8.44 -->
+<!-- version: 1.8.45 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.45
+
+**修复备份页加载不出来：JS 初始化顺序错误让整段脚本提前中断。**
+
+### 根因（1.8.43 与 1.8.44 都有）
+
+备份页在 `var CL` 定义**之前**顶层调用了 `loadBackups()`。调用链是：
+
+```
+loadBackups() -> bkLoadCloud() -> 读 CL.logged
+```
+
+而 `CL` 是 `var CL = {...}`，此刻还没赋值，是 `undefined`。读它的属性直接抛：
+
+```
+TypeError: Cannot read properties of undefined (reading 'logged')
+```
+
+未捕获的异常会让**整个 `<script>` 块中断**。于是后面的 `clRender()`、
+状态查询、按钮绑定全都不执行——页面停在 HTML 初始文案上：
+
+- 删除密码 显示「读取中…」
+- 组件 显示「读取中…」
+- 安装按钮停在初始的禁用状态
+
+所以不是慢，是**请求根本没发出去**。
+
+### 怎么发现的
+
+从 1.8.43 / 1.8.44 的包内 `backup.htm` 提取行号核对：`loadBackups()` 在
+`var CL` 之前；再用 Node.js 最小复现，拿到与上面一致的 TypeError。
+
+注意：这两版的 JavaScript **语法检查全部通过**——这是运行时顺序问题，
+只跑 `node --check` 发现不了。
+
+### 修复
+
+删掉 `CL` 初始化之前那次顶层 `loadBackups()`。页面末尾由
+`loadOverview(false)` 统一刷新（那里 `CL` 已就绪）。
+
+同时加回归断言锁住顺序：
+
+- `var CL` 初始化之前不得出现顶层 `loadBackups()`；
+- `loadOverview` 首次调用必须在 `CL` 初始化之后。
 
 ## 1.8.44
 

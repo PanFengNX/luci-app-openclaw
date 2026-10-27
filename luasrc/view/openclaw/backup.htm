@@ -1458,7 +1458,12 @@ $('btn-bk-upload').onclick = function(){
   x.send(fd);
 };
 
-loadBackups();
+// 注意：这里**不能**调用 loadBackups()。
+// 它最终会走到 bkLoadCloud()，那里读 CL.logged —— 而 var CL 在本行之后
+// 才赋值，此刻是 undefined，直接抛 "Cannot read properties of undefined"。
+// 抛错会让整个 <script> 块中断：后面的 clRender()、状态查询、按钮绑定
+// 全部不执行，页面就停在「读取中」且按钮无响应。
+// 页面加载时由末尾的 loadOverview() 统一发起（那里 CL 已就绪）。
 
 // ================================================================ 百度网盘云备份
 // 约定：
