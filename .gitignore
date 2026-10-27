@@ -1,4 +1,8 @@
 dist/
+# dist-web/index.html 是下载页源码，必须留；里面的包是构建产物，不留
+dist-web/*.apk
+dist-web/*.run
+dist-web/*.ipk
 .tmp/
 .review/
 .workbuddy/
