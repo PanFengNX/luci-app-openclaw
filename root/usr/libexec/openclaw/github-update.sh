@@ -243,11 +243,16 @@ current_version() {
 	# 从而把降级误判成升级。
 	local v="" found=0
 	if command -v apk >/dev/null 2>&1; then
-		if apk info -e "$PKG_NAME" >/dev/null 2>&1; then
-			found=1
-			v="$(apk info -e "$PKG_NAME" 2>/dev/null | head -n1)"
-			case "$v" in "$PKG_NAME"-*) v="${v#"$PKG_NAME"-}" ;; esac
-		fi
+		# 直接读已安装数据库，而不是 `apk info -e` 的输出：后者在 apk v2
+		# （只打印包名）与 v3（打印 name-version）之间格式不一致，靠它解析
+		# 版本号会在一类设备上永远得到空串，前端随之停在「检查中」。
+		# /lib/apk/db/installed 的 P:/V: 段落格式在两个大版本间是稳定的。
+		v="$(awk -v p="$PKG_NAME" '
+			$0 == "P:" p { f = 1; next }
+			/^$/ { f = 0 }
+			f && /^V:/ { print substr($0, 3); exit }
+		' /lib/apk/db/installed 2>/dev/null)"
+		[ -n "$v" ] && found=1
 	else
 		v="$(opkg status "$PKG_NAME" 2>/dev/null | sed -n 's/^Version: //p' | head -n1)"
 		[ -n "$v" ] && found=1
@@ -294,20 +299,68 @@ need_tools() {
 	return 0
 }
 
+# curl 退出码 -> 可读原因。只映射有把握的值，其余原样带回（"未知"比猜错好）。
+_curl_rc_text() {
+	case "$1" in
+		5|6)  printf '域名解析失败（DNS 无法解析 github.com）' ;;
+		7)    printf '无法建立连接（对端不可达或被拦截）' ;;
+		28)   printf '连接或传输超时' ;;
+		35)   printf 'TLS 握手失败' ;;
+		51|60) printf 'TLS 证书校验失败（设备可能未安装 CA 证书，试试 opkg 安装 ca-certificates）' ;;
+		63)   printf '响应超过大小上限' ;;
+		*)    printf 'curl 错误（rc=%s）' "$1" ;;
+	esac
+}
+
 api_get() {
 	# api_get <url> <dest> <max-time>   —— 固定 https、限大小
-	local url="$1" dest="$2" mt="$3"
+	#
+	# 失败时把真实原因放进 API_GET_ERR 供调用方回显：
+	# 以前一律报「网络或仓库不可达」，DNS 失败 / 403 频率超限 / 证书缺失
+	# 三种完全不同的故障只能看到同一句话，根本无从排查。
+	local url="$1" dest="$2" mt="$3" proxy out rc code
+	API_GET_ERR=""
 	case "$url" in
 		https://api.github.com/repos/*|"$GH_DL_PREFIX"*) : ;;
 		*) msg "拒绝非白名单地址：$url"; return 1 ;;
 	esac
-	# curl 自身会跟随重定向；下载地址已限定在固定仓库前缀，最终落点仍由
-	# --proto '=https' 约束（拒绝降到 http / file 等协议）。
-	curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time "$mt" \
+	# 遵循插件设置页已配置的代理（main.http_proxy）。GitHub 在很多网络下
+	# 直连不可达，不配代理时检查永远失败；代理地址仍要过安全校验。
+	proxy="$(uci_get main.http_proxy '')"
+	if [ -n "$proxy" ]; then
+		if oc_safe_url "$proxy"; then
+			msg "访问 GitHub 使用已配置代理"
+		else
+			msg "UCI 中的代理地址不合法，已忽略"
+			proxy=""
+		fi
+	fi
+	# 不用 -f：它把 HTTP 403 / 404 与网络故障混成同一个 rc=22。
+	# 改为读取 %{http_code} 自行判定，再按 curl 退出码映射真实原因。
+	set -- -sSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time "$mt" \
 		--max-filesize "$MAX_BYTES" \
 		-H 'User-Agent: luci-app-openclaw-updater' \
 		-H 'Accept: application/vnd.github+json' \
-		-o "$dest" "$url"
+		-o "$dest" -w 'OC_HTTP_CODE:%{http_code}'
+	[ -n "$proxy" ] && set -- "$@" -x "$proxy"
+	out="$(curl "$@" "$url" 2>&1)"; rc=$?
+	if [ "$rc" -ne 0 ]; then
+		API_GET_ERR="$(_curl_rc_text "$rc")"
+		msg "下载失败：$url（$API_GET_ERR）"
+		rm -f "$dest" 2>/dev/null
+		return 1
+	fi
+	code="$(printf '%s\n' "$out" | sed -n 's/^OC_HTTP_CODE://p' | tail -n 1)"
+	case "$code" in
+		2*)  return 0 ;;
+		403) API_GET_ERR='GitHub 拒绝访问（HTTP 403：API 请求频率超限或地区限制，请稍后再试或配置代理）' ;;
+		404) API_GET_ERR='Release 不存在（HTTP 404）' ;;
+		'')  API_GET_ERR='服务器未返回有效的 HTTP 状态' ;;
+		*)   API_GET_ERR="GitHub 返回 HTTP $code" ;;
+	esac
+	msg "下载失败：$url（$API_GET_ERR）"
+	rm -f "$dest" 2>/dev/null
+	return 1
 }
 
 a_field() { jsonfilter -i "$1" -e "@.assets[$2].$3" 2>/dev/null | head -n1; }
@@ -380,7 +433,7 @@ cmd_check() {
 	need_tools || return 1
 	init_dirs || { fail '私有临时目录不可用'; return 1; }
 
-	api_get "$GH_API" "$meta" "$FETCH_TIMEOUT" || { fail 'GitHub Release 检查失败（网络或仓库不可达）'; return 1; }
+	api_get "$GH_API" "$meta" "$FETCH_TIMEOUT" || { fail "GitHub Release 检查失败：${API_GET_ERR:-网络或仓库不可达}"; return 1; }
 	# 只认 latest release 对象：结构不符就不要继续解释字段
 	jsonfilter -i "$meta" -e '@.tag_name' >/dev/null 2>&1 || { fail 'Release 元数据结构不符合预期'; return 1; }
 
@@ -575,7 +628,7 @@ EOF
 
 	# 2) 下载（https、限时、限大小、私有目录）
 	msg "开始下载：$name"
-	api_get "$url" "$pkg" "$PKG_TIMEOUT" || { msg '插件包下载失败'; rm -f "$pkg"; return 1; }
+	api_get "$url" "$pkg" "$PKG_TIMEOUT" || { msg "插件包下载失败：${API_GET_ERR:-未知原因}"; rm -f "$pkg"; return 1; }
 	size="$(wc -c <"$pkg" 2>/dev/null | tr -d ' ')"
 	case "$size" in ''|*[!0-9]*) size=0 ;; esac
 	if [ "$size" -le 0 ] || [ "$size" -gt "$MAX_BYTES" ]; then

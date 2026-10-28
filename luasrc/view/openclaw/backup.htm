@@ -1418,6 +1418,11 @@ function dpClearDialog(){
 }
 
 // ---------------------------------------------------------------- 本地备份
+// 删除密码两个按钮的绑定曾整体缺失：dpSetDialog / dpClearDialog 只定义了
+// 函数，从没挂到 onclick 上 —— 点「设置 / 修改删除密码」毫无反应。
+$('btn-delpass-set').onclick   = dpSetDialog;
+$('btn-delpass-clear').onclick = dpClearDialog;
+
 $('btn-backup').onclick = function(){
   var nm = $('bk-name').value.trim();
   var ws = $('bk-ws').checked ? '1' : '0';

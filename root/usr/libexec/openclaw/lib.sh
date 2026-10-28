@@ -1203,11 +1203,18 @@ EOF
 
 oc_rand_hex() {
 	# 32 bytes hex
+	# od -tx1 并非所有 busybox 构建都支持：失败时输出为空串，调用方会把
+	# "工具缺失"误报成"随机源不可用"。逐段校验长度，失败再退到 hexdump，
+	# 最后才是 awk（此时 /dev/urandom 已确认不可读，属于兜底而非首选）。
+	local h=""
 	if [ -r /dev/urandom ]; then
-		dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'
-	else
-		awk 'BEGIN{srand();for(i=0;i<32;i++)printf "%02x", int(rand()*256)}'
+		h="$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -v -tx1 2>/dev/null | tr -d ' \n')"
+		[ "${#h}" -eq 64 ] && { printf '%s' "$h"; return 0; }
+		h="$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -e '32/1 "%02x"' 2>/dev/null)"
+		[ "${#h}" -eq 64 ] && { printf '%s' "$h"; return 0; }
+		return 1
 	fi
+	awk 'BEGIN{srand();for(i=0;i<32;i++)printf "%02x", int(rand()*256)}'
 }
 
 oc_pty_run() {

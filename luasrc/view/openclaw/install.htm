@@ -1363,7 +1363,7 @@ bindVersionSelect('in-oc', 'in-oc-manual', false, function(){
 bindVersionSelect('in-node', 'in-node-manual', true, renderNodeHint);
 
 // ------------------------------- GitHub 插件自身更新
-var ghUpdate = { busy:false, timer:null, log:'', id:'' };
+var ghUpdate = { busy:false, timer:null, log:'', id:'', canInstall:false };
 function ghSetState(text, tone){
   var el = $('gh-state');
   el.textContent = text;
@@ -1381,10 +1381,15 @@ function ghRender(d){
   var err = d.error || '';
   $('gh-error').textContent = err;
   $('gh-error').style.display = err ? '' : 'none';
-  $('btn-gh-install').disabled = ghUpdate.busy || d.state !== 'available';
+  // unknown = 本机版本读不出来（包数据库异常等）。此时仍允许安装：
+  // 候选包已通过 SHA256 校验，重装一次正好能修复读不出版本的状态。
+  // 绝不能让按钮跟着停在"检查中"——那是 1.8.48 实际出现过的卡死形态。
+  ghUpdate.canInstall = (d.state === 'available' || d.state === 'unknown');
+  $('btn-gh-install').disabled = ghUpdate.busy || !ghUpdate.canInstall;
   $('btn-gh-rollback').disabled = ghUpdate.busy || !(Number(d.rollbacks) > 0);
   if (d.state === 'available') ghSetState('有更新', 'warn');
   else if (d.state === 'none') ghSetState('无更新', 'ok');
+  else if (d.state === 'unknown') ghSetState('本机版本未知', 'warn');
   else if (d.state === 'running') ghSetState('安装中', 'warn');
   else if (d.state === 'success') ghSetState('成功', 'ok');
   else if (d.state === 'failed') ghSetState('失败', 'warn');
@@ -1393,7 +1398,8 @@ function ghRender(d){
 function ghBusy(on){
   ghUpdate.busy = on;
   $('btn-gh-check').disabled = on;
-  $('btn-gh-install').disabled = on || $('gh-state').textContent !== '有更新';
+  // 不看药丸文字（文案会变），看 ghRender 落下来的 canInstall 标记。
+  $('btn-gh-install').disabled = on || !ghUpdate.canInstall;
   $('btn-gh-rollback').disabled = on || $('btn-gh-rollback').getAttribute('data-ready') !== '1';
   $('gh-progress').style.display = on ? '' : 'none';
   $('gh-progress').className = 'oc-progress';
