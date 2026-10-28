@@ -46,8 +46,7 @@ PKG_ARCH = "noarch"
 # luci-lua-runtime / luci-compat are mandatory on OpenWrt 25.12: the Lua
 # controller bridge was split out of luci-base there.
 # 依赖必须覆盖"代码里真的会调用"的东西，而不能只列最常用的那几个。
-# 这两条是从 iStoreOS 的 luci-app-openclawmgr 学来的（它们把 xz-utils / ca-bundle
-# 显式写进 Depends），对照本包发现自己漏了：
+# 这两条容易被漏掉，对照本包实际调用发现自己没写：
 #
 #   xz-utils   Node.js 官方包是 .tar.xz。install.sh 里 `tar -xJf` 需要 xz；
 #              没有 xz 时它退化成 `tar -xf`，而 busybox tar 多半没编进 -J，
@@ -94,7 +93,6 @@ rm -f /tmp/luci-indexcache /tmp/luci-modulecache
 # 本包发自己的 ACL 文件（/usr/share/rpcd/acl.d/luci-app-openclaw.json）。
 # rpcd 只在启动时读 ACL，装完不 reload 的话新会话仍按旧权限表判定，
 # 表现为"页面能打开、接口一律 403"，而清 LuCI 缓存治不了这个。
-# iStoreOS 的 luci-app-openclawmgr 在 postinst 里做了同样的事。
 [ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd reload >/dev/null 2>&1
 # 上面的 chmod 都带 2>/dev/null：只读 /usr、overlay 写满时它们会静默失败，
 # 用户看到的是"命令不存在"而不是安装失败。这里统一复核一次可执行位，

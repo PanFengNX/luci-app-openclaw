@@ -313,9 +313,9 @@ oc_oc_bin()    { printf '%s/bin/openclaw' "$(oc_oc_dir)"; }
 # ---------------------------------------------------------------- legacy config keys
 # 2026.10 起 OpenClaw 删除了 gateway.controlUi 下的三个认证相关键。配置里只要
 # 出现任意一个，整份 openclaw.json 就会被判为无效（Unrecognized key），网关直接
-# 拒绝启动。iStoreOS 的 luci-app-openclawmgr 每次被调用（启动/停止/安装/打开
-# 管理页）都会无条件写回这三个键，所以「用户手动删一次」没有用 —— 本插件复用
-# 同一份配置时，必须自己把它们清掉。
+# 拒绝启动。较早版本的管理程序每次被调用（启动/停止/安装/打开管理页）都会无条件
+# 写回这三个键，所以「用户手动删一次」没有用 —— 本插件复用同一份配置时，必须
+# 自己把它们清掉。
 #
 # 清理结果通过全局变量回传给调用方（busybox ash 没有 local -n，沿用
 # OC_PID_REASON 的既有风格）。调用方在调用前不要依赖旧值。
@@ -371,7 +371,8 @@ oc_installed_version() {
 oc_purge_legacy_controlui() {
 	# oc_purge_legacy_controlui [config-path] [oc-dir] [node-bin]
 	#
-	# 删除 2026.10 已不再支持的 gateway.controlUi.* 旧键（旧版 openclawmgr 留下）。
+	# 删除 2026.10 已不再支持的 gateway.controlUi.* 旧键（较早版本写入，残留会
+	# 让整份配置失效）。
 	# 只在已安装版本 >= 2026.10.0 时动手：更早的版本里这些键仍然合法，删掉会
 	# 改变旧版行为。取不到版本时什么都不做。
 	#
@@ -486,7 +487,7 @@ fs.writeFileSync(dst, JSON.stringify(doc, null, 2) + "\n", { mode: 0o600 });
 
 	for k in $present; do
 		OC_LEGACY_CONTROLUI_REMOVED=$((OC_LEGACY_CONTROLUI_REMOVED + 1))
-		oc_warn "已移除 2026.10 不再支持的配置键 gateway.controlUi.$k（旧版 openclawmgr 写入，保留会导致网关拒绝启动）"
+		oc_warn "已移除 2026.10 不再支持的配置键 gateway.controlUi.$k（较早版本写入，保留会导致网关拒绝启动）"
 	done
 	oc_warn "配置清理完成：共移除 $OC_LEGACY_CONTROLUI_REMOVED 个 2026.10 不再支持的配置键（备份：$bak）"
 	return 0
@@ -1549,15 +1550,25 @@ oc_sweep_stale_tmp() {
 	# openclaw-update-run-handoff-*、openclaw-<date>.log，
 	# 用 openclaw-* 会把它们一起删掉（Hermes 实测误删 9 个）。
 	#
-	# 这些目录只含日志/缓存/锁，删之无损；服务用户自己的那个保留。
+	# ⚠️ 绝不清 $state_dir/tmp —— 自 OpenClaw 2026.10 起，状态所有权锁就住在
+	#   $OPENCLAW_STATE_DIR/tmp/openclaw-<uid>/state.<hash>.lock
+	# （官方 gateway-lock 文档）。它和"临时目录"同名同位置，但**不是**缓存：
+	#   删掉它 = 把正在进行的网关/维护的锁 sidecar 抽走，于是数据库里留下一条
+	#   指向已消失进程的租约，之后每次启动与 doctor 都被判为
+	#   "undergoing offline maintenance by sqlite-maintenance process <pid>"，
+	#   而那个 pid 早已不存在 —— 表现为「升级到 10.8 后网关永远起不来，
+	#   doctor 也修不好」。这条是实机踩到的。
+	# 只清真正的一次性临时根：$base/tmp（网关 TMPDIR）与 /tmp。
 	local base state uid d root o name
 	base="$(oc_base_dir 2>/dev/null)/tmp"
 	state="$(oc_state_dir 2>/dev/null)"
 	uid="$(id -u "${OC_USER:-openclaw}" 2>/dev/null)"
 	case "${uid:-}" in ''|*[!0-9]*) return 0 ;; esac
 
-	for root in "$base" "$state/tmp" /tmp; do
+	for root in "$base" /tmp; do
 		[ -d "$root" ] || continue
+		# 防御：万一 base 恰好指向 state 目录，别把锁一起删了
+		[ -n "$state" ] && [ "$root" = "$state/tmp" ] && continue
 		for d in "$root"/openclaw-*; do
 			[ -d "$d" ] || continue
 			# 必须是 openclaw-<纯数字>：同层还有 openclaw-<date>.log 等，
@@ -1572,6 +1583,65 @@ oc_sweep_stale_tmp() {
 		done
 	done
 	return 0
+}
+
+oc_state_lock_pid() {
+	# oc_state_lock_pid <lockfile> -> 打印锁文件里记录的 pid；读不到返回 1
+	#
+	# 锁文件是 JSON（含 pid / role / startedAt），但字段顺序不保证，
+	# 也不保证就是标准 JSON —— 用 grep 取第一个 "pid": <数字> 最稳。
+	local f="$1" p
+	[ -f "$f" ] || return 1
+	p="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$f" 2>/dev/null | head -n1)"
+	case "$p" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s' "$p"
+	return 0
+}
+
+oc_clear_stale_state_lock() {
+	# 清掉**确认持有者已死**的状态所有权锁，让网关能重新启动。
+	#
+	# 为什么需要它：OpenClaw 10.x 把离线维护（update / doctor --state-sqlite /
+	# 被中途打断的升级）与网关启动放在同一把锁上。维护进程被 SIGKILL 或
+	# 被清理逻辑抽走 sidecar 之后，数据库里留着一条指向死 pid 的租约，
+	# 之后网关与 doctor 全部被判为"维护中"，两边都卡死 —— 这就是
+	# 「升级 10.8 后起不来、doctor 也修不了」的现场。
+	#
+	# 判据刻意收得极紧（宁可报错让人手动处理，也不能误删活锁）：
+	#   * 只看 $state_dir/tmp/openclaw-*/ 下的 state*.lock 与 gateway.state.lock
+	#   * 锁里必须能解析出 pid
+	#   * 该 pid 必须**确实不存在**（kill -0 失败）
+	# 活着的持有者一律不动，只把结论写日志。返回 0 表示"清理后可以继续启动"，
+	# 返回 1 表示仍有活锁（调用方应据此给出说明，而不是静默继续）。
+	#
+	# oc_clear_stale_state_lock <state_dir>
+	local sd="$1" d f pid n=0 alive=0
+	[ -n "$sd" ] || return 0
+	[ -d "$sd/tmp" ] || return 0
+	for d in "$sd"/tmp/openclaw-*; do
+		[ -d "$d" ] || continue
+		for f in "$d"/state*.lock "$d"/gateway.state.lock; do
+			[ -f "$f" ] || continue
+			pid="$(oc_state_lock_pid "$f")" || {
+				oc_warn "状态锁 $f 无法解析持有者 pid，保持原样（请手动确认后删除）"
+				alive=1
+				continue
+			}
+			if kill -0 "$pid" 2>/dev/null; then
+				alive=1
+				oc_warn "状态由活进程 $pid 持有（$(basename "$f")），等待其结束，不在启动路径上强删"
+			else
+				if rm -f "$f" 2>/dev/null; then
+					n=$((n + 1))
+					oc_warn "已清理陈旧状态锁 $f（记录 pid=$pid 已不存在）"
+				fi
+				# 锁文件删掉后目录若已空，顺手清掉（不递归删，避免误伤）
+				rmdir "$d" 2>/dev/null || true
+			fi
+		done
+	done
+	[ "$n" -gt 0 ] && oc_warn "共清理 $n 个陈旧状态锁；数据库租约会在下次启动时由 OpenClaw 回收"
+	[ "$alive" -eq 0 ]
 }
 
 oc_as_user() {
@@ -1640,8 +1710,7 @@ oc_fix_perms() {
 }
 
 # ---------------------------------------------------------------- safety
-# Everything below was modelled on iStoreOS's luci-app-openclawmgr, which does a
-# genuinely good job at not bricking the router. Adopted:
+# The rules below exist to keep a bad install from bricking the router:
 #   * refuse to operate on system / dot-path base directories
 #   * a real lock so two LuCI clicks cannot run two installs at once
 #   * refuse privileged ports

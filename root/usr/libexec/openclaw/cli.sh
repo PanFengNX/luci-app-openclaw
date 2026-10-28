@@ -537,8 +537,8 @@ oc_gateway_reachable() {
 	# "运行中"，点「打开控制台」却是连接被拒 —— 用户没法判断到底哪一层坏了。
 	# 主动发一个 HTTP 请求就能把这两种情况分开。
 	#
-	# 与 iStoreOS 的 luci-app-openclawmgr 同一思路（它们的 status 里同时有
-	# running 和 reachable 两个字段，UI 上区分「运行中」与「运行中（未托管）」）。
+	# 同时区分 running 与 reachable 两个字段，UI 上就能显示「运行中」与
+	# 「运行中（未托管）」的区别。
 	#
 	# 顺序：bind 是 lan/auto 时先试 LAN IP，再回退 127.0.0.1；其余只试本地。
 	# 超时给得很短（连接 1 秒、总共 2 秒）：这个函数在 status 轮询路径上，

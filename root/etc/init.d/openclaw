@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # OpenClaw 助手 - procd service
 #
-# Stability rules borrowed from iStoreOS's luci-app-openclawmgr (and tightened):
+# Stability rules:
 #   * never start on a privileged port (<=1024)  -> would fight SSH/LuCI
 #   * only pass --force when the port is >1024 AND lsof/fuser exists, so
 #     OpenClaw can never kill the router's own management services
@@ -355,11 +355,16 @@ _sweep_stale_tmp() {
 	# 只匹配 openclaw-[0-9]：同层还有 openclaw-update-report-*、
 	# openclaw-update-run-handoff-*、openclaw-<date>.log，用 openclaw-*
 	# 会把它们一起删掉。
+	#
+	# ⚠️ 绝不清 $state_dir/tmp —— OpenClaw 2026.10 起状态所有权锁住在
+	#   $OPENCLAW_STATE_DIR/tmp/openclaw-<uid>/state.<hash>.lock，
+	# 删掉它会让数据库留下指向已消失进程的维护租约，网关与 doctor 双双卡死。
 	local uid d root o name
 	uid="$(id -u "$OC_USER" 2>/dev/null)"
 	case "${uid:-}" in ''|*[!0-9]*) return 0 ;; esac
-	for root in "$base/tmp" "$state_dir/tmp" /tmp; do
+	for root in "$base/tmp" /tmp; do
 		[ -d "$root" ] || continue
+		[ "$root" = "$state_dir/tmp" ] && continue
 		for d in "$root"/openclaw-*; do
 			[ -d "$d" ] || continue
 			# 必须是 openclaw-<纯数字>（同层还有 openclaw-<date>.log）
@@ -442,7 +447,18 @@ start_service() {
 		logger -t openclaw "OpenClaw 未安装（$globaldir 下找不到入口），请先安装运行环境"
 		return 1
 	}
-	[ -n "$token" ] || { logger -t openclaw "未生成网关 token，拒绝启动"; return 1; }
+	# token 判据必须区分三种情况，不能只看变量是否为空：
+	#   1) 明文 token        -> 导出 OPENCLAW_GATEWAY_TOKEN，正常启动
+	#   2) SecretRef（{...}） -> 引用有效，网关自己去密钥库取，**必须允许启动**
+	#   3) 真的没有          -> fail closed
+	# 旧写法只有 [ -n "$token" ]，而 SecretRef 上一段刚把 token 清空，
+	# 于是第 2 种情况被当成第 3 种 —— 网关永远起不来，日志却说"未生成 token"，
+	# 而配置里明明有 token（是引用形式）。这是升级到 SecretRef 后才会踩到的坑。
+	if [ -z "$token" ] && [ "$token_is_secretref" != "1" ]; then
+		logger -t openclaw "未生成网关 token，拒绝启动"
+		logger -t openclaw "修复：/usr/libexec/openclaw/repair.sh   （或 LuCI「一键修复」）"
+		return 1
+	fi
 
 	# 服务用户是启动前提，不是可选项：procd 的 user 参数一旦缺失，网关会以
 	# root 运行 —— 它对外监听 LAN 并执行模型工具调用，等于把路由器交出去。

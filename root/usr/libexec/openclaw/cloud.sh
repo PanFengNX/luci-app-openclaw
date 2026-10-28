@@ -3349,7 +3349,7 @@ cloud_json_known_key() {
 	# 用于区分「这是结构化输出，只是没给出登录证据」与「这是自由文本」：
 	# 前者绝不能交给文本兜底去猜。
 	local k v
-	for k in logged_in loggedIn is_login isLogin login ok \
+	for k in logged_in loggedIn is_login isLogin login authenticated ok \
 		user_name username uname uid account display_name; do
 		v="$(cloud_json_scalar "$1" "$k")"
 		[ -n "$v" ] && return 0
@@ -3380,7 +3380,7 @@ cloud_auth_state() {
 
 	# JSON 布尔字段优先。ok 只表示「请求成功」，单独出现不算证据：必须
 	# 同时存在非空账号类字段才采信；ok:false 也不作为「未登录」的证据。
-	for k in logged_in loggedIn is_login isLogin login ok; do
+	for k in logged_in loggedIn is_login isLogin login authenticated ok; do
 		v="$(cloud_json_scalar "$f" "$k")"
 		case "$v" in
 			''|null|NULL) continue ;;

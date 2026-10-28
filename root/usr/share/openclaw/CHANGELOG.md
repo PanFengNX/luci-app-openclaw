@@ -1,8 +1,70 @@
-<!-- version: 1.8.45 -->
+<!-- version: 1.8.47 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.47
+
+**修复升级到 OpenClaw 10.x 后网关起不来、一键修复也救不回来的问题。**
+
+三个独立缺陷叠在一起，任何一个都会让网关停在「停止」状态：
+
+### 1. 状态所有权锁被我们自己的清理逻辑删掉（最致命）
+
+OpenClaw 2026.10 起把网关 / `doctor` / 离线 SQLite 维护的锁统一放在
+`$OPENCLAW_STATE_DIR/tmp/openclaw-<uid>/state.<hash>.lock`。这个位置和
+「临时目录」同名同路径，但它是**锁**，不是缓存。
+
+我们的清理函数会扫 `$state_dir/tmp` 并删掉不属于服务用户的
+`openclaw-<uid>` 目录。删除时如果维护进程仍持有该锁，数据库里就留下一条
+指向已消失进程的租约，此后：
+
+```
+OpenClaw state at .../openclaw.sqlite is undergoing offline maintenance
+by sqlite-maintenance process <pid>; retry when it finishes.
+```
+
+而那个 pid 早已不存在 —— 网关拒绝启动，`doctor` 也拒绝执行，形成死锁。
+
+**修复**：清理函数只扫真正的临时根（`$base/tmp` 与 `/tmp`），永不触碰
+`state_dir/tmp`；另外新增 `oc_clear_stale_state_lock()`，只在锁里记录的
+pid **确认已死**时删除锁文件，活锁一律不动（并在日志里说明）。
+
+### 2. SecretRef 形式的 token 被误判为「没有 token」
+
+token 若是密钥库引用 `{"source":"store",...}`，代码识别后会把变量清空
+（正确，不能当明文塞进环境变量），但紧接着的判据是 `[ -n "$token" ]` ——
+于是引用被当成「没有」，日志报 `未生成网关 token，拒绝启动`，
+而配置里明明有 token。升级到 SecretRef 后必然踩到。
+
+**修复**：判据改为「变量为空 **且** 不是 SecretRef」才拒绝。
+
+### 3. 删除密码永远显示「读取中…」
+
+`dpApply()` 有两处调用，数据形态不同：`delpass_status` 给 JSON 字符串，
+`cloud_overview` 给的已经是对象。原代码无条件 `JSON.parse`，对对象会抛异常
+并回退成 `{}`，`typeof d.set === 'boolean'` 永远为假 → 永久「读取中」。
+
+**修复**：先判类型再解析。
+
+### 4. 登录状态误判（顺带）
+
+百度 `whoami --json` 返回的是 `{"authenticated": true, ...}`，
+而判定器只认 `logged_in` / `isLogin` 等键，于是已登录也被判为「无法确认」，
+云端备份列表因而不显示。**修复**：把 `authenticated` 纳入布尔判据。
+
+回归断言从 333 项增加到 345 项，逐条锁住上面四个分支。
+
+## 1.8.46
+
+**清理命名与文档表述。**
+
+- 代码注释与日志文案中不再出现历史组件的名称，统一用「较早版本」描述。
+- README 删除与其他管理包对比的章节，改为中立的「包结构」「稳定性设计」说明；
+  技术内容（安全机制、已规避的缺陷、备份不变量）逐条保留。
+- 打包脚本与测试里的历史出处注释一并改为中性表述。
+- 保留 iStoreOS 作为**平台适配**信息（哪个系统该装哪种包格式），这属于用户必读内容。
 
 ## 1.8.45
 

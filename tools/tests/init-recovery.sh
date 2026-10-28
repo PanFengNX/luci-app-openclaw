@@ -90,8 +90,8 @@ cli = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
 ctrl = (proj / 'luasrc/controller/openclaw.lua').read_text(encoding='utf-8')
 setup = (proj / 'luasrc/view/openclaw/setup.htm').read_text(encoding='utf-8')
 
-# 依赖清单必须覆盖代码真的会调用的命令（经验来自 iStoreOS 的 openclawmgr：
-# 它们把 xz-utils / ca-bundle 写进 Depends，而本包漏了）
+# 依赖清单必须覆盖代码真的会调用的命令（这两条曾被漏掉，
+# 后果是装完才发现 tar -xJf 没有 xz、https 下载没有 ca-bundle）
 build = (proj / 'scripts/build_apk.py').read_text(encoding='utf-8')
 check('"xz-utils"' in build, 'DEPEND 含 xz-utils（tar -xJf 需要）')
 check('"ca-bundle"' in build, 'DEPEND 含 ca-bundle（https 下载需要）')

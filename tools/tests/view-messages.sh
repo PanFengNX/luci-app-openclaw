@@ -760,6 +760,53 @@ check(_overview_call > _clready, "overview 首次调用在 CL 初始化之后")
 lb_code = NL.join(l.split("#", 1)[0] for l in backup.splitlines())
 check("^loadBackups();" not in lb_code, "代码里不再提前调用 loadBackups")
 
+# ---------------------------------------------------------------- 1.8.46 修复锁定
+# dpApply 被两处调用：dpStatus 的 data 是 JSON 字符串，loadOverview 传的已经是
+# 对象。无条件 JSON.parse 对象会抛异常并回退成 {}，于是 typeof d.set 永远不是
+# boolean —— 页面永久停在「删除密码 读取中…」。
+_dp = backup[backup.index("function dpApply("):]
+_dp = _dp[:_dp.index(NL + "}" + NL)]
+check("typeof r.data === 'object'" in _dp,
+      "dpApply 认得对象形式的 data（否则删除密码永远读取中）")
+
+initd = (proj / 'root/etc/init.d/openclaw').read_text(encoding='utf-8')
+# token 判据必须放行 SecretRef：token 是 {"source":"store",...} 时上一段会清空
+# 变量，只判 [ -n "$token" ] 会让网关永远起不来，日志却谎称"未生成 token"。
+check("token_is_secretref" in initd, "init.d 认得 SecretRef 形式的 token")
+_st = initd[initd.index('gateway.auth.token') - 400:]
+_st = _st[:_st.index('服务用户是启动前提')]
+check('"$token_is_secretref" != "1"' in _st,
+      "token 判据放行 SecretRef（否则升级 10.x 后拒绝启动）")
+
+lib = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
+_sv = lib[lib.index("oc_sweep_stale_tmp()"):]
+_sv = _sv[:_sv.index(NL + "}" + NL)]
+# 只断言「被清理的根列表」里没有 state/tmp。
+# 函数体里会出现 "$state/tmp"，那是**防御性判断**（万一 base 指向 state 就跳过），
+# 注释里也会提到它来解释原因 —— 两者都不该让断言失败，所以只取 for 那一行。
+_sv_loop = re.search(r'(?m)^\s*for root in (.+?); do', _sv)
+check(_sv_loop is not None, "取到清理函数的根列表")
+if _sv_loop:
+    check("state" not in _sv_loop.group(1),
+          "清理函数不再扫 state_dir/tmp（那里放着 OpenClaw 状态所有权锁）")
+    check("/tmp" in _sv_loop.group(1), "清理函数仍扫真正的临时根")
+_iw = initd[initd.index("_sweep_stale_tmp()"):]
+_iw = _iw[:_iw.index(NL + "}" + NL)]
+_iw_loop = re.search(r'(?m)^\s*for root in (.+?); do', _iw)
+check(_iw_loop is not None, "取到 init.d 清理函数的根列表")
+if _iw_loop:
+    check("state_dir" not in _iw_loop.group(1),
+          "init.d 清理函数同样不碰 state_dir/tmp")
+check("oc_clear_stale_state_lock" in lib,
+      "库里有陈旧状态锁清理函数（活锁不动，死锁才删）")
+rs = (proj / 'root/usr/libexec/openclaw/repair.sh').read_text(encoding='utf-8')
+check("oc_clear_stale_state_lock" in rs, "一键修复会先清陈旧状态锁")
+check("offline maintenance" in rs, "doctor 失败时单独解释维护锁")
+
+cs = (proj / 'root/usr/libexec/openclaw/cloud.sh').read_text(encoding='utf-8')
+check("authenticated" in cs,
+      "登录判定认得 authenticated 字段（百度 whoami 用的就是它）")
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

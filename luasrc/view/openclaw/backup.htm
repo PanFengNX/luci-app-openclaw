@@ -398,21 +398,26 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
 <!-- 只作用于本页：上面那块共享样式是 10 个视图共用、逐字节一致的，
      往里加选择器会和其它改动冲突，所以本地备份列表的布局单独放这里。 -->
 <style id="oc-backup-style">
-/* 本地备份列表：一行 = 文件名（占满剩余宽度）+ 体积/时间 + 操作按钮。
+/* 备份列表：一条一行，左侧「来源 + 文件名」，中间体积/时间，右侧操作。
    共享块的 .oc-rowline 是「标签 | 值」两列网格，文件名放进 116px 那列会被
-   折成三四行（openclaw-backup-2026…tar.gz），所以这里改用 flex 重排。 */
-.oc-bkrow{display:flex;align-items:center;gap:12px;padding:8px 0;
-  border-bottom:1px solid var(--oc-line-soft);min-height:38px}
+   折成三四行（openclaw-backup-2026…tar.gz），所以这里改用 flex 重排。
+   体积/时间必须与按钮分开成独立单元：早先它们同在一个 wrap 容器里，
+   窄屏换行时"删除"会被挤到按钮组下一行，看着像掉了。 */
+.oc-bkrow{display:flex;align-items:center;gap:6px 12px;padding:10px 0;
+  border-bottom:1px solid var(--oc-line-soft);flex-wrap:wrap}
 .oc-bkrow:last-child{border-bottom:0}
-.oc-bkrow>.oc-bkname{flex:1 1 auto;min-width:0;font-size:12.5px;
+.oc-bkrow>.oc-bkhead{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:8px}
+.oc-bkrow>.oc-bkhead>.oc-bkname{min-width:0;font-size:12.5px;
   font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--oc-fg-dim);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.oc-bkrow>.oc-bkacts{flex:0 0 auto;display:flex;align-items:center;gap:8px;
-  flex-wrap:wrap;justify-content:flex-end}
+.oc-bkrow>.oc-bkmeta{flex:0 0 auto;font-size:11.5px;color:var(--oc-fg-dim);
+  white-space:nowrap}
+.oc-bkrow>.oc-bkacts{flex:0 0 auto;display:flex;align-items:center;gap:8px}
 @media (max-width:640px){
-  .oc-bkrow{flex-wrap:wrap}
-  .oc-bkrow>.oc-bkname{flex:1 1 100%;white-space:normal;word-break:break-all}
-  .oc-bkrow>.oc-bkacts{flex:1 1 100%;justify-content:flex-start}
+  .oc-bkrow>.oc-bkhead{flex:1 1 100%}
+  .oc-bkrow>.oc-bkhead>.oc-bkname{white-space:normal;word-break:break-all}
+  .oc-bkrow>.oc-bkmeta{flex:1 1 100%}
+  .oc-bkrow>.oc-bkacts{flex:1 1 100%;justify-content:flex-start;flex-wrap:wrap}
 }
 </style>
 
@@ -1100,6 +1105,10 @@ function bkRow(e){
   var row = document.createElement('div');
   row.className = 'oc-bkrow';
 
+  // 第一段：来源标签 + 文件名。窄屏时这一段独占一行。
+  var head = document.createElement('div');
+  head.className = 'oc-bkhead';
+
   // 来源标签：本地 / 云端。这是合并列表里最关键的一列 ——
   // 没有它就无法判断「这份备份在不在网盘上」。
   var tag = document.createElement('span');
@@ -1107,24 +1116,25 @@ function bkRow(e){
   tag.style.flex = '0 0 auto';
   tag.style.fontSize = '11px';
   tag.textContent = (e.src === 'cloud') ? '云端' : '本地';
-  row.appendChild(tag);
+  head.appendChild(tag);
 
   var name = document.createElement('span');
   name.className = 'oc-bkname';
   name.textContent = e.name;              // 服务端数据只进 textContent
   name.title = e.name;
-  row.appendChild(name);
+  head.appendChild(name);
+  row.appendChild(head);
+
+  // 第二段：体积 / 时间 / 是否加密。独立成单元，不和按钮挤在同一个
+  // wrap 容器里 —— 否则窄屏断行时按钮会被拆散，看着像丢了一个。
+  var meta = document.createElement('span');
+  meta.className = 'oc-bkmeta';
+  meta.textContent = fmtSize(e.size) + ' · ' + fmtTime(e.ts)
+    + (e.encrypted ? ' · 加密' : '');
+  row.appendChild(meta);
 
   var act = document.createElement('div');
   act.className = 'oc-bkacts';
-
-  var meta = document.createElement('span');
-  meta.className = 'oc-hint';
-  meta.style.marginTop = '0';
-  meta.style.whiteSpace = 'nowrap';
-  meta.textContent = fmtSize(e.size) + ' · ' + fmtTime(e.ts)
-    + (e.encrypted ? ' · 加密' : '');
-  act.appendChild(meta);
 
   var mk = function(label, fn, gray){
     var btn = document.createElement('button');
@@ -1288,7 +1298,11 @@ function dpRender(){
 }
 
 function dpApply(r){
-  var d = jp((r && r.data) || '{}', {});
+  // delpass_status 的 data 是 JSON 字符串；cloud_overview 的 data 已经是对象。
+  // 统一归一化，不能无条件 JSON.parse：对对象 parse 会抛异常，
+  // 然后每次都回退到 {}，界面就永久停在「读取中…」。
+  var d = (r && r.data && typeof r.data === 'object')
+    ? r.data : jp((r && r.data) || '{}', {});
   if (r && r.ok && typeof d.set === 'boolean'){
     DP.known = true;
     DP.set = d.set;

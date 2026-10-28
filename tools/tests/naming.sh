@@ -72,10 +72,6 @@ for p in proj.rglob('*'):
         # uci-defaults 里那段清理旧文件的逻辑也允许 —— 它删的是旧路径本身。
         if re.search(r'以前叫|旧版本|旧路径|清除|清理|rm -f /usr/libexec/istorec', line):
             continue
-        # README 的对照表左列写的是 iStoreOS 自带包的路径（openclawmgr），
-        # 那是别人的文件名，不是我们的引用。
-        if 'openclawmgr.sh' in line:
-            continue
         hits.append('%s:%d: %s' % (p.relative_to(proj).as_posix(), i, line.strip()))
 
 check(not hits, '源码树里没有 istorec 路径引用')

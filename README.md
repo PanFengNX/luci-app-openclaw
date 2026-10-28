@@ -5,33 +5,28 @@
 
 LuCI 入口：**服务 → OpenClaw 助手**（`/cgi-bin/luci/admin/services/openclaw`）。
 
-## 与 iStoreOS 自带的 luci-app-openclawmgr 完全独立
+## 包结构
 
-本包**不复用** iStoreOS 应用商店里 `luci-app-openclawmgr` 的任何标识或路径，
-两者可以同时安装、互不干扰：
+本包自带独立的 Node 运行时、OpenClaw 程序与数据目录，与系统里其他
+OpenClaw 相关组件不共享文件，可以并行安装：
 
-| 项目 | iStoreOS luci-app-openclawmgr | 本包 |
-| --- | --- | --- |
-| 包名 | `luci-app-openclawmgr` | `luci-app-openclaw` |
-| UCI 配置 | `/etc/config/openclawmgr`（段 `openclawmgr`） | `/etc/config/openclaw`（段 `openclaw`） |
-| procd 服务 | `/etc/init.d/openclawmgr` | `/etc/init.d/openclaw` |
-| 主脚本 | `/usr/libexec/istorec/openclawmgr.sh` | `/usr/libexec/openclaw/cli.sh` |
-| 脚本目录 | `/usr/libexec/openclawmgr/` | `/usr/libexec/openclaw/` |
-| 运行用户 | `openclawmgr` | `openclaw` |
-| 运行目录 | `/tmp/.openclaw` | `/tmp/.openclaw` |
-| 日志 | `/var/log/openclawmgr*.log` | `/var/log/openclaw*.log` |
-| 默认数据目录 | `/mnt/data/OpenClawMgr` | `/mnt/data/OpenClaw` |
+| 项目 | 路径 |
+| --- | --- |
+| 包名 | `luci-app-openclaw` |
+| UCI 配置 | `/etc/config/openclaw`（段 `openclaw`） |
+| procd 服务 | `/etc/init.d/openclaw` |
+| 主脚本 | `/usr/libexec/openclaw/cli.sh` |
+| 脚本目录 | `/usr/libexec/openclaw/` |
+| 运行用户 | `openclaw` |
+| 运行目录 | `/tmp/.openclaw` |
+| 日志 | `/var/log/openclaw*.log` |
+| 默认数据目录 | `/mnt/data/OpenClaw` |
 
-因此**不需要** `replaces` / `conflicts` 声明，也不会出现
-`trying to overwrite ... owned by` 之类的文件冲突。两者的 Node 运行时、
-OpenClaw 程序与数据各自独立，**默认不共享任何文件**。
-
-> 例外：若两者指向同一个安装目录，会共用该目录下的 `openclaw.json`。
-> 此时需要留意旧包写回的废弃配置键，详见下文
-> [「与 iStoreOS 自带的 OpenClawMgr 共存」](#与-istoreos-自带的-openclawmgr-共存)。
+因为路径完全自持，**不需要** `replaces` / `conflicts` 声明，也不会出现
+`trying to overwrite ... owned by` 之类的文件冲突。
 
 > `usr/libexec/openclaw/cli.sh` 里那组 `install/start/stop/status/port/token`
-> **可选**接口；不装 iStore 也完全可用。
+> 是**可选**接口，纯 LuCI 使用场景用不到。
 
 ## 兼容性
 
@@ -80,13 +75,13 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 | 程序目录固定为 `<安装目录>/openclaw` | ✅ 页面上只读；分离存放需 SSH 写 UCI |
 | 一键备份与恢复 | ✅ 归档逐条安全校验 + 还原前自动快照 |
 | UCI 配置 `openclaw.main.*` | ✅ `base_dir`、`openclaw_dir`、`port`、`bind`、`enabled` … |
-| 控制接口 `install/start/stop/status/port/token` | ✅ `/usr/libexec/openclaw/cli.sh`（**可选**，iStore 若装了也能识别） |
+| 控制接口 `install/start/stop/status/port/token` | ✅ `/usr/libexec/openclaw/cli.sh`（**可选**） |
 
-## 稳定性设计（对齐 iStoreOS 并修正其缺陷）
+## 稳定性设计
 
-首要目标是「跑得稳」。本包独立实现，并参考 iStoreOS 的稳定性经验修正已知缺陷。
+首要目标是「跑得稳」。以下机制按「出错后果严重」的优先级逐条实现。
 
-### 借鉴 iStoreOS（保留）
+### 安全与健壮性机制
 
 | 机制 | 作用 |
 | --- | --- |
@@ -99,9 +94,9 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 | `--allow-unconfigured` | 允许网关在未完成初始化时先起来再配置 |
 | 条件化 `--force` | 仅当端口 `>1024` 且系统有 `lsof`/`fuser` 时才加 `--force`，避免端口冲突检查被跳过 |
 
-### 修正 iStoreOS（本版优化）
+### 已规避的常见缺陷
 
-| iStoreOS 的问题 | 本版做法 |
+| 常见问题 | 本版做法 |
 | --- | --- |
 | `stop_service` 用 `pgrep -f openclaw \| kill -9` —— 会误杀同名进程（含用户自己的 openclaw） | 只删 pidfile 并交回 procd，不做模糊匹配强杀 |
 | Node 压缩包缓存放在 `/tmp` —— OpenWrt 的 tmpfs 就是内存，几百 MB 直接吃 RAM | 缓存改到 `$BASE_DIR/cache/`，落在数据盘 |
@@ -263,33 +258,23 @@ openclaw.sh backup-path
 openclaw.sh restore <文件名> [--no-safety]
 ```
 
-### 8. iStoreOS 25.12.5 / OpenWrt 25.12 安装注意事项
+### 8. OpenWrt 25.12 / iStoreOS 25.12.5 安装注意事项
 
 iStoreOS 25.12.x 基于 OpenWrt 25.12，包管理器是 **apk-tools v3**，请安装：
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.8.45-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.8.47-r1.apk
 ```
 
 **不要**装 `...-v2.apk` —— 那是 apk-tools 2.x / Alpine 的格式，不是 OpenWrt 25.12 的
 ADB（APK v3）格式，装错会报 `unexpected end of file`。
 
-**本包与 iStoreOS 自带的 `luci-app-openclawmgr` 完全独立**，文件路径没有任何重叠
-（见开头对照表），因此：
+本包的 UCI 配置、服务、脚本、运行用户与数据目录全部使用 `openclaw` 命名，
+路径完全自持（见开头表格），因此：
 
-- **不需要**先卸载 `luci-app-openclawmgr`，两者可以共存；
-- 元数据里也**不再声明** `replaces` / `conflicts`，不会出现
+- 元数据里**不声明** `replaces` / `conflicts`，不会出现
   `trying to overwrite ... owned by` 的冲突错误；
-- 两者各自安装 Node.js 与 OpenClaw，**数据目录也不同**
-  （旧包 `/mnt/data/OpenClawMgr`，本包 `/mnt/data/OpenClaw`）。
-
-如果你希望彻底不保留旧包，可以自行卸载：
-
-```sh
-apk del luci-app-openclawmgr
-```
-
-> 注意：卸载旧包**可能连带删除它自己的数据目录**。若要保留，先自行备份。
+- 与系统内其他 OpenClaw 组件各自安装 Node.js 与 OpenClaw，数据目录互不影响。
 
 本版本同时修正了 post-install 脚本首行缺少 `#!` 导致的 `execve: Exec format error`。
 
@@ -373,13 +358,13 @@ python3 scripts/build_apk.py
 ### apk（OpenWrt 25.12+ / apk-tools 3.x）
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.8.45-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.8.47-r1.apk
 ```
 
 ### ipk（opkg）—— **OpenWrt 24.10 及更早、iStoreOS 等 opkg 系统**
 
 ```sh
-opkg install luci-app-openclaw_1.8.45_all.ipk
+opkg install luci-app-openclaw_1.8.47_all.ipk
 ```
 
 在 LuCI / iStore 界面里也可以直接「手动上传安装」这个 ipk。
@@ -403,7 +388,7 @@ opkg install luci-app-openclaw_1.8.45_all.ipk
 ### .run 自解压（无需包管理器）
 
 ```sh
-sh luci-app-openclaw-1.8.45.run
+sh luci-app-openclaw-1.8.47.run
 ```
 
 ### 集成到固件 / SDK 编译
@@ -418,30 +403,23 @@ make package/luci-app-openclaw/compile V=s
 ### 自行生成安装包（无需 SDK）
 
 ```sh
-python3 scripts/build_apk.py --version 1.8.45 --release 1 --sign
+python3 scripts/build_apk.py --version 1.8.47 --release 1 --sign
 python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 / ipk）
 ```
 
-### 与 iStoreOS 自带的 OpenClawMgr 共存
+### 废弃配置键的自动清理
 
-本插件（`luci-app-openclaw`）与 iStoreOS 自带的 `luci-app-openclawmgr` **完全独立**：
-UCI 配置分别是 `/etc/config/openclaw` 与 `/etc/config/openclawmgr`，服务名与数据目录
-也不同，两者可以同时安装。
+OpenClaw 2026.10 起删除了 `gateway.controlUi.allowInsecureAuth`、
+`gateway.controlUi.dangerouslyDisableDeviceAuth`、
+`gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback` 这三个键。
 
-**但它们可能共用同一份 `openclaw.json`**（位于 `<安装目录>/home/.openclaw/`）。
-旧版 openclawmgr 的 `ensure_gateway_config` 每次启动、停止、安装或打开管理页，都会写入
-`gateway.controlUi.allowInsecureAuth`、`dangerouslyDisableDeviceAuth`、
-`dangerouslyAllowHostHeaderOriginFallback` 这三个键。
+配置里只要出现任意一个，整份配置就会被判为无效（`Unrecognized key`），
+**网关拒绝启动**。如果你的 `<安装目录>/home/.openclaw/openclaw.json`
+来自较早版本、可能带着这些键，本插件会在安装和「一键修复」时自动检测并清理
+（仅在已安装 OpenClaw >= 2026.10.0 时执行，清理前会备份成
+`openclaw.json.legacy.bak.<时间戳>`）。
 
-OpenClaw 2026.10 起已删除这三个键。配置里只要出现任意一个，整份配置就会被判为无效
-（`Unrecognized key`），**网关拒绝启动**。手动删掉一次没有用 —— 下次打开 openclawmgr
-的管理页又会被写回来。
-
-本插件会在安装和「一键修复」时自动检测并清理这三个键（仅在已安装
-OpenClaw >= 2026.10.0 时执行，清理前会备份成 `openclaw.json.legacy.bak.<时间戳>`）。
-
-如果网关仍然起不来，请查看 `<安装目录>/home/.openclaw/openclaw.json` 里是否还有这三个键；
-也可以先停用 openclawmgr，再启动本插件的服务。
+如果网关仍然起不来，请查看该配置文件里是否还有这三个键。
 
 ## 使用
 

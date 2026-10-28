@@ -845,13 +845,13 @@ EOF
 		"$OC" config set gateway.auth.token "$token" >/dev/null 2>&1
 	fi
 
-	# 复用的本机配置可能带着旧版 openclawmgr 写入的、2026.10 已删除的
+	# 复用的本机配置可能带着较早版本写入的、2026.10 已删除的
 	# gateway.controlUi.* 键；只要残留一个，整份配置就判为无效、网关拒绝启动。
 	# 显式传 $conf / $OC_DIR / $NODE_BIN：本次安装可能用 --base-dir 或
 	# --openclaw-dir 装到与 UCI 不同的目录，不能让函数去猜。
 	oc_purge_legacy_controlui "$conf" "$OC_DIR" "$NODE_BIN"
 	if [ "${OC_LEGACY_CONTROLUI_REMOVED:-0}" -gt 0 ] 2>/dev/null; then
-		ilog "已移除 ${OC_LEGACY_CONTROLUI_REMOVED} 个 2026.10 不再支持的配置键（gateway.controlUi.*，旧版 openclawmgr 写入）"
+		ilog "已移除 ${OC_LEGACY_CONTROLUI_REMOVED} 个 2026.10 不再支持的配置键（gateway.controlUi.*，较早版本写入）"
 	fi
 	oc_fix_perms
 	ilog "配置文件: $conf"
@@ -1101,24 +1101,15 @@ main() {
 	# 官方安装器在升级已有安装后必跑 doctor；放在写配置之前，
 	# 让它先修好 OpenClaw 自己的 schema，我们再补自己的键。
 	stage_begin "让 OpenClaw 修正自身配置（doctor --fix）"
-	# 先清掉历史遗留的 openclaw-<uid> 临时目录。
-	# 背景：这些目录由**某个 uid** 创建，而 oc_fix_perms 的 chown -R 会把
-	# 属主改成网关用户；此后那个 uid 再运行就会报
-	#   Unsafe fallback OpenClaw temp dir "...openclaw-0"; has owner uid 998,
-	#   expected uid 0
-	# 并拒绝 doctor / gateway status / 插件安装。
-	# 它们只是缓存，删掉无害，正确 uid 下次运行会重建。
-	# 只清 openclaw-<数字>：同层还有 openclaw-update-report-*、
-	# openclaw-update-run-handoff-*、openclaw-<date>.log，
-	# 用 openclaw-* 会把它们一起删掉（Hermes 实测误删 9 个目录）。
-	# 两个位置都要清：$base/tmp（网关 TMPDIR，root 的 fallback 落在这里）
-	#   与 $HOME_DIR/.cache（OpenClaw 自己的 cache 目录）。
-	for _root in "$BASE_DIR/tmp" "$HOME_DIR/.cache"; do
+	# 升级前只清理真正的一次性临时根；**绝不清 $HOME_DIR/.openclaw/tmp**。
+	# OpenClaw 2026.10 起把 state.<hash>.lock 放在 state_dir/tmp/openclaw-<uid>/，
+	# 这不是缓存而是网关 / sqlite-maintenance 共用的状态所有权锁。
+	# 误删会让升级后数据库留下死租约，网关和 doctor 都报 offline maintenance。
+	for _root in "$BASE_DIR/tmp"; do
 		[ -d "$_root" ] || continue
 		for _d in "$_root"/openclaw-*; do
 			[ -d "$_d" ] || continue
-			# 必须是 openclaw-<纯数字>：同层还有 openclaw-<date>.log，
-			# 它同样以数字开头，只靠 glob 挡不干净。
+			# 必须是 openclaw-<纯数字>；日期日志等文件不能被误删。
 			oc_is_tmp_root "$_d" || continue
 			rm -rf "$_d" 2>/dev/null || true
 		done

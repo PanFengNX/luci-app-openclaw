@@ -225,7 +225,7 @@ fi
 # 7 ------------------------------------------------------------- legacy config keys
 # 2026.10 删除了 gateway.controlUi 下的三个认证键，配置里残留任意一个都会让
 # 整份 openclaw.json 判为无效（Unrecognized key），网关直接拒绝启动。
-# 旧版 iStoreOS openclawmgr 每次启动/停止/打开管理页都会把它们写回来，
+# 旧版管理程序每次启动/停止/打开管理页都会把它们写回来，
 # 所以这里每次修复都检查一遍。版本门禁在 oc_purge_legacy_controlui 内部：
 # 2026.10 之前的版本里这些键仍然合法，不删。
 # 配置文件不存在时第 6 步已经报过 WARN，这里无事可做。
@@ -346,13 +346,33 @@ fi
 # 因此只记 WARN，不让整次 repair 判失败。
 # 等价于 openclaw/cli.sh 的 installed()：程序与 Node 都可执行才算已安装。
 if [ -x "$OB" ] && [ -x "$NB" ]; then
+	# 先清陈旧的状态所有权锁：OpenClaw 10.x 的 doctor / 网关 / sqlite 维护
+	# 共用一把锁，维护进程被打断后数据库里会留下指向死 pid 的租约，
+	# 于是两边都报 "undergoing offline maintenance"，修复也修不动。
+	# 只有确认持有者已死才删，活锁一律不动。
+	if command -v oc_clear_stale_state_lock >/dev/null 2>&1; then
+		if oc_clear_stale_state_lock "$(oc_state_dir)"; then
+			say OK "状态锁检查通过（无活锁占用）"
+		else
+			say WARN "状态仍被活动进程占用，若持续失败请先停止网关再重试"
+		fi
+	fi
+
 	doc_out="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
 		oc_timeout 300 "$OB" doctor --fix 2>&1)"
 	doc_rc=$?
 	if [ "$doc_rc" = "0" ]; then
 		say FIX "OpenClaw 自检修复完成"
 	else
-		say WARN "OpenClaw 自检修复未完全成功（退出码 $doc_rc）"
+		# 维护锁是 doctor 唯一「等一等就好」的失败原因，单独说清楚，
+		# 否则用户只会看到一行退出码。
+		case "$doc_out" in
+			*"offline maintenance"*|*"sqlite-maintenance"*)
+				say WARN "状态库正在做离线维护，需等维护进程结束再试：
+$(printf '%s\n' "$doc_out" | grep -iE 'maintenance|retry' | head -n 3)" ;;
+			*)
+				say WARN "OpenClaw 自检修复未完全成功（退出码 $doc_rc）" ;;
+		esac
 	fi
 	# 保留最后若干行，便于定位 doctor 修不了的问题。--json 下不能直接
 	# printf 到 stdout（会破坏 finish 输出的 JSON），统一交给 say 收集。
