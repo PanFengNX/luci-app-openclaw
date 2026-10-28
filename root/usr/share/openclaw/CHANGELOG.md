@@ -1,8 +1,101 @@
-<!-- version: 1.8.47 -->
+<!-- version: 1.8.48 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.48
+
+**新增：插件自身可从 GitHub 更新（检查 → 手动确认 → 下载校验 → 安装 / 回滚）。
+同时把 1.8.47 关于「状态锁」的修复方向纠正过来。**
+
+### 1. 新增插件自更新（检查 + 手动确认 + 回滚）
+
+安装页新增「插件更新」区块，只认固定仓库 `PanFengNX/luci-app-openclaw`：
+
+- **检查**：读 latest Release，逐段数字比较版本（`1.8.9 < 1.8.10`，支持 `v`
+  前缀，tag 解析不出来就不判为有更新）；候选结果存成**一份原子快照**
+  （写临时文件后 `rename`），安装只读这一份，不会读到「A 版本的版本号 +
+  B 版本的资产名 + 第三个 digest」这种撕裂组合。
+- **资产匹配**：只接受当前平台的确切文件名（apk-tools v3 用
+  `luci-app-openclaw-<ver>-r<数字>.apk`，opkg 用
+  `luci-app-openclaw_<ver>_all.ipk`）；`-v2` / `-signed` 之类变体一律拒绝。
+- **必须校验**：Release 的资产 digest 或校验和文件里必须能找到本资产的
+  SHA256，**找不到就拒绝安装**（不回退到「来源可信，所以放行」）。下载有连接/
+  总超时、8MiB 上限，落在 0700 私有目录。**下载物只交给 apk/opkg，不执行**。
+- **先备份再动手**：安装前把当前已安装文件打成回滚包并写 `.sha256` sidecar；
+  备份失败就不下载、不安装。回滚时先校验 sidecar、复制成私有快照、再校验
+  归档条目（拒绝绝对路径 / `..` / 符号链接 / 硬链接 / 设备），然后
+  `apk del` / `opkg remove` 再按清单还原 —— 不用 `tar -x` 直接覆盖，
+  那样会留下新版本独有文件造成新旧混杂。
+- **不静默升级**：检查、安装、回滚都是用户点击触发；安装/回滚是 POST +
+  二次确认。后台 worker 记录**真实 pid**，锁用 `mkdir` 原子获取，
+  owner 已死才回收，无 pid 的锁一律不抢（否则会与刚建锁的 worker 并行）。
+
+### 2. 纠正 1.8.47 的状态锁处理（这条是上一版的方向性错误）
+
+1.8.47 加了「读锁里的 pid，`kill -0` 失败就 `rm -f` 锁文件」。查官方
+gateway-lock 文档后确认这是错的：
+
+- 锁在 `$OPENCLAW_STATE_DIR/tmp/openclaw-<uid>/state.<hash>.lock`；
+- 崩溃 / SIGKILL 之后，启动过程**会自行回收**确认已死的 owner；
+- 需要人介入时必须 `openclaw gateway recover-lock` 拿 fingerprint，
+  再 `--confirm <fingerprint>`，由它在**独占状态所有权**下同时清 sidecar
+  与 SQLite owner lease；
+- 官方原文明确写着不要手工删锁文件（*instead of removing lock files by hand*）。
+
+只删 sidecar 不清 lease，会让数据库留着指向死 pid 的租约，而后续连
+recover-lock 要核对的指纹对象都没了 —— 状态可能更僵。
+
+**现在的做法**：`oc_clear_stale_state_lock()` 只调用官方检查命令，
+把 fingerprint 打进日志给人确认；**任何情况下都不删锁、不自动 `--confirm`**。
+检查不通过时 repair 跳过本轮 `doctor`（否则 doctor 会去抢同一把锁，
+把「维护中」吞成普通 WARN）。启动路径仍只清真正的一次性临时根
+（`$base/tmp`、`/tmp`），永不触碰 `state_dir/tmp`。
+
+### 3. 网关凭据判定收敛到一处（修 SecretRef 误判的根因）
+
+之前同一份配置形状在 init / repair / install / cli 各写一遍，用了三种解析器
+（jsonfilter、匹配大括号、grep），结论互相打架。现在统一到
+`/usr/libexec/openclaw/credential.sh`，产出五态：
+
+| 状态 | 含义 | 是否启动 |
+| --- | --- | --- |
+| `PLAIN` | 明文凭据 | 是（无空白才导出到环境变量） |
+| `REF` | `source` + `id`/`name` 的 SecretRef | 是（**不导出**，网关自己解析） |
+| `BADREF` | 有 `source` 缺 `id`，或结构化值没有 `source`（如 `{}`） | 否 |
+| `MISSING` | null / 空串 / 字段缺失 | 否（token 模式） |
+| `UNREAD` | 配置读不了 / 解析器缺失 / JSON 坏 | 否 |
+
+顺带修掉两个真实缺陷：
+
+- `grep '[[:space:]]'` **检测不到换行**（grep 按行匹配，LF 是分隔符）。
+  含 LF 的明文因此会被判成「干净」导出到环境变量，实际已被截断。改为
+  空格/Tab 用 `case`、CR 用运行时构造、LF 用 `wc -l`，三类分别检查。
+- `jsonfilter ... | head -n1` 会把含换行的凭据静默截成第一行，
+  「半截凭据」看起来仍是合法明文。改为完整取回再判空白。
+
+密码模式同样按官方建议走环境变量，不放 `--password`（会出现在 `ps` 里）；
+`--auth` 跟随配置里的 `gateway.auth.mode`（none/token/password/trusted-proxy），
+未知值直接拒绝启动，不再静默钉死成 token。
+
+### 4. 自动 doctor 不再以 root 跑
+
+schema 落后时自动执行的 `doctor --fix` 以前是 root 直跑，会往 state 里写
+root 属主文件（网关随后 EACCES），且看不到服务用户的插件。改为
+`su -s /bin/sh $OC_USER -c ...` 以服务用户执行，脚本体固定、路径走位置参数
+（不拼进 shell 代码）。
+
+### 5. 其它
+
+- `usr/bin/openclaw` 的 PATH 在 source 库**之前**就补齐 `/sbin:/usr/sbin`，
+  否则非 root 服务用户找不到 `/sbin/uci`。
+- `repair.sh` / `install.sh` 改用共享判定，只在 `MISSING` 时补 token，
+  不再覆盖已有的 `REF`。
+- 前端更新状态轮询有上限（连续 3 次失败或 5 分钟即停并恢复按钮），
+  不再出现永久转圈。
+
+回归断言 345 → 356 项，另新增凭据形状矩阵 19 项（在目标 shell 下实跑）。
 
 ## 1.8.47
 
@@ -28,8 +121,13 @@ by sqlite-maintenance process <pid>; retry when it finishes.
 而那个 pid 早已不存在 —— 网关拒绝启动，`doctor` 也拒绝执行，形成死锁。
 
 **修复**：清理函数只扫真正的临时根（`$base/tmp` 与 `/tmp`），永不触碰
-`state_dir/tmp`；另外新增 `oc_clear_stale_state_lock()`，只在锁里记录的
-pid **确认已死**时删除锁文件，活锁一律不动（并在日志里说明）。
+`state_dir/tmp`。
+
+> ⚠️ 1.8.48 修正了本节的一个错误方向：当时还加了「pid 确认已死就删锁文件」，
+> 那是错的。OpenClaw 官方 gateway-lock 文档明确要求不要手工删锁 —— 只删
+> sidecar 不会清掉 SQLite 里的 owner lease，反而让后续连 recover-lock 要核对
+> 的对象都没了。1.8.48 起改为只调用官方 `gateway recover-lock` 做检查，
+> 任何状态下都不删锁文件。
 
 ### 2. SecretRef 形式的 token 被误判为「没有 token」
 

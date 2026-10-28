@@ -247,7 +247,23 @@ else
 	skip "缺少 tools/tests/cloud-cron.sh"
 fi
 
-head_ "7d. 控制器 Lua 语法（一个语法错误会让所有页面 500）"
+head_ "7d. 网关凭据判定矩阵（SecretRef / 明文 / 坏引用 / 空白控制字符）"
+# 为什么必须有：同一个配置形状在四种解析器里出过三种结论 —— 对象被当引用
+# 放行、mode:"token" 被当凭据、含换行的明文被 head 截断后导出到环境变量。
+# 静态断言证明不了这些分支真的分流，必须跑行为矩阵。
+if [ -f tools/tests/cred-matrix.sh ]; then
+	if out="$(sh tools/tests/cred-matrix.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "cred-matrix.sh 全部断言通过"
+	else
+		bad "cred-matrix.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/cred-matrix.sh"
+fi
+
+head_ "7e. 控制器 Lua 语法（一个语法错误会让所有页面 500）"
 if [ -z "$PY" ]; then
 	skip "找不到 python"
 elif [ ! -f tools/tests/lua-syntax.py ]; then

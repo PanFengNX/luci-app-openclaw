@@ -29,6 +29,7 @@ done
 
 "$PY" - "$PROJ" <<'PYEOF'
 import pathlib
+import os
 import re
 import subprocess
 import sys
@@ -192,12 +193,19 @@ check('limits core="unlimited unlimited"' not in init3, '不再用双 unlimited�
 # BUG-8：pidfile 必须有人写。
 check('procd_set_param pidfile' in init3, 'procd 维护 pidfile')
 
-# BUG-9：SecretRef 不能进环境变量。
-check('token_is_secretref' in init3, 'init.d 识别 SecretRef')
-check('OPENCLAW_GATEWAY_TOKEN="$token" \\' not in init3,
-      '不再无条件导出 token（SecretRef 会污染 environ）')
+# BUG-9：SecretRef 不能进环境变量，必须通过共享结构化判定器判断，不能靠 init 内的形状猜测。
+credlib = (proj / 'root/usr/libexec/openclaw/credential.sh').read_text(encoding='utf-8')
+check('credential.sh' in init3 and 'oc_credential_state' in init3,
+      'init.d source 共享凭据判定库')
+check('token_is_secretref' not in init3, 'init.d 移除旧的 SecretRef 形状猜测')
+check("OC_CRED_STATE=REF" in credlib and "OC_CRED_STATE=BADREF" in credlib,
+      '共享判定区分有效引用与坏引用')
+check('token_env="OPENCLAW_GATEWAY_TOKEN=$token"' in init3,
+      '仅在 PLAIN 明文分支准备 gateway token env')
 
-# BUG-5：tasklog 追加前必须轮转。
+# Hermes P1-2：schema-heal 的 doctor 必须降权到服务用户，不能以 root 写 state。
+# 注意这个检查必须放在 func() 定义之后；函数定义在"行为断言"段落里。
+
 check('oc_log_rotate "$OC_TASKLOG"' in chl3, 'channels.sh 写 tasklog 前轮转')
 check(mdl3.count('oc_log_rotate "$OC_TASKLOG"') >= 2,
       'models.sh 写 tasklog 前轮转', '实际 %d 处' % mdl3.count('oc_log_rotate "$OC_TASKLOG"'))
@@ -240,6 +248,16 @@ def func(name):
     raise AssertionError('取不到函数 ' + name)
 
 
+# Hermes P1-2：schema-heal 的 doctor 必须降权到服务用户，不能以 root 写 state。
+_schema = func('oc_schema_heal')
+check('su -s /bin/sh "$OC_USER" -c' in _schema,
+      'schema-heal 通过 su 降权到服务用户')
+check('OPENCLAW_STATE_DIR="$2"' in _schema and 'OPENCLAW_CONFIG_PATH="$2/openclaw.json"' in _schema,
+      'doctor 以一致的 state/config 路径运行')
+check('cd "$1"' in _schema and 'export HOME="$1"' in _schema,
+      'doctor cwd 与 HOME 都在服务用户家目录')
+
+
 def msys_tmp():
     """MSYS 视角下 /tmp 的真实 Windows 路径。"""
     try:
@@ -272,9 +290,38 @@ fake_node.write_text(NL.join([
 calls = work / 'calls.txt'
 
 runner = work / 'heal.sh'
+# 用 PATH 里的可执行假 su，而不是在 runner 中定义函数：
+# `command -v su` 在 dash/ash 下对函数的识别并不一致，曾导致测试实际调用
+# 系统 su，Windows/MSYS 没有 openclaw 用户，于是 doctor 分支被静默跳过。
+su_bin = work / 'bin'
+su_bin.mkdir(parents=True, exist_ok=True)
+fake_su = su_bin / 'su'
+fake_su.write_text(NL.join([
+    '#!/bin/sh',
+    '_script=""; _user=""; _have_c=0',
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in',
+    '    -s) shift 2 ;;',
+    '    -c) _have_c=1; _script="$2"; shift 2 ;;',
+    '    -) shift ;;',
+    '    *) if [ -z "$_user" ]; then _user="$1"; shift; else break; fi ;;',
+    '  esac',
+    'done',
+    '[ "$_have_c" = "1" ] || exit 1',
+    'printf "su-as=%s\\n" "${_user:-?}" >>"$DOCTOR_CALLS"',
+    'sh -c "$_script" "$@"',
+    '',
+]), encoding='utf-8', newline=NL)
+os.chmod(fake_su, 0o755)
 runner.write_text(NL.join([
     '#!/bin/sh',
     'logger() { :; }',
+    # OC_USER 是 init.d 顶部的全局变量，func() 只截取函数体，不会带上它。
+    # 漏了这句时 su 收到的是空用户名：
+    #   su -s /bin/sh "" -c <script> sh <args...>
+    # 假 su 会把空串当成未赋值并继续吃掉后面的 "sh"，于是 $0/$1.. 全部错位，
+    # "doctor 以 openclaw 身份执行" 之类的断言就假失败（实测踩过）。
+    'OC_USER=openclaw',
     func('oc_schema_heal'),
     'oc_schema_heal "$1" "$2" "$3" "$4" "$5"',
     '',
@@ -299,7 +346,7 @@ def heal(log_body=None, marker_exists=False):
         mk.write_text('', encoding='utf-8')
     if calls.exists():
         calls.unlink()
-    env = {'PATH': '/usr/bin:/bin', 'DOCTOR_CALLS': str(calls)}
+    env = {'PATH': P(su_bin) + ':/usr/bin:/bin', 'DOCTOR_CALLS': P(calls)}
     subprocess.run(['sh', P(runner), P(base), P(work / 'state'), P(work / 'home'),
                     P(fake_node), P(work / 'entry.mjs')],
                    capture_output=True, text=True, env=env, timeout=120)
@@ -323,6 +370,12 @@ check(heal(log_body='run openclaw doctor --fix' + NL) == 0,
 check(heal(log_body=SCHEMA_LOG) == 1, '两条特征都在 → 调用一次 doctor')
 check(heal(log_body=SCHEMA_LOG, marker_exists=True) == 0,
       '本次开机已修过 → 不再调用（防死循环）')
+
+# doctor 必须以服务用户身份执行（不能以 root 写 state）。
+_ = heal(log_body=SCHEMA_LOG)
+_calls = calls.read_text(encoding='utf-8') if calls.exists() else ''
+check('su-as=openclaw' in _calls, 'doctor 经 su 以 openclaw 身份执行')
+check('doctor --fix --force' in _calls, 'doctor 参数完整（--fix --force）')
 
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)

@@ -770,13 +770,19 @@ check("typeof r.data === 'object'" in _dp,
       "dpApply 认得对象形式的 data（否则删除密码永远读取中）")
 
 initd = (proj / 'root/etc/init.d/openclaw').read_text(encoding='utf-8')
-# token 判据必须放行 SecretRef：token 是 {"source":"store",...} 时上一段会清空
-# 变量，只判 [ -n "$token" ] 会让网关永远起不来，日志却谎称"未生成 token"。
-check("token_is_secretref" in initd, "init.d 认得 SecretRef 形式的 token")
-_st = initd[initd.index('gateway.auth.token') - 400:]
-_st = _st[:_st.index('服务用户是启动前提')]
-check('"$token_is_secretref" != "1"' in _st,
-      "token 判据放行 SecretRef（否则升级 10.x 后拒绝启动）")
+# 凭据判定已收敛到唯一的 credential.sh：init.d 只 source 它、不自己再写一份
+# 形状判断。这里断言的是"用的是结构化判定"，而不是某个历史变量名 ——
+# 早先的断言绑定 token_is_secretref，实现换代后它就变成了过期断言。
+check("credential.sh" in initd, "init.d 使用共享凭据判定库")
+check("oc_credential_state" in initd, "init.d 调用结构化凭据判定")
+check("token_is_secretref" not in initd,
+      "init.d 不再保留旧的单一变量形状判断（那正是 SecretRef 误判的根因）")
+cred = (proj / 'root/usr/libexec/openclaw/credential.sh').read_text(encoding='utf-8')
+for _s in ('REF', 'BADREF', 'MISSING', 'UNREAD'):
+    check("OC_CRED_STATE=%s" % _s in cred, "凭据判定产出 %s" % _s)
+check("'{'*" in cred and "source" in cred,
+      "结构化值必须带 source 才算引用（空对象 {} 不能放行）")
+check("OC_CRED_ENV" in cred, "明文与引用分开回传，引用不会进环境变量")
 
 lib = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
 _sv = lib[lib.index("oc_sweep_stale_tmp()"):]
@@ -798,9 +804,27 @@ if _iw_loop:
     check("state_dir" not in _iw_loop.group(1),
           "init.d 清理函数同样不碰 state_dir/tmp")
 check("oc_clear_stale_state_lock" in lib,
-      "库里有陈旧状态锁清理函数（活锁不动，死锁才删）")
+      "库里有状态锁检查函数（只调官方 recover-lock，绝不手工删锁）")
+_lk = lib[lib.index("oc_clear_stale_state_lock()"):]
+_lk = _lk[:_lk.index(NL + "}" + NL)]
+_lk_code = NL.join(l.split("#", 1)[0] for l in _lk.splitlines())
+check('recover-lock' in _lk_code, "检查走官方 openclaw gateway recover-lock")
+check('rm -f' not in _lk_code and 'rm -rf' not in _lk_code,
+      "检查函数绝不删锁文件（只删 sidecar 会留下 DB lease，官方明确禁止手工删）")
+# 只看**真正以命令形式调用 CLI 的那一行**：既不是 oc_warn 提示，
+# 也不是 `recover-lock| $_l` 这种把官方输出转发进日志的循环。
+_lk_exec = [l for l in _lk_code.splitlines()
+            if 'recover-lock' in l
+            and not l.lstrip().startswith('oc_warn')
+            and 'recover-lock|' not in l]
+check(len(_lk_exec) == 1, "只调用一次官方 recover-lock（inspect）",
+      "实际 %d 行" % len(_lk_exec))
+check(not any('--confirm' in l for l in _lk_exec),
+      "执行行不含 --confirm（绝不自动化人工确认步骤）")
 rs = (proj / 'root/usr/libexec/openclaw/repair.sh').read_text(encoding='utf-8')
-check("oc_clear_stale_state_lock" in rs, "一键修复会先清陈旧状态锁")
+check("oc_clear_stale_state_lock" in rs, "一键修复会先做官方状态锁检查")
+check(rs.count('oc_clear_stale_state_lock "$(oc_state_dir)"') == 1,
+      "repair 只调用一次检查（重复调用会让 doctor 与检查抢同一把锁）")
 check("offline maintenance" in rs, "doctor 失败时单独解释维护锁")
 
 cs = (proj / 'root/usr/libexec/openclaw/cloud.sh').read_text(encoding='utf-8')

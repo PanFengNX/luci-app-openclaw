@@ -42,6 +42,12 @@ sed "s#/usr/libexec/openclaw/#$SBX/libexec/#g" \
 	"$PROJ/root/usr/libexec/openclaw/lib.sh" >"$SBX/libexec/lib.sh"
 sed "s#/usr/libexec/openclaw/#$SBX/libexec/#g" \
 	"$PROJ/root/usr/libexec/openclaw/backup.sh" >"$SBX/libexec/backup.sh"
+# lib.sh 现在从同目录加载 credential.sh（凭据判定唯一实现）。复制副本时必须
+# 一起带上，否则副本里的 lib.sh 会 fail-closed，导致"正常归档被拒绝"的假失败。
+# 这不是放宽断言：凭据判定与归档校验无关，缺文件只是测试环境不完整。
+if [ -f "$PROJ/root/usr/libexec/openclaw/credential.sh" ]; then
+	cp "$PROJ/root/usr/libexec/openclaw/credential.sh" "$SBX/libexec/credential.sh"
+fi
 
 # 让 rundir 指向测试目录：oc_backup_resolve 只接受 rundir 下的绝对路径
 cat >>"$SBX/libexec/lib.sh" <<EOF

@@ -25,9 +25,26 @@ uci_get() {
 json_get() {
 	local file="$1" expr="$2"
 	[ -f "$file" ] || return 0
-	command -v jsonfilter >/dev/null 2>&1 || return 0
-	jsonfilter -i "$file" -e "$expr" 2>/dev/null | head -n1
+	command -v jsonfilter >/dev/null 2>&1 || return 127
+	# **不要**接 head -n1：值里含换行时 jsonfilter 输出多行，head 会静默截成
+	# 第一行，截断后的"半截凭据"看起来仍是合法明文，会被当成完整值用下去。
+	# 完整取回，交给调用方判断（端口/绑定等纯数字值本来就不含换行）。
+	jsonfilter -i "$file" -e "$expr" 2>/dev/null
 }
+
+# ---------------------------------------------------------------- 凭据判定
+# 与 repair / install 共用同一个无副作用的结构化判定器；不 source lib.sh，避免
+# 引入其载入期副作用（rundir、trap）。缺文件时禁止启动，绝不退回形状猜测。
+OC_CREDENTIAL_LIB="/usr/libexec/openclaw/credential.sh"
+if [ -r "$OC_CREDENTIAL_LIB" ]; then
+	. "$OC_CREDENTIAL_LIB"
+else
+	oc_credential_state() {
+		OC_CRED_STATE=UNREAD
+		OC_CRED_ENV=""
+		OC_CRED_DESC="缺少凭据判定库 $OC_CREDENTIAL_LIB"
+	}
+fi
 
 oc_base_dir() {
 	local d
@@ -290,17 +307,35 @@ oc_schema_heal() {
 	mkdir -p /tmp/.openclaw 2>/dev/null
 	: >"$marker" 2>/dev/null
 	logger -t openclaw "状态库 schema 版本落后（日志：$log），自动执行 doctor --fix --force"
-	(
-		export HOME="$home"
-		export OPENCLAW_STATE_DIR="$state_dir"
-		export OPENCLAW_CONFIG_PATH="${state_dir}/openclaw.json"
-		if command -v timeout >/dev/null 2>&1; then
-			timeout 300 "$node_bin" "$entry" doctor --fix --force
-		else
-			"$node_bin" "$entry" doctor --fix --force
-		fi
-	) >/dev/null 2>&1
-	logger -t openclaw "doctor --fix --force 结束（rc=$?），继续启动"
+	# 必须以**服务用户**执行，不能以 root 直跑：
+	#   * doctor 会在 state/ 下新建或重写 sqlite、日志、插件目录。root 跑出来的
+	#     文件属主是 root，网关随后 EACCES 或只读 —— 典型的"修了反而起不来"；
+	#   * root 上下文看不到服务用户的扩展插件（openclaw 会以
+	#     "suspicious ownership ... expected uid=0 or root" 把它们全部判为候选
+	#     无效），它据此做的 reconcile 可能把插件记录删掉。
+	# 固定脚本体；路径与命令一律走位置参数，不拼进 shell 代码（避免注入）。
+	# $1=家目录 $2=state 目录 $3=node bin 目录，其余为命令。
+	# 注意 cwd 用家目录而不是 state：doctor 会往 cwd 里落临时文件，
+	# state 目录里落下的任何东西都必须由服务用户自己创建。
+	if command -v su >/dev/null 2>&1; then
+		su -s /bin/sh "$OC_USER" -c '
+			cd "$1" 2>/dev/null || cd /tmp || exit 1
+			export HOME="$1"
+			export OPENCLAW_STATE_DIR="$2"
+			export OPENCLAW_CONFIG_PATH="$2/openclaw.json"
+			export PATH="$3:/usr/sbin:/usr/bin:/sbin:/bin"
+			shift 3
+			if command -v timeout >/dev/null 2>&1; then
+				exec timeout 300 "$@"
+			else
+				exec "$@"
+			fi
+		' sh "$home" "$state_dir" "${node_bin%/*}" \
+			"$node_bin" "$entry" doctor --fix --force >/dev/null 2>&1
+	else
+		logger -t openclaw "缺少 su，跳过自动 doctor --fix（请手动以 $OC_USER 执行）"
+	fi
+	logger -t openclaw "doctor --fix --force 结束（以 $OC_USER 执行），继续启动"
 	return 0
 }
 
@@ -381,7 +416,8 @@ _sweep_stale_tmp() {
 
 start_service() {
 	local base nodedir globaldir home state_dir entry node_bin
-	local port bind token json_port json_bind json_token cfg envfile
+	local port bind token json_port json_bind cfg envfile
+	local authmode cred_state cred_desc pw_env authpw prc
 	local force_opt="" user_opt="" env_args=""
 
 	# 配置文件理论上由 postinst 从模板生成，但设备上可能被手工删掉 ——
@@ -411,21 +447,28 @@ start_service() {
 	# --- runtime values: JSON wins, UCI is the fallback
 	port="$(uci_get main.port 18789)"
 	bind="$(uci_get main.bind lan)"
-	token=""
 	json_port="$(json_get "$cfg" '@.gateway.port')"
 	json_bind="$(json_get "$cfg" '@.gateway.bind')"
-	json_token="$(json_get "$cfg" '@.gateway.auth.token')"
 	[ -n "$json_port" ] && port="$json_port"
 	[ -n "$json_bind" ] && bind="$json_bind"
-	[ -n "$json_token" ] && token="$json_token"
-	# token 可能是 SecretRef：{"source":"store","provider":"...","id":"..."}。
-	# 那是**引用**不是明文，绝不能当环境变量传下去 —— 塞进
-	# OPENCLAW_GATEWAY_TOKEN 会让 /proc/<pid>/environ 里常驻一段 JSON，
-	# 而网关拿它做认证必然失败。识别出来就清空，让网关自己走密钥库。
-	token_is_secretref=0
-	case "$token" in
-		'{'*'}') token_is_secretref=1; token="" ;;
-	esac
+
+	# auth.mode 缺省按 token；显式未知值拒绝，不能静默把用户配置改成另一种认证。
+	authmode_raw="$(json_get "$cfg" '@.gateway.auth.mode')"
+	if [ -z "$authmode_raw" ]; then
+		authmode="token"
+	else
+		case "$authmode_raw" in
+			token|password|none|trusted-proxy) authmode="$authmode_raw" ;;
+			*)
+				logger -t openclaw "拒绝启动：未知 gateway.auth.mode '$authmode_raw'（允许 token/password/none/trusted-proxy）"
+				return 1
+				;;
+		esac
+	fi
+	oc_credential_state "$cfg"
+	cred_state="$OC_CRED_STATE"
+	cred_desc="$OC_CRED_DESC"
+	token="$OC_CRED_ENV"
 
 	# --- safety: numeric, unprivileged port
 	case "$port" in
@@ -447,18 +490,42 @@ start_service() {
 		logger -t openclaw "OpenClaw 未安装（$globaldir 下找不到入口），请先安装运行环境"
 		return 1
 	}
-	# token 判据必须区分三种情况，不能只看变量是否为空：
-	#   1) 明文 token        -> 导出 OPENCLAW_GATEWAY_TOKEN，正常启动
-	#   2) SecretRef（{...}） -> 引用有效，网关自己去密钥库取，**必须允许启动**
-	#   3) 真的没有          -> fail closed
-	# 旧写法只有 [ -n "$token" ]，而 SecretRef 上一段刚把 token 清空，
-	# 于是第 2 种情况被当成第 3 种 —— 网关永远起不来，日志却说"未生成 token"，
-	# 而配置里明明有 token（是引用形式）。这是升级到 SecretRef 后才会踩到的坑。
-	if [ -z "$token" ] && [ "$token_is_secretref" != "1" ]; then
-		logger -t openclaw "未生成网关 token，拒绝启动"
-		logger -t openclaw "修复：/usr/libexec/openclaw/repair.sh   （或 LuCI「一键修复」）"
-		return 1
+	# 凭据门。判据来自 OC_CRED_STATE，四种失败各自一句文案 ——
+	# 现场最贵的成本是"从一条概括消息反推它卡在哪个分支"。
+	# 只有 mode=token 时才强制要求凭据；其它 mode 按配置走。
+	case "$cred_state" in
+		PLAIN|REF) ;;
+		MISSING)
+			if [ "$authmode" = "token" ]; then
+				logger -t openclaw "未配置网关凭据（gateway.auth.token 缺失，配置 $cfg），拒绝启动"
+				logger -t openclaw "修复：/usr/libexec/openclaw/repair.sh   （或 LuCI「一键修复」）"
+				return 1
+			fi
+			;;
+		BADREF)
+			if [ "$authmode" = "token" ]; then
+				logger -t openclaw "网关凭据引用不完整（$OC_CRED_DESC，配置 $cfg），拒绝启动"
+				logger -t openclaw "修复：检查 gateway.auth.token 的 source/id，或用 repair.sh 重建"
+				return 1
+			fi
+			;;
+		UNREAD)
+			# 解析失败时无法可信读取 auth.mode；即使配置声称 none/password，也拒绝。
+			logger -t openclaw "无法读取/解析配置 $cfg（$cred_desc），拒绝启动"
+			return 1
+			;;
+		*)
+			logger -t openclaw "拒绝启动：内部凭据判定状态无效"
+			return 1
+			;;
+		esac
+	if [ "$authmode" = "token" ]; then
+		case "$cred_state" in PLAIN|REF) ;; *) return 1 ;; esac
 	fi
+	[ "$cred_state" = "PLAIN" ] && [ -n "$cred_desc" ] && \
+		logger -t openclaw "提示：$cred_desc"
+	# 引用式凭据（REF）绝不导出到环境变量：那会让 /proc/<pid>/environ
+	# 常驻一段 JSON，网关拿它认证必然失败。这里 token 只可能是 PLAIN 的明文。
 
 	# 服务用户是启动前提，不是可选项：procd 的 user 参数一旦缺失，网关会以
 	# root 运行 —— 它对外监听 LAN 并执行模型工具调用，等于把路由器交出去。
@@ -524,10 +591,50 @@ start_service() {
 	# 明文 token 里若有空白会破坏 procd 的 env 扁平列表，那种情况也不用它
 	# （网关仍会读配置文件里的值）。
 	token_env=""
-	if [ "$token_is_secretref" = "0" ] && [ -n "$token" ]; then
-		case "$token" in
-			*' '*|*'	'*) : ;;
-			*) token_env="OPENCLAW_GATEWAY_TOKEN=$token" ;;
+	# token 只可能是 PLAIN 的明文（oc_credential_probe 已把引用式清空），
+	# 所以这里只需判空。含空白的明文同样不导出。
+	if [ -n "$token" ]; then
+		token_env="OPENCLAW_GATEWAY_TOKEN=$token"
+	fi
+	# 密码模式：官方建议优先用环境变量而非 --password（后者会出现在 ps 里）。
+	# 读取不接 head -n1（避免含 LF 时静默截断），并复用与 token 相同的
+	# 空白判据；任何空格 / Tab / CR / LF 都不进入 procd env。
+	# SecretRef 对象不是明文，交给网关从配置解析。
+	#
+	# 读取必须用 _oc_cred_json 而不是 json_get：json_get 在 jsonfilter 缺失 /
+	# 文件不可读 / JSON 坏掉时静默返回空串，会被下面的 ''|null 分支吞成
+	# "没配置密码"而继续启动 —— 现场表现是"起来了但认证失败"。token 通道在
+	# 同样情形判 UNREAD 并拒绝，两条通道必须同一口径（fail-closed）。
+	pw_env=""
+	if [ "$authmode" = "password" ]; then
+		authpw="$(_oc_cred_json "$cfg" '@.gateway.auth.password')"
+		prc=$?
+		# fail-closed 判据（与 token 通道的 UNREAD 同口径）：
+		#   * 127 = jsonfilter 缺失 / 文件不可读 —— 直接拒绝；
+		#   * 其它非零且没有任何输出 —— 无法区分"字段不存在"与"读不了"，
+		#     用"整份文档能否解析"来判定：文档坏掉就拒绝，文档正常才算没配置。
+		# 只挂 127 是不够的：JSON 坏掉时 jsonfilter 可能返回 1 而不是 127，
+		# 那时空输出会被 '' 分支吞成"没配置密码"，继续启动。
+		if [ "$prc" -ne 0 ]; then
+			# 任何非零都表示字段查询失败，不能依赖 stdout 是否为空：
+			# 错误路径若吐出半截值，继续执行会把半截密码导出到 procd env。
+			# 只有 rc=0 + 空输出才表示"password 字段确实缺失/为空"。
+			if [ "$prc" = "127" ]; then
+				logger -t openclaw "无法读取配置 $cfg（jsonfilter 不可用或文件不可读），拒绝启动"
+			else
+				logger -t openclaw "无法查询 gateway.auth.password（jsonfilter rc=$prc，配置 $cfg），拒绝启动"
+			fi
+			return 1
+		fi
+		case "$authpw" in
+			''|null|NULL|'{'*|'['*) : ;;
+			*)
+				if oc_cred_env_safe "$authpw"; then
+					pw_env="OPENCLAW_GATEWAY_PASSWORD=$authpw"
+				else
+					logger -t openclaw "提示：明文网关密码含空白/换行控制字符，未导出到环境变量（网关仍读配置文件）"
+				fi
+				;;
 		esac
 	fi
 
@@ -543,12 +650,15 @@ start_service() {
 	logger -t openclaw "启动：user=$OC_USER(uid=$(id -u "$OC_USER" 2>/dev/null)) base=$base state=$state tmp_root=$(stat -c '%U:%a' /tmp/openclaw 2>/dev/null)"
 
 	procd_open_instance "gateway"
-	# The token is NOT passed as --token any more: every local user can read
-	# /proc/<pid>/cmdline, so the credential was world readable for as long as
-	# the gateway ran. OPENCLAW_GATEWAY_TOKEN below is the documented
-	# equivalent (it even takes precedence over the config file).
+	# token 不作为 --token 传：任何本地用户都能读 /proc/<pid>/cmdline，
+	# 那样凭据在网关运行期间一直世界可读。OPENCLAW_GATEWAY_TOKEN 是官方
+	# 文档给出的等价方式（优先级还高于配置文件）。
+	#
+	# --auth 跟随配置里的 gateway.auth.mode，不再无条件钉死为 token：
+	# 官方 --auth 接受 none / token / password / trusted-proxy。以前无论
+	# 配置写什么都是 --auth token，等于让插件与配置项打架。
 	procd_set_param command "$node_bin" "$entry" gateway run \
-		--port "$port" --bind "$bind" --auth token \
+		--port "$port" --bind "$bind" --auth "$authmode" \
 		--allow-unconfigured $force_opt
 	# HOME / OPENCLAW_HOME 表示进程 HOME，与 state 目录是两个概念，保持不变。
 	# 但 STATE_DIR / CONFIG_PATH 不能写死 "$home/.openclaw"：main.state_dir 可
@@ -566,6 +676,7 @@ start_service() {
 		TMPDIR="$base/tmp" \
 		PATH="${nodedir}/bin:${globaldir}/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
 		$token_env \
+		$pw_env \
 		$env_args
 	# 无条件设置：走到这里 user_opt 必然等于 $OC_USER（上面的 fail-closed
 	# 检查已经保证该用户存在）。绝不能再加 [ -n ] 之类的条件 —— 一旦条件

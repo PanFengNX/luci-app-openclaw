@@ -11,6 +11,7 @@ local jsonc = require "luci.jsonc"
 
 local SH     = "/usr/libexec/openclaw/cli.sh"
 local MODELS = "/usr/libexec/openclaw/models.sh"
+local GH_UPDATE = "/usr/libexec/openclaw/github-update.sh"
 
 local function is_post()
 	-- http.getenv 在 luci-compat 里一直存在，但取不到时按「不是 POST」处理，
@@ -66,6 +67,10 @@ local READ_ONLY = {
 	cloud_overview = true,
 	cloud_pass_status = true, cloud_encrypt_status = true,
 	cloud_schedule_status = true, cloud_cli_check = true, export = true,
+	-- 插件自更新：只有「读状态」是只读的（前端 2 秒轮询一次）。
+	-- check（访问 GitHub、落盘候选版本）、install、rollback 都改状态或下载，
+	-- 一律要求 POST，且 install/rollback 还要用户显式确认。
+	gh_update_status = true,
 }
 
 local function guarded(name, fn)
@@ -100,6 +105,10 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "versions"},  call("api_versions")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "check"},     call("api_check")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "install"},   call("api_install")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "github_update_check"}, call("api_github_update_check")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "github_update_install"}, call("api_github_update_install")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "github_update_rollback"}, call("api_github_update_rollback")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "github_update_status"}, call("api_github_update_status")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "uninstall"}, call("api_uninstall")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "istatus"},   call("api_istatus")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "ilog"},      call("api_ilog")).leaf = true
@@ -305,6 +314,69 @@ function api_info()
 		return
 	end
 	out({ ok = true, data = s })
+end
+
+local function gh_update_call(command)
+	-- 只捕获 stdout。run_capture 用 `>file 2>&1` 会把 stderr 也合进来，
+	-- 而更新器的诊断行一旦混进 JSON，jsonc.parse 就失败，前端只能看到
+	-- 「响应无法解析」而丢掉真正原因。stderr 单独丢弃，诊断由更新器写日志、
+	-- status 子命令读回。
+	if not need_dir() then
+		return { ok = false, state = "failed", error = "临时目录不可用" }
+	end
+	local outfile = RUNDIR .. "/gh-" .. os.date("%Y%m%d%H%M%S") .. "-"
+		.. tostring(math.random(100000, 999999))
+	local cmd = q(GH_UPDATE) .. " " .. command ..
+		" >" .. q(outfile) .. " 2>/dev/null"
+	local rc = sys.call(cmd)
+	local fh = io.open(outfile, "rb")
+	local txt = ""
+	if fh then
+		txt = fh:read("*a") or ""
+		fh:close()
+	end
+	os.remove(outfile)
+	if #txt > 262144 then
+		txt = txt:sub(-262144)
+	end
+	local parsed = jsonc.parse(txt or "")
+	if type(parsed) ~= "table" then
+		return { ok = false, state = "failed",
+			error = (rc == 0) and "更新器响应无法解析"
+				or (txt ~= "" and txt or "更新器执行失败") }
+	end
+	return parsed
+end
+
+function api_github_update_check()
+	out(gh_update_call("check"))
+end
+
+function api_github_update_status()
+	out(gh_update_call("status"))
+end
+
+function api_github_update_install()
+	if http.formvalue("confirm") ~= "1" then
+		out({ ok = false, state = "failed", error = "缺少用户确认" })
+		return
+	end
+	-- 必须带回 check 时生成的候选指纹：证明装的就是用户在页面上看到并
+	-- 确认的那一份。否则并发 check 可以在读取前把候选换掉，变成静默升级。
+	local id = http.formvalue("id") or ""
+	if id == "" then
+		out({ ok = false, state = "failed", error = "缺少候选版本标识，请重新检查更新" })
+		return
+	end
+	out(gh_update_call("install --confirm 1 --id " .. q(id)))
+end
+
+function api_github_update_rollback()
+	if http.formvalue("confirm") ~= "1" then
+		out({ ok = false, state = "failed", error = "缺少用户确认" })
+		return
+	end
+	out(gh_update_call("rollback"))
 end
 
 function api_versions()

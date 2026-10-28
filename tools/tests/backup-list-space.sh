@@ -31,6 +31,7 @@ done
 
 "$PY" - "$PROJ" <<'PYEOF'
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -117,6 +118,15 @@ EXPECT = ('openclaw-backup-20261022-043000-myname.tar.gz',
           'openclaw-backup-20261020-043000.tar.gz')
 
 work = pathlib.Path(tempfile.mkdtemp())
+# 三个文件必须给出**互不相同**的 mtime。
+# cmd_list 的排序键就是 mtime（等价于 `ls -1t`）；若三个文件在同一秒内
+# 创建，mtime 全相等，排序退化成按路径比较，断言时而通过时而失败 ——
+# 这是测试的不确定性，不是产品缺陷（实测：单跑 5 次全过，全量回归偶发失败）。
+MTIMES = {
+    'openclaw-backup-20261022-043000-myname.tar.gz': 1793200000,
+    'openclaw-backup-20261021-043000.tar.gz': 1793100000,
+    'openclaw-backup-20261020-043000.tar.gz': 1793000000,
+}
 try:
     for label, dirname in (('普通', 'backups'),
                            ('含空格', 'My Backups'),
@@ -124,7 +134,9 @@ try:
         d = work / dirname / 'openclaw-backup'
         d.mkdir(parents=True, exist_ok=True)
         for n in NAMES:
-            (d / n).write_bytes(b'x' * 64)
+            p = d / n
+            p.write_bytes(b'x' * 64)
+            os.utime(p, (MTIMES[n], MTIMES[n]))
         arr, raw = run_list(d)
         ok = isinstance(arr, list) and tuple(x['file'] for x in arr) == EXPECT
         detail = '' if ok else ('  实际=%s' % (raw[:90] if raw else '(空)'))

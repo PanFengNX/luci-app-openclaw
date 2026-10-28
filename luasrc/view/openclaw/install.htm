@@ -502,6 +502,22 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
 </div>
 
 <div class="oc-card">
+  <h3>插件自身更新</h3>
+  <div class="oc-rowline"><span>当前版本</span><span id="gh-current">未检查</span></div>
+  <div class="oc-rowline"><span>更新状态</span><span id="gh-state" class="oc-tag off">未检查</span></div>
+  <div class="oc-rowline"><span>候选版本</span><span id="gh-release">—</span></div>
+  <div class="oc-hint" id="gh-error" style="display:none"></div>
+  <div class="oc-actions">
+    <button id="btn-gh-check" class="oc-btn ghost">检查插件更新</button>
+    <button id="btn-gh-install" class="oc-btn green" disabled>下载并安装</button>
+    <button id="btn-gh-rollback" class="oc-btn danger" disabled>回滚上一版本</button>
+  </div>
+  <div class="oc-progress" id="gh-progress" style="display:none"><i></i></div>
+  <div class="oc-log oc-log-sm" id="gh-log">尚未检查。检查不会下载或安装；安装前会再次要求确认。</div>
+  <div class="oc-hint">仅从固定 GitHub 仓库下载。安装前会备份当前插件，安装失败时保留回滚包；安装、回滚均为 POST 操作。</div>
+</div>
+
+<div class="oc-card">
   <h3>安装与运行环境</h3>
   <div class="oc-actions" style="margin-top:0">
     <button id="btn-install">安装 / 修复运行环境</button>
@@ -636,6 +652,10 @@ var API = {
   diag_run: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_run")%>',
   diag_poll: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","diag_poll")%>',
   backups: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backups")%>',
+  github_update_check: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","github_update_check")%>',
+  github_update_install: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","github_update_install")%>',
+  github_update_rollback: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","github_update_rollback")%>',
+  github_update_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","github_update_status")%>',
   backup_create: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_create")%>',
   backup_verify: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_verify")%>',
   backup_delete: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_delete")%>',
@@ -1341,6 +1361,119 @@ bindVersionSelect('in-oc', 'in-oc-manual', false, function(){
   renderNodeHint();
 });
 bindVersionSelect('in-node', 'in-node-manual', true, renderNodeHint);
+
+// ------------------------------- GitHub 插件自身更新
+var ghUpdate = { busy:false, timer:null, log:'', id:'' };
+function ghSetState(text, tone){
+  var el = $('gh-state');
+  el.textContent = text;
+  el.className = 'oc-tag ' + (tone || 'off');
+}
+function ghRender(d){
+  if (!d) return;
+  if (d.current) $('gh-current').textContent = d.current;
+  if (d.release) $('gh-release').textContent = d.release;
+  // 记住这次检查得到的候选指纹。安装时回传它，后端据此确认
+  // "装的就是页面上看到的那一份"，避免并发检查把它换成别的版本。
+  if (typeof d.id === 'string' && d.id) ghUpdate.id = d.id;
+  if (d.asset) $('gh-log').textContent = '候选资产：' + d.asset + (d.verified ? '\nSHA256：已验证' : '\nSHA256：Release 未提供校验值');
+  if (d.log) $('gh-log').textContent = d.log;
+  var err = d.error || '';
+  $('gh-error').textContent = err;
+  $('gh-error').style.display = err ? '' : 'none';
+  $('btn-gh-install').disabled = ghUpdate.busy || d.state !== 'available';
+  $('btn-gh-rollback').disabled = ghUpdate.busy || !(Number(d.rollbacks) > 0);
+  if (d.state === 'available') ghSetState('有更新', 'warn');
+  else if (d.state === 'none') ghSetState('无更新', 'ok');
+  else if (d.state === 'running') ghSetState('安装中', 'warn');
+  else if (d.state === 'success') ghSetState('成功', 'ok');
+  else if (d.state === 'failed') ghSetState('失败', 'warn');
+  else if (d.state === 'checking') ghSetState('检查中', 'warn');
+}
+function ghBusy(on){
+  ghUpdate.busy = on;
+  $('btn-gh-check').disabled = on;
+  $('btn-gh-install').disabled = on || $('gh-state').textContent !== '有更新';
+  $('btn-gh-rollback').disabled = on || $('btn-gh-rollback').getAttribute('data-ready') !== '1';
+  $('gh-progress').style.display = on ? '' : 'none';
+  $('gh-progress').className = 'oc-progress';
+}
+function ghStatus(){
+  get(API.github_update_status, function(d){
+    if (!d || d.ok === false){ $('gh-error').textContent = (d && d.error) || '读取更新状态失败'; $('gh-error').style.display = ''; return; }
+    $('btn-gh-rollback').setAttribute('data-ready', Number(d.rollbacks) > 0 ? '1' : '0');
+    ghRender(d);
+    if (d.state === 'running') ghPoll();
+  }, 15000);
+}
+function ghPoll(){
+  if (ghUpdate.timer) clearTimeout(ghUpdate.timer);
+  // 轮询必须有上限。以前 status 请求失败时无条件再调 ghPoll()，
+  // 更新器不可达（后端 500 / 网关断开）就会无限重试，页面永远转圈且按钮
+  // 一直 busy —— 用户只能刷新。现在连续失败 3 次就停下并恢复交互。
+  ghUpdate.fails = ghUpdate.fails || 0;
+  ghUpdate.ticks = ghUpdate.ticks || 0;
+  ghUpdate.timer = setTimeout(function(){
+    ghUpdate.ticks++;
+    if (ghUpdate.ticks > 200){          // 约 5 分钟（1.5s × 200）
+      ghBusy(false);
+      ghSetState('超时', 'warn');
+      $('gh-error').textContent = '等待更新结果超时，请查看下方日志或刷新页面';
+      $('gh-error').style.display = '';
+      return;
+    }
+    get(API.github_update_status, function(d){
+      if (d && d.ok !== false){
+        ghUpdate.fails = 0;
+        $('btn-gh-rollback').setAttribute('data-ready', Number(d.rollbacks) > 0 ? '1' : '0');
+        ghRender(d);
+        if (d.state === 'running') ghPoll();
+        else { ghBusy(false); }
+      } else {
+        ghUpdate.fails++;
+        if (ghUpdate.fails >= 3){
+          ghBusy(false);
+          ghSetState('读取失败', 'warn');
+          $('gh-error').textContent = '连续 3 次读取更新状态失败' + (d && d.error ? '：' + d.error : '');
+          $('gh-error').style.display = '';
+          return;
+        }
+        ghPoll();
+      }
+    }, 15000);
+  }, 1500);
+}
+$('btn-gh-check').onclick = function(){
+  ghBusy(true); ghSetState('检查中', 'warn'); $('gh-error').style.display = 'none';
+  $('gh-log').textContent = '正在检查固定 GitHub Release…';
+  post(API.github_update_check, {}, function(d){
+    ghBusy(false);
+    if (!d || d.ok === false){ ghSetState('检查失败', 'warn'); $('gh-error').textContent = (d && d.error) || '检查更新失败'; $('gh-error').style.display = ''; return; }
+    $('btn-gh-rollback').setAttribute('data-ready', Number(d.rollbacks) > 0 ? '1' : '0');
+    ghRender(d);
+    if (d.state === 'available') $('gh-log').textContent += '\n安装前会创建回滚备份。';
+  });
+};
+$('btn-gh-install').onclick = function(){
+  if (ghUpdate.busy || !confirm('确认从 PanFengNX/luci-app-openclaw 下载并安装已检查的插件版本？安装前将备份当前文件。')) return;
+  // 必须带上 check 时拿到的候选指纹：后端据此确认要装的就是页面上这一份，
+  // 防止期间另一次检查把候选换成别的版本（那就成了静默升级）。
+  if (!ghUpdate.id){ ghSetState('请重新检查', 'warn'); $('gh-error').textContent = '缺少候选版本标识，请先点「检查插件更新」'; $('gh-error').style.display = ''; return; }
+  ghBusy(true); ghSetState('安装中', 'warn'); $('gh-error').style.display = 'none'; $('gh-log').textContent = '正在启动更新…';
+  post(API.github_update_install, {confirm:'1', id: ghUpdate.id}, function(d){
+    if (!d || d.ok === false){ ghBusy(false); ghSetState('失败', 'warn'); $('gh-error').textContent = (d && d.error) || '无法启动安装'; $('gh-error').style.display = ''; return; }
+    ghRender(d); ghPoll();
+  });
+};
+$('btn-gh-rollback').onclick = function(){
+  if (ghUpdate.busy || !confirm('确认使用最近的回滚包恢复当前插件文件？')) return;
+  ghBusy(true); ghSetState('安装中', 'warn'); $('gh-log').textContent = '正在回滚…';
+  post(API.github_update_rollback, {confirm:'1'}, function(d){
+    ghBusy(false);
+    if (!d || d.ok === false){ ghSetState('失败', 'warn'); $('gh-error').textContent = (d && d.error) || '回滚失败'; $('gh-error').style.display = ''; return; }
+    ghRender(d); ghStatus();
+  });
+};
 
 // 安装目录控件：下拉只是手填框的快捷方式，两者都算"页面上的安装目录"
 $('in-dir').onchange = function(){ $('in-dir-custom').value = $('in-dir').value; dirCheck(); renderOcdir(); };

@@ -211,12 +211,36 @@ EOF
 	else
 		say WARN "缺少 jsonfilter，跳过配置文件格式校验"
 	fi
-	# `"token"` alone also matches `"mode": "token"`, which made a config with
-	# no real token look fine - and the init script then refuses to start.
-	if ! grep -q '"token"[[:space:]]*:' "$CONF" 2>/dev/null; then
-		[ -x "$OB" ] && HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
-			"$OB" config set gateway.auth.token "$(oc_rand_hex)" >/dev/null 2>&1 \
-			&& say FIX "已补齐网关 token"
+	# 凭据存在性走 lib.sh 的唯一判定，不用 grep。
+	# 旧写法 `grep '"token"[[:space:]]*:'` 会被 `"mode": "token"` 命中 ——
+	# 没有凭据的配置被判成"已配置"，于是 init 的凭据门拒绝启动而 repair 说
+	# 一切正常，两边结论打架。它也认不出 SecretRef 的形状差异。
+	if command -v oc_credential_state >/dev/null 2>&1; then
+		oc_credential_state "$CONF"
+		case "$OC_CRED_STATE" in
+			PLAIN|REF)
+				say OK "网关凭据已配置（$OC_CRED_STATE${OC_CRED_DESC:+：$OC_CRED_DESC}）"
+				;;
+			MISSING)
+				# 只有确实没有凭据时才补。SecretRef 绝不能覆盖成明文 ——
+				# 那会把凭据重新落成 plaintext，破坏 secrets audit。
+				if [ -x "$OB" ]; then
+					HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+						"$OB" config set gateway.auth.mode token >/dev/null 2>&1
+					HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+						"$OB" config set gateway.auth.token "$(oc_rand_hex)" >/dev/null 2>&1 \
+						&& say FIX "已补齐网关 token"
+				fi
+				;;
+			BADREF)
+				say WARN "网关凭据引用不完整（$OC_CRED_DESC），未自动改写；请检查 source/id 或重新登录密钥库"
+				;;
+			UNREAD)
+				say WARN "无法解析 $CONF（jsonfilter 不可用），跳过凭据检查"
+				;;
+		esac
+	else
+		say WARN "缺少 oc_credential_state，跳过凭据检查"
 	fi
 else
 	say WARN "配置文件不存在 $CONF（将在下次安装/启动时生成）"
@@ -346,38 +370,37 @@ fi
 # 因此只记 WARN，不让整次 repair 判失败。
 # 等价于 openclaw/cli.sh 的 installed()：程序与 Node 都可执行才算已安装。
 if [ -x "$OB" ] && [ -x "$NB" ]; then
-	# 先清陈旧的状态所有权锁：OpenClaw 10.x 的 doctor / 网关 / sqlite 维护
-	# 共用一把锁，维护进程被打断后数据库里会留下指向死 pid 的租约，
-	# 于是两边都报 "undergoing offline maintenance"，修复也修不动。
-	# 只有确认持有者已死才删，活锁一律不动。
-	if command -v oc_clear_stale_state_lock >/dev/null 2>&1; then
-		if oc_clear_stale_state_lock "$(oc_state_dir)"; then
-			say OK "状态锁检查通过（无活锁占用）"
-		else
-			say WARN "状态仍被活动进程占用，若持续失败请先停止网关再重试"
-		fi
-	fi
-
-	doc_out="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
-		oc_timeout 300 "$OB" doctor --fix 2>&1)"
-	doc_rc=$?
-	if [ "$doc_rc" = "0" ]; then
-		say FIX "OpenClaw 自检修复完成"
+	# 状态所有权锁检查：OpenClaw 10.x 的 doctor / 网关 / sqlite 维护共用
+	# 同一把锁（$OPENCLAW_STATE_DIR/tmp/openclaw-<uid>/state.<hash>.lock）。
+	# 维护进程被打断后数据库里会留下指向死 pid 的租约，于是两边都报
+	# "undergoing offline maintenance"。
+	#
+	# 本插件**绝不手工删锁**：官方 gateway-lock 文档要求走
+	#   openclaw gateway recover-lock            # 只检查，打印 fingerprint
+	#   openclaw gateway recover-lock --confirm  # 由它同时清 sidecar 与 DB lease
+	# 这里只调用 inspect，把 fingerprint 打进日志让人确认；检查不通过就跳过
+	# 本轮 doctor —— 否则 doctor 会去抢同一把锁，把「维护中」吞成普通 WARN。
+	if ! oc_clear_stale_state_lock "$(oc_state_dir)" "$OB"; then
+		say WARN "状态锁检查未通过，跳过本轮 doctor；请按日志中的 fingerprint 确认后重试"
 	else
-		# 维护锁是 doctor 唯一「等一等就好」的失败原因，单独说清楚，
-		# 否则用户只会看到一行退出码。
-		case "$doc_out" in
-			*"offline maintenance"*|*"sqlite-maintenance"*)
-				say WARN "状态库正在做离线维护，需等维护进程结束再试：
+		doc_out="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+			oc_timeout 300 "$OB" doctor --fix 2>&1)"
+		doc_rc=$?
+		if [ "$doc_rc" = "0" ]; then
+			say FIX "OpenClaw 自检修复完成"
+		else
+			case "$doc_out" in
+				*"offline maintenance"*|*"sqlite-maintenance"*)
+					say WARN "状态库正在做离线维护，需等维护进程结束再试：
 $(printf '%s\n' "$doc_out" | grep -iE 'maintenance|retry' | head -n 3)" ;;
-			*)
-				say WARN "OpenClaw 自检修复未完全成功（退出码 $doc_rc）" ;;
-		esac
+				*) say WARN "OpenClaw 自检修复未完全成功（退出码 $doc_rc）" ;;
+			esac
+		fi
+		# 保留最后若干行，便于定位 doctor 修不了的问题。--json 下不能直接
+		# printf 到 stdout（会破坏 finish 输出的 JSON），统一交给 say 收集。
+		doc_tail="$(printf '%s\n' "$doc_out" | tail -n 40)"
+		[ -n "$doc_tail" ] && say OK "$doc_tail"
 	fi
-	# 保留最后若干行，便于定位 doctor 修不了的问题。--json 下不能直接
-	# printf 到 stdout（会破坏 finish 输出的 JSON），统一交给 say 收集。
-	doc_tail="$(printf '%s\n' "$doc_out" | tail -n 40)"
-	[ -n "$doc_tail" ] && say OK "$doc_tail"
 else
 	say OK "未安装，跳过 doctor --fix"
 fi

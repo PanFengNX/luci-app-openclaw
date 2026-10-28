@@ -779,6 +779,29 @@ oc_json_has() {
 	grep -q "$2" "$1" 2>/dev/null
 }
 
+# 结构化凭据判定在 credential.sh 里，与 init.d 共用同一份实现。
+#
+# 加载路径必须**相对本文件解析**，不能写死 /usr/libexec/openclaw/credential.sh：
+# 测试会把这个目录整体复制到临时目录再 source lib.sh（见 backup-archive.sh、
+# path-validate.sh），写死绝对路径会让复制出来的副本加载不到，表现为
+# "line 783: .../credential.sh: No such file or directory"。
+# 安装位置上两种解析结果相同；复制/测试场景下只有相对解析能工作。
+_OC_LIB_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || _OC_LIB_DIR=""
+if [ -n "$_OC_LIB_DIR" ] && [ -r "$_OC_LIB_DIR/credential.sh" ]; then
+	. "$_OC_LIB_DIR/credential.sh"
+else
+	# 找不到就定义 fail-closed 桩：宁可拒绝启动，也不退回形状猜测。
+	# （调用方 oc_credential_state 返回 UNREAD，init.d 据此拒绝。）
+	oc_credential_state() {
+		OC_CRED_STATE=UNREAD
+		OC_CRED_ENV=""
+		OC_CRED_DESC="缺少 credential.sh（无法判定网关凭据）"
+		return 0
+	}
+	oc_gateway_auth_mode() { printf 'token'; }
+	oc_cred_state_starts() { return 1; }
+fi
+
 oc_json_str() {
 	# oc_json_str <value> -> escaped, safe to embed inside a JSON string literal.
 	# Every value that ends up in a printf'd JSON document MUST go through this:
@@ -1587,61 +1610,62 @@ oc_sweep_stale_tmp() {
 
 oc_state_lock_pid() {
 	# oc_state_lock_pid <lockfile> -> 打印锁文件里记录的 pid；读不到返回 1
-	#
-	# 锁文件是 JSON（含 pid / role / startedAt），但字段顺序不保证，
-	# 也不保证就是标准 JSON —— 用 grep 取第一个 "pid": <数字> 最稳。
 	local f="$1" p
 	[ -f "$f" ] || return 1
-	p="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$f" 2>/dev/null | head -n1)"
+	p="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null | head -n1)"
 	case "$p" in ''|*[!0-9]*) return 1 ;; esac
 	printf '%s' "$p"
 	return 0
 }
 
 oc_clear_stale_state_lock() {
-	# 清掉**确认持有者已死**的状态所有权锁，让网关能重新启动。
+	# 官方当前恢复协议（docs.openclaw.ai/gateway/gateway-lock）：
+	#   1) `openclaw gateway recover-lock` 只做检查，报告记录的 PID、
+	#      主机/命名空间、心跳年龄，并给出确认命令；
+	#   2) 操作者确认 holder 已停止后，执行输出里给出的
+	#      `openclaw gateway recover-lock --confirm <fingerprint>`；
+	#      官方用 fs-safe 的"仅在未变化时删除"协议清 sidecar，并在独占
+	#      状态所有权下清匹配的 SQLite / PostgreSQL owner lease；
+	#   3) 心跳续期、payload 变化、文件被替换或 lease 变化都会让确认失效，
+	#      必须重新检查；**不得手工删除锁文件**。
 	#
-	# 为什么需要它：OpenClaw 10.x 把离线维护（update / doctor --state-sqlite /
-	# 被中途打断的升级）与网关启动放在同一把锁上。维护进程被 SIGKILL 或
-	# 被清理逻辑抽走 sidecar 之后，数据库里留着一条指向死 pid 的租约，
-	# 之后网关与 doctor 全部被判为"维护中"，两边都卡死 —— 这就是
-	# 「升级 10.8 后起不来、doctor 也修不了」的现场。
+	# 官方文档**没有**规定该命令的输出格式、fingerprint 的形状或退出码语义。
+	# 所以这里不猜格式、不用正则去"提取"指纹、不裁剪输出：
+	#   * 只调用检查命令，把 rc 与官方原始输出**完整**写进日志；
+	#   * 由操作者照抄官方给出的确认命令；
+	#   * 无论 rc 是什么，锁都保持原样 —— 不删、不自动 --confirm。
 	#
-	# 判据刻意收得极紧（宁可报错让人手动处理，也不能误删活锁）：
-	#   * 只看 $state_dir/tmp/openclaw-*/ 下的 state*.lock 与 gateway.state.lock
-	#   * 锁里必须能解析出 pid
-	#   * 该 pid 必须**确实不存在**（kill -0 失败）
-	# 活着的持有者一律不动，只把结论写日志。返回 0 表示"清理后可以继续启动"，
-	# 返回 1 表示仍有活锁（调用方应据此给出说明，而不是静默继续）。
-	#
-	# oc_clear_stale_state_lock <state_dir>
-	local sd="$1" d f pid n=0 alive=0
+	# 返回：0=没有发现锁（可继续）；1=发现锁/无法检查（fail closed，给提示）。
+	local sd="$1" ocbin="${2:-}" d f pid out rc
 	[ -n "$sd" ] || return 0
 	[ -d "$sd/tmp" ] || return 0
 	for d in "$sd"/tmp/openclaw-*; do
 		[ -d "$d" ] || continue
 		for f in "$d"/state*.lock "$d"/gateway.state.lock; do
 			[ -f "$f" ] || continue
-			pid="$(oc_state_lock_pid "$f")" || {
-				oc_warn "状态锁 $f 无法解析持有者 pid，保持原样（请手动确认后删除）"
-				alive=1
-				continue
-			}
-			if kill -0 "$pid" 2>/dev/null; then
-				alive=1
-				oc_warn "状态由活进程 $pid 持有（$(basename "$f")），等待其结束，不在启动路径上强删"
-			else
-				if rm -f "$f" 2>/dev/null; then
-					n=$((n + 1))
-					oc_warn "已清理陈旧状态锁 $f（记录 pid=$pid 已不存在）"
+			pid="$(oc_state_lock_pid "$f" 2>/dev/null)"
+			# CLI 路径由调用方传入（self 的 OB）。不在这里猜 OC_OC_DIR ——
+			# 那不是库里定义的变量，猜错会让整段逻辑永远走不到，
+			# 于是"假装修好了"而实际上什么都没检查。
+			if [ -n "$ocbin" ] && [ -x "$ocbin" ]; then
+				out="$(oc_as_user env HOME="$(oc_home_dir)" OPENCLAW_STATE_DIR="$sd" \
+					OPENCLAW_CONFIG_PATH="$sd/openclaw.json" \
+					"$ocbin" gateway recover-lock 2>&1)"
+				rc=$?
+				if [ "$rc" -ne 0 ]; then
+					oc_warn "状态锁 $f 存在（pid=${pid:-未知}），官方 recover-lock 检查返回 rc=$rc；保持原样，不手工删锁"
+				else
+					oc_warn "状态锁 $f 存在（pid=${pid:-未知}），官方 recover-lock 检查已执行；保持原样，不自动确认、不手工删锁"
 				fi
-				# 锁文件删掉后目录若已空，顺手清掉（不递归删，避免误伤）
-				rmdir "$d" 2>/dev/null || true
+				printf '%s\n' "$out" | while IFS= read -r _l; do oc_warn "recover-lock| $_l"; done
+				return 1
+			else
+				oc_warn "状态锁 $f 存在（pid=${pid:-未知}），未找到 OpenClaw CLI 执行官方恢复检查；保持原样，不手工删锁"
+				return 1
 			fi
 		done
 	done
-	[ "$n" -gt 0 ] && oc_warn "共清理 $n 个陈旧状态锁；数据库租约会在下次启动时由 OpenClaw 回收"
-	[ "$alive" -eq 0 ]
+	return 0
 }
 
 oc_as_user() {
@@ -1865,7 +1889,7 @@ oc_pid_alive() {
 	case "$cmd" in
 		*openclaw/cli.sh*|*openclaw/install.sh*|*openclaw/backup.sh*|\
 		*openclaw/cloud.sh*|*openclaw/models.sh*|*openclaw/channels.sh*|\
-		*openclaw/versions.sh*)
+		*openclaw/versions.sh*|*openclaw/github-update.sh*)
 			return 0 ;;
 	esac
 	OC_PID_REASON="reused"

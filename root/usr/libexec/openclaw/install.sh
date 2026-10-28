@@ -839,10 +839,28 @@ EOF
 
 	"$OC" config set gateway.port "$port" >/dev/null 2>&1
 	"$OC" config set gateway.bind "$bind" >/dev/null 2>&1
-	if ! grep -q '"token"' "$conf" 2>/dev/null; then
-		token="$(oc_rand_hex)"
-		"$OC" config set gateway.auth.mode token >/dev/null 2>&1
-		"$OC" config set gateway.auth.token "$token" >/dev/null 2>&1
+	# 凭据存在性走 lib.sh 的唯一判定。
+	# 旧写法 `grep -q '"token"'` 有两个问题：`"mode": "token"` 也会命中，
+	# 且无法区分 SecretRef 与明文 —— 一旦判成"没有"，就会用新明文覆盖掉
+	# 用户已配好的 SecretRef，把凭据重新落成 plaintext。
+	if command -v oc_credential_state >/dev/null 2>&1; then
+		oc_credential_state "$conf"
+		if [ "$OC_CRED_STATE" = "MISSING" ]; then
+			token="$(oc_rand_hex)"
+			"$OC" config set gateway.auth.mode token >/dev/null 2>&1
+			"$OC" config set gateway.auth.token "$token" >/dev/null 2>&1
+			ilog "已生成网关 token（原本缺失）"
+		else
+			ilog "保留已有网关凭据（$OC_CRED_STATE）"
+		fi
+	else
+		# 兜底：没有 lib 函数时退回最保守的判断 —— 只有确实找不到
+		# auth.token 键才补，避免覆盖 SecretRef。
+		if ! grep -q '"auth"' "$conf" 2>/dev/null; then
+			token="$(oc_rand_hex)"
+			"$OC" config set gateway.auth.mode token >/dev/null 2>&1
+			"$OC" config set gateway.auth.token "$token" >/dev/null 2>&1
+		fi
 	fi
 
 	# 复用的本机配置可能带着较早版本写入的、2026.10 已删除的

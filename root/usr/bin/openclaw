@@ -14,6 +14,16 @@
 
 OC_LIB="/usr/libexec/openclaw/lib.sh"
 
+# ---------------------------------------------------------------- PATH 必须最先
+# lib.sh 在**载入期**就会调用 uci（oc_base_dir / oc_state_dir 都走 uci_get），
+# 而 uci 在 OpenWrt 上是 /sbin/uci。服务用户（openclaw）的默认 PATH 常常只有
+# /bin:/usr/bin，于是 uci_get 返回空、oc_base_dir 退回硬编码默认值
+# /mnt/data/OpenClaw，BIN 指向一个不存在的路径 —— 表现为
+# 「运行环境尚未安装」，而实际装的是别的目录。
+# 所以这里必须在 source lib.sh **之前**把标准路径补齐。
+PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+export PATH
+
 if [ ! -r "$OC_LIB" ]; then
 	printf '%s\n' "openclaw: 插件未正确安装（缺少 $OC_LIB），请重新安装 luci-app-openclaw" >&2
 	exit 127
