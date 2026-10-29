@@ -981,14 +981,18 @@ cmd_overview() {
 
 	# schedule
 	cloud_sched_vals
-	local sch_installed=false sch_line
+	local sch_installed=false sch_enabled=false sch_line
 	sch_line="$(cloud_cron_line)"
 	[ -n "$sch_line" ] && sch_installed=true
+	# enabled 必须是 JSON 布尔，与 cmd_schedule_status 的输出一致。
+	# 前端用 d.enabled === true 判定；这里若输出数字 1，页面每次打开
+	# 都会把「启用」勾选框强制清空（保存其实已成功）。
+	[ "$OC_SCH_ENABLED" = "1" ] && sch_enabled=true
 
-	printf '{"ok":true,%s,"encrypt":{"enabled":%s,"pass_set":%s},"pass":{"set":%s},"delpass":{"set":%s},"schedule":{"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"installed":%s,"line":"%s"}}\n' \
+	printf '{"ok":true,%s,"encrypt":{"enabled":%s,"pass_set":%s},"pass":{"set":%s},"delpass":{"set":%s},"schedule":{"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"keep_local":%s,"installed":%s,"line":"%s"}}\n' \
 		"$base" "$enc_on" "$pass_set" "$pass_set" "$dp_set" \
-		"$OC_SCH_ENABLED" "$OC_SCH_PERIOD" "$OC_SCH_WEEKDAY" "$OC_SCH_HOUR" \
-		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$sch_installed" "$(jstr "$sch_line")"
+		"$sch_enabled" "$OC_SCH_PERIOD" "$OC_SCH_WEEKDAY" "$OC_SCH_HOUR" \
+		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$OC_SCH_KEEP_LOCAL" "$sch_installed" "$(jstr "$sch_line")"
 }
 
 # ---------------------------------------------------------------- status cache

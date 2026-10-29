@@ -41,7 +41,17 @@ opkg 的格式）。在 OpenWrt 25.12 / iStoreOS 25.12 这类用 apk 的系统�
 - `repair.sh` 补齐 token 时改为**先拿到 token 再改 `auth.mode`**，避免随机失败时
   留下"mode=token 但没有 token"的半截配置导致网关起不来。
 
-### 4. 回归测试
+### 4. 定时备份「启用」勾选不再消失（显示问题）
+
+备份页打开时走的是合并端点 `cloud_overview`，它把 `schedule.enabled` 输出成
+**数字 `1`/`0`**，而保存后回读的 `schedule-status` 输出的是 JSON 布尔
+`true`/`false`。前端判定是 `d.enabled === true`（严格相等），数字 `1` 不等于
+布尔 `true`——于是**保存是成功的（crontab 行在），但重新打开页面勾选框被清空**。
+现在 overview 的 schedule 输出与 schedule-status 完全一致（布尔 enabled、
+补上 keep_local），新增 `tools/tests/cloud-overview-schedule.sh`（6 项）盯住
+两个端点的字段集合与类型。
+
+### 5. 回归测试
 
 新增 `tools/tests/github-update-filelist.sh`（21 项，已纳入 `tools/verify-project.sh`）：
 覆盖 apk v3 / opkg 两种清单格式、已安装库兜底、随机标识的四条兜底路径、
