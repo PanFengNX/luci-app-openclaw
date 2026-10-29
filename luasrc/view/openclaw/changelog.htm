@@ -378,6 +378,36 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
   .oc-progress>i{animation:none;width:60%;margin-left:20%}
 }
 
+/* ── 页面标题：品牌竖条 + 统一字号节奏 ────────────────────────────
+   9 个视图的标题统一带 .oc-title（<h2 class="oc-title"><a id="content">…</a></h2>，
+   a 是 LuCI 锚点）。不用 :has() 反选：项目约定禁止 Selectors Level 4
+   特性进视图（view-messages.sh 有硬性检查，旧浏览器会整条规则失效）。 */
+h2.oc-title{display:flex;align-items:center;gap:10px;max-width:940px;
+  margin:18px 0 16px;font-size:19px;font-weight:600;letter-spacing:.01em;line-height:1.4}
+h2.oc-title::before{content:"";flex:0 0 4px;width:4px;height:20px;
+  border-radius:2px;background:var(--oc-accent)}
+h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
+  overflow-wrap:anywhere}
+
+/* ── 选中文本用品牌色，细节统一 ────────────────────────────────── */
+::selection{background:rgba(85,99,210,.24)}
+
+/* ── 卡片进入动效：轻微上浮淡入一次；reduced-motion 下整段关闭 ──── */
+@media (prefers-reduced-motion:no-preference){
+  .oc-card{animation:oc-card-in .28s ease both}
+  .oc-card:nth-of-type(2){animation-delay:.04s}
+  .oc-card:nth-of-type(3){animation-delay:.08s}
+  .oc-card:nth-of-type(n+4){animation-delay:.12s}
+}
+@keyframes oc-card-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+/* ── .oc-out 滚动条与 .oc-log 对齐（之前只有 .oc-log 有） ───────── */
+.oc-out::-webkit-scrollbar{width:10px;height:10px}
+.oc-out::-webkit-scrollbar-thumb{background:rgba(127,127,127,.4);border-radius:6px}
+.oc-out::-webkit-scrollbar-track{background:transparent}
+
+/* ── .oc-tag 补一圈描边：纯色块在浅色底上边缘发虚 ─────────────── */
+.oc-tag{border:1px solid var(--oc-line-soft)}
 /* ── 窄屏 ─────────────────────────────────────────────────────── */
 @media (max-width:640px){
   .oc-card{padding:16px 14px}
@@ -395,7 +425,7 @@ button[data-busy="1"]::after,.oc-btn[data-busy="1"]::after{
 }
 </style>
 
-<h2><a id="content" name="content">OpenClaw 助手 · 更新说明</a></h2>
+<h2 class="oc-title"><a id="content" name="content">OpenClaw 助手 · 更新说明</a></h2>
 
 <div class="oc-card">
   <h3>版本更新说明</h3>
