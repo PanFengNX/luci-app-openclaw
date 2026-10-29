@@ -67,10 +67,21 @@ local READ_ONLY = {
 	cloud_overview = true,
 	cloud_pass_status = true, cloud_encrypt_status = true,
 	cloud_schedule_status = true, cloud_cli_check = true, export = true,
+	-- cloud 备份进度轮询：只回 running/done/rc/log，不改任何状态。
+	cloud_backup_poll = true,
+	-- 删除密码「是否已设置」：只回一个布尔，不回显任何秘密。
+	delpass_status = true,
 	-- 插件自更新：只有「读状态」是只读的（前端 2 秒轮询一次）。
 	-- check（访问 GitHub、落盘候选版本）、install、rollback 都改状态或下载，
 	-- 一律要求 POST，且 install/rollback 还要用户显式确认。
-	gh_update_status = true,
+	--
+	-- ⚠️ 这里的键名必须和路由名**去掉 api_ 前缀后完全一致**：守卫用的正是
+	-- 那个短名去查这张表。以前写成 gh_update_status（与真实端点
+	-- github_update_status 不符），表项等于不存在，于是只读轮询被要求 POST，
+	-- 前端永远停在「读取失败」；同原因还漏了上面两个，备份页的删除密码
+	-- 一直显示「读取中…」。tools/tests/api-readonly-route.sh 负责盯住这个
+	-- 对应关系，别再靠人眼核。
+	github_update_status = true,
 }
 
 local function guarded(name, fn)

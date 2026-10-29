@@ -500,6 +500,19 @@ else
 	skip "缺少 tools/tests/api-post-guard.sh"
 fi
 
+head_ "7k2. 前端 GET 调用的端点必须真的登记进 READ_ONLY（名字不一致会让功能静默失效）"
+if [ -f tools/tests/api-readonly-route.sh ]; then
+	if out="$(sh tools/tests/api-readonly-route.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "api-readonly-route.sh 全部断言通过"
+	else
+		bad "api-readonly-route.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/api-readonly-route.sh"
+fi
+
 head_ "7l. shell 状态传递与 awk 模式陷阱"
 if [ -f tools/tests/shell-state.sh ]; then
 	if out="$(sh tools/tests/shell-state.sh 2>&1)"; then

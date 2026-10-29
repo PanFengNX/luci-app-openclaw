@@ -436,6 +436,8 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
 .oc-bkrow{display:flex;align-items:center;gap:6px 12px;padding:10px 8px;margin:0 -8px;
   border-bottom:1px solid var(--oc-line-soft);flex-wrap:wrap;border-radius:var(--oc-r-sm);
   transition:background .12s}
+/* 秒表：等宽数字，否则每秒刷新时宽度变化会把旁边的按钮推来推去 */
+.oc-elapsed{font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,Consolas,monospace}
 /* 列表行 hover 反馈：长列表里光标跟随能明显降低找错行的概率 */
 .oc-bkrow:hover{background:var(--oc-surface)}
 .oc-bkrow:last-child{border-bottom:0}
@@ -2470,6 +2472,8 @@ function clBackup(){
              + '不包含：日志、缓存、node_modules\n\n'
              + '注意：插件本体装在程序目录，不在备份内。恢复后需按清单重装。\n\n继续？')) return;
   CL.busy = true;
+  CL.bkFails = 0;
+  CL.bkTicks = 0;
   clRender();
   clErr('cl-err3', '');
   clOutReset();
@@ -2513,10 +2517,42 @@ function clBackup(){
 // 轮询备份进度，直到 done。
 // 同时把日志里的 [local] / [cloud] 前缀解析成两行独立状态，
 // 这样"本地打包"和"云端上传"能各自显示进行中/完成/失败。
+//
+// 轮询必须有两条闸门：
+//   * 连续失败上限（如端点被拦 / 后端 500）：以前 `r.ok === false` 时
+//     d 取 {} → done 为假 → 无条件再排一次，于是每 1.5 秒重试一次、
+//     永不停止，界面卡在「备份中」连取消都点不动；
+//   * 总时长上限：任务本身卡死时也要告诉用户，而不是一直转圈。
+// 两条都命中释放 CL.busy 并恢复按钮 —— 卡住还要能重来。
+function clPollStop(msg){
+  CL.bkTimer = null;
+  CL.busy = false;
+  bkTickStop();
+  bkElapsedShow('cl', false);
+  clRender();
+  clErr('cl-err3', msg);
+}
 function clPollBackup(){
   if (CL.bkTimer) clearTimeout(CL.bkTimer);
+  CL.bkFails = CL.bkFails || 0;
+  CL.bkTicks = CL.bkTicks || 0;
   CL.bkTimer = setTimeout(function(){
+    CL.bkTicks++;
+    if (CL.bkTicks > 200){                 // 约 5 分钟（1.5s × 200）
+      clPollStop('等待备份结果超时，请查看上面的输出或刷新页面。');
+      return;
+    }
     get(API.cloud_backup_poll, function(r){
+      if (!r || r.ok === false){
+        CL.bkFails++;
+        if (CL.bkFails >= 5){
+          clPollStop('连续 5 次读取备份进度失败' + (r && r.error ? '：' + r.error : ''));
+          return;
+        }
+        clPollBackup();
+        return;
+      }
+      CL.bkFails = 0;
       var d = jp((r && r.data) || '{}', {});
       var log = String(d.log || '');
       clOutSet(log || '（暂无输出）');
@@ -2525,6 +2561,7 @@ function clPollBackup(){
       if (d.done){
         CL.bkTimer = null;
         CL.busy = false;
+        CL.bkFails = 0; CL.bkTicks = 0;
         bkTickStop();
         bkElapsedShow('cl', false);
         clRender();

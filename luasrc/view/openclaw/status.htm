@@ -2236,18 +2236,41 @@ if ($('btn-ver-retry')) $('btn-ver-retry').onclick = function(){
 // doctor / repair run detached on the router; we poll for partial output so a
 // slow run never hits the HTTP request timeout.
 var diagTimer = null;
+var diagFails = 0;
+var diagTicks = 0;
+var diagRunCount = {};
 
 function diagStop() {
   if (diagTimer) { clearInterval(diagTimer); diagTimer = null; }
+  diagFails = 0; diagTicks = 0; diagRunCount = {};
   $('btn-doctor').disabled = false;        $('btn-doctor').textContent = '体检（只读诊断）';
   $('btn-repair').disabled = false;        $('btn-repair').textContent = '一键修复（环境 + OpenClaw 自检）';
 }
 
 function diagPoll(name) {
+  // 每次开跑前把计数器清零：否则上一次跑留下的失败数会让这一轮提前终止。
+  if (!diagRunCount[name]) { diagFails = 0; diagTicks = 0; diagRunCount[name] = 1; }
   post(API.diag_poll, { name: name }, function(r){
     // 网络抖动时保留已有输出，等下一次轮询即可；把它当成"服务端返回空"
-    // 会瞬间清空诊断结果。
-    if (r && r.net) return;
+    // 会瞬间清空诊断结果。但必须计数：服务端一直不响应时这条分支会
+    // 让轮询永不停止（后台任务已死的情况下每 2 秒请求一次，直到刷新页面）。
+    if (r && r.net) {
+      diagFails++;
+      if (diagFails >= 15) {          // 约 30 秒
+        $('diag-state').textContent = '读取结果失败';
+        diagStop();
+      }
+      return;
+    }
+    diagFails = 0;
+    diagTicks++;
+    // 硬上限：任务既不结束也不报错时，不能让用户一直等。
+    // doctor/repair 正常几十秒内跑完，10 分钟足够兜住所有长任务。
+    if (diagTicks > 300) {
+      $('diag-state').textContent = '超时（怀疑后台任务异常，请查看日志）';
+      diagStop();
+      return;
+    }
     var d = r.data ? jp(r.data, null) : {};
     if (!d || d.error) { $('diag-state').textContent = '失败'; diagStop(); return; }
     $('diag-out').textContent = d.output || '';
@@ -2284,7 +2307,13 @@ function diagRun(name, title) {
   });
 }
 
-$('diag-close').onclick = function(){ $('diag-box').style.display = 'none'; };
+// 关闭只关界面，必须同时停轮询并放开按钮：
+// 以前这里只把弹框 display:none，定时器继续每 2 秒请求一次、两个按钮仍
+// 是 disabled —— 一旦后台任务没能走到 done，用户就再也点不了「体检」和
+// 「一键修复」（表现为"点了没反应"），只能刷新页面。
+// 后台任务本身是脱离请求跑的，停掉轮询不会杀它；重新点击时 diag_run 的
+// busy 分支会如实告知"已有诊断在运行"。
+$('diag-close').onclick = function(){ $('diag-box').style.display = 'none'; diagStop(); };
 $('btn-doctor').onclick  = function(){ diagRun('doctor', '体检（只读诊断）'); };
 $('btn-repair').onclick = function(){
   if (!confirm('将检查并修复权限、目录、配置、服务与开机自启，然后重启网关。继续？')) return;
