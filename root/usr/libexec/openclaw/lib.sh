@@ -1202,19 +1202,61 @@ EOF
 }
 
 oc_rand_hex() {
-	# 32 bytes hex
-	# od -tx1 并非所有 busybox 构建都支持：失败时输出为空串，调用方会把
-	# "工具缺失"误报成"随机源不可用"。逐段校验长度，失败再退到 hexdump，
-	# 最后才是 awk（此时 /dev/urandom 已确认不可读，属于兜底而非首选）。
-	local h=""
+	# 32 bytes hex。候选失败时宁可失败也不产出弱随机值。
+	# 兜底顺序为 od -> hexdump -> sha256sum(临时文件) -> md5sum(临时文件)。
+	# 摘要候选先核对同一临时文件的长度，再对这份已验证的数据求摘要。
+	local h="" tmp n
 	if [ -r /dev/urandom ]; then
+		# 长度对了还不够：od/hexdump 的输出必须真的是 64 位小写十六进制，
+		# 否则调用方"只判空"会把一串非法字符当成网关 token 写进配置。
 		h="$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -v -tx1 2>/dev/null | tr -d ' \n')"
-		[ "${#h}" -eq 64 ] && { printf '%s' "$h"; return 0; }
+		case "$h" in
+			????????????????????????????????????????????????????????????????)
+				case "$h" in *[!0-9a-f]*) ;; *) printf '%s' "$h"; return 0 ;; esac ;;
+		esac
 		h="$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -e '32/1 "%02x"' 2>/dev/null)"
-		[ "${#h}" -eq 64 ] && { printf '%s' "$h"; return 0; }
-		return 1
+		case "$h" in
+			????????????????????????????????????????????????????????????????)
+				case "$h" in *[!0-9a-f]*) ;; *) printf '%s' "$h"; return 0 ;; esac ;;
+		esac
+		# 私有临时目录不存在就不许退化到文件系统根或可预测文件名。
+		if [ -d "${OC_RUNDIR:-}" ] && command -v sha256sum >/dev/null 2>&1; then
+			tmp="$(mktemp "$OC_RUNDIR/rnd.XXXXXX" 2>/dev/null)"
+			if [ -n "$tmp" ]; then
+				if : >"$tmp" 2>/dev/null && dd if=/dev/urandom of="$tmp" bs=32 count=1 2>/dev/null; then
+					n="$(wc -c <"$tmp" 2>/dev/null | tr -d ' \n')"
+					if [ "$n" = 32 ]; then
+						h="$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')"
+						case "$h" in
+							????????????????????????????????????????????????????????????????)
+								case "$h" in *[!0-9a-f]*) ;; *) rm -f "$tmp"; printf '%s' "$h"; return 0 ;; esac ;;
+						esac
+					fi
+				fi
+				rm -f "$tmp"
+			fi
+		fi
+		if [ -d "${OC_RUNDIR:-}" ] && command -v md5sum >/dev/null 2>&1; then
+			tmp="$(mktemp "$OC_RUNDIR/rnd.XXXXXX" 2>/dev/null)"
+			if [ -n "$tmp" ]; then
+				if : >"$tmp" 2>/dev/null && dd if=/dev/urandom of="$tmp" bs=64 count=1 2>/dev/null; then
+					n="$(wc -c <"$tmp" 2>/dev/null | tr -d ' \n')"
+					if [ "$n" = 64 ]; then
+						# md5sum 只给 32 位十六进制，而调用方按 64 位使用
+						# （网关 token / 候选标识），所以取两块各自独立的随机
+						# 数据分别求摘要后拼接，保证输出仍是 64 位。
+						h="$(md5sum "$tmp" 2>/dev/null | awk '{print $1}')$(dd if=/dev/urandom bs=64 count=1 2>/dev/null | md5sum 2>/dev/null | awk '{print $1}')"
+						case "$h" in
+							????????????????????????????????????????????????????????????????)
+								case "$h" in *[!0-9a-f]*) ;; *) rm -f "$tmp"; printf '%s' "$h"; return 0 ;; esac ;;
+						esac
+					fi
+				fi
+				rm -f "$tmp"
+			fi
+		fi
 	fi
-	awk 'BEGIN{srand();for(i=0;i<32;i++)printf "%02x", int(rand()*256)}'
+	return 1
 }
 
 oc_pty_run() {

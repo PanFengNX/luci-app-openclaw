@@ -25,6 +25,9 @@ GH_API="https://api.github.com/repos/$GH_REPO/releases/latest"
 GH_DL_PREFIX="https://github.com/$GH_REPO/releases/download/"
 
 PKG_NAME="luci-app-openclaw"
+# apk 已安装库文本路径。默认就是 apk 自己的已安装库；这个变量只为测试注入，
+# 不要在生产里改。
+APK_DB_FILE="${APK_DB_FILE:-/lib/apk/db/installed}"
 MAX_BYTES=8388608      # 8 MiB：本包是纯脚本，正常只有几十 KB
 FETCH_TIMEOUT=30       # 元数据 / 校验和：30s
 PKG_TIMEOUT=180        # 插件包本体：3min
@@ -513,20 +516,74 @@ cmd_check() {
 }
 
 # ---------------------------------------------------------------- backup
+apk_db_files() {
+	# 从 apk 已安装库输出目标包的文件相对路径。F: 是目录相对路径（根目录为空），
+	# R: 是该目录下不含斜杠的文件名；M:/a:/Z: 等元数据行全部忽略。
+	awk -v pkg="$PKG_NAME" '
+		$0 == "P:" pkg { in_pkg = 1; dir = ""; next }
+		/^P:/ { in_pkg = 0 }
+		in_pkg && /^F:/ { dir = substr($0, 3); next }
+		in_pkg && /^R:/ {
+			name = substr($0, 3)
+			if (dir != "") print dir "/" name
+			else print name
+		}
+		/^$/ { in_pkg = 0 }
+	' "$APK_DB_FILE" 2>/dev/null
+}
+
+installed_files_list() {
+	# 输出已安装文件的相对路径；诊断进入日志，不能污染 stdout。
+	local raw rc
+	if command -v apk >/dev/null 2>&1; then
+		raw="$(apk info -L "$PKG_NAME" 2>/dev/null)"
+		rc=$?
+		if [ "$rc" -ne 0 ] || [ -z "$raw" ]; then
+			raw="$(apk_db_files)"
+			if [ -z "$raw" ]; then
+				msg 'apk info 与已安装库都没取到文件清单'
+				return 1
+			fi
+		fi
+	else
+		raw="$(opkg files "$PKG_NAME" 2>/dev/null)"
+		rc=$?
+		[ "$rc" -eq 0 ] || { msg "获取已安装文件列表失败（退出码 $rc）"; return 1; }
+	fi
+	# 两个包管理器都统一：去行首空白、剥掉至多一个前导 /；剥完仍为空、
+	# 仍以 / 开头、含 .. 段则丢弃。老代码对两个包管理器从来都是这套逻辑，
+	# 这道 allow_absolute 门是新加的收紧；某个构建的 apk 输出绝对路径时会让
+	# 清单再次被清空。放行不会形成安全口子：//etc/x 与含 .. 段仍被丢弃，且
+	# backup_current 对 /*、.. 是中止安装而不是跳过，所以归一化路径仍有第二道校验。
+	printf '%s\n' "$raw" | awk '
+		/^[[:space:]]*$/ { next }
+		/^Package / { next }
+		/ contains:[[:space:]]*$/ { next }
+		{
+			sub(/^[[:space:]]*/, "")
+			sub(/^\//, "")
+			# 末尾 /^-/ 是为了不让 tar -T 把清单行当成命令行选项（如 -rf）。
+			if ($0 == "" || $0 ~ /(^|\/)\.\.(\/|$)/ || $0 ~ /^\// || $0 ~ /^-/) next
+			print
+		}
+	'
+}
+
 backup_current() {
 	# 把当前已安装的包文件打成回滚包 -> 打印路径
-	local list="$WORK/files.list" keep="$WORK/files.keep" out f missing=0
+	local list="$WORK/files.list" keep="$WORK/files.keep" out f missing=0 digest
 	out="$ROLLBACK_DIR/rollback-$(date +%Y%m%d-%H%M%S)-$$.tar.gz"
-	if command -v apk >/dev/null 2>&1; then
-		apk info -L "$PKG_NAME" 2>/dev/null | awk '/^\//{ sub(/^\//, ""); print }' >"$list"
-	else
-		opkg files "$PKG_NAME" 2>/dev/null | awk '/^\//{ sub(/^\//, ""); print }' >"$list"
-	fi
+	installed_files_list >"$list" || return 1
 	[ -s "$list" ] || { msg '无法获取当前安装文件列表，已停止安装'; return 1; }
 	: >"$keep"
 	while IFS= read -r f; do
+		# 与 installed_files_list 里 awk 的按段判断保持一致，避免正常文件名被
+		# 当成路径穿越而把整次更新拒掉；仍拒绝绝对路径。
+		# 注意：这些模式**不能加引号** —— POSIX 里被引号包住的模式字符失去通配
+		# 意义，'../*' 会退化成匹配字面量 "../*"，路径穿越就拦不住了。
+		# 实测教训：加引号的版本放行了 a/../b、../y、x/.. 三种穿越形态。
 		case "$f" in
-			''|/*|*..*) msg "安装清单含可疑路径（$f），已停止安装"; return 1 ;;
+			''|/*|..|../*|*/..|*/../*) msg "安装清单含可疑路径（$f），已停止安装"; return 1 ;;
 		esac
 		if [ -e "/$f" ] || [ -L "/$f" ]; then
 			printf '%s\n' "$f" >>"$keep"
@@ -542,8 +599,12 @@ backup_current() {
 	fi
 	chmod 600 "$out" 2>/dev/null || true
 	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum "$out" | awk '{print $1}' >"$out.sha256"
-		chmod 600 "$out.sha256" 2>/dev/null || true
+		digest="$(sha256sum "$out" 2>/dev/null | awk '{print $1}')"
+		case "$digest" in
+			????????????????????????????????????????????????????????????????) case "$digest" in *[!0-9a-f]*) ;; *) printf "%s
+" "$digest" >"$out.sha256" || { msg '写入回滚包完整性校验失败，已停止安装'; rm -f "$out" "$out.sha256"; return 1; }; chmod 600 "$out.sha256" 2>/dev/null || msg "告警：无法设置回滚包校验文件权限（$out.sha256）" ;; esac ;;
+			*) msg '无法为回滚包生成有效完整性校验，已停止安装'; rm -f "$out" "$out.sha256"; return 1 ;;
+		esac
 	else
 		msg '缺少 sha256sum，无法为回滚包建立完整性校验，已停止安装'
 		rm -f "$out"; return 1

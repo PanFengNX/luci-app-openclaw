@@ -822,6 +822,8 @@ bootstrap_config() {
 	fi
 	if [ ! -f "$conf" ]; then
 		token="$(oc_rand_hex)"
+		# 宁可中止安装，也不用空 token 或弱随机值初始化配置。
+		[ -n "$token" ] || { ilog "ERROR: 无法生成安全网关 token（随机源不可用），已中止配置初始化"; return 1; }
 		# 不要在这里添加 allowInsecureAuth / dangerouslyDisableDeviceAuth /
 		# dangerouslyAllowHostHeaderOriginFallback：2026.10 起这三个键已被删除，
 		# 写入任意一个都会让整份配置判为无效（Unrecognized key），网关拒绝启动。
@@ -847,6 +849,7 @@ EOF
 		oc_credential_state "$conf"
 		if [ "$OC_CRED_STATE" = "MISSING" ]; then
 			token="$(oc_rand_hex)"
+			[ -n "$token" ] || { ilog "ERROR: 无法生成安全网关 token，已中止配置初始化"; return 1; }
 			"$OC" config set gateway.auth.mode token >/dev/null 2>&1
 			"$OC" config set gateway.auth.token "$token" >/dev/null 2>&1
 			ilog "已生成网关 token（原本缺失）"
@@ -858,6 +861,8 @@ EOF
 		# auth.token 键才补，避免覆盖 SecretRef。
 		if ! grep -q '"auth"' "$conf" 2>/dev/null; then
 			token="$(oc_rand_hex)"
+			# 宁可中止，也不用空 token 或弱随机值补凭据。
+			[ -n "$token" ] || { ilog "ERROR: 无法生成安全网关 token（随机源不可用），已中止凭据补齐"; return 1; }
 			"$OC" config set gateway.auth.mode token >/dev/null 2>&1
 			"$OC" config set gateway.auth.token "$token" >/dev/null 2>&1
 		fi

@@ -499,7 +499,9 @@ cmd_create() {
 
 	ts="$(date +%s)"
 	local size
-	size="$(wc -c <"$out" 2>/dev/null | tr -d ' ')"
+	# stat -c %s 是 O(1) 元数据读取；wc -c 会把整个归档读一遍。备份刚写完
+	# 还在页缓存里时差别不大，但闪存/机械盘上的旧归档一旦要重读就很慢。
+	size="$(stat -c %s "$out" 2>/dev/null | tr -d ' \r\n')"
 	case "$size" in ''|*[!0-9]*) size=0 ;; esac
 
 	blog "已创建备份 $out (${size} 字节)"
@@ -539,7 +541,12 @@ cmd_list() {
 		[ -n "$f" ] || continue
 		[ -f "$f" ] || continue
 		n="${f##*/}"
-		size="$(wc -c <"$f" 2>/dev/null | tr -d ' ')"
+		# 必须用 stat -c %s：wc -c 会把整个归档读一遍，2.5GB 的备份在
+		# 路由器存储上要几十秒，列表接口直接超时 —— 用户看到的就是
+		# 「本地备份一直不出 / 卡住，过一会儿又好了」（页缓存热了就快了）。
+		# stat -c 在 GNU 与 busybox 上都可用（本文件 cmd_create、lib.sh
+		# oc_mtime 早已依赖它）。
+		size="$(stat -c %s "$f" 2>/dev/null | tr -d ' \r\n')"
 		case "$size" in ''|*[!0-9]*) size=0 ;; esac
 		case "$ts" in ''|*[!0-9]*) ts=0 ;; esac
 		[ "$first" = "1" ] || printf ','

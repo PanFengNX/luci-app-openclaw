@@ -2914,6 +2914,10 @@ cloud_sched_vals() {
 	OC_SCH_HOUR="$(cloud_sched_int "$(uci_get main.cloud_hour '4')" 4 0 23 '小时（cloud_hour）')"
 	OC_SCH_MINUTE="$(cloud_sched_int "$(uci_get main.cloud_minute '30')" 30 0 59 '分钟（cloud_minute）')"
 	OC_SCH_KEEP="$(cloud_sched_int "$(uci_get main.cloud_keep '7')" 7 1 30 '保留份数（cloud_keep）')"
+	# 本地留存份数：定时备份上传成功后本地也保留副本，按 mtime 轮转。
+	# 默认 2（当前一份 + 上一份）；0 = 不保留本地（旧行为：上传后删本地）。
+	# 老配置没有这个键也能跑（uci_get 回落默认值），符合 UPGRADE-COMP 第 4 条。
+	OC_SCH_KEEP_LOCAL="$(cloud_sched_int "$(uci_get main.cloud_keep_local '2')" 2 0 30 '本地保留份数（cloud_keep_local）')"
 }
 
 cloud_cron_count_mark() {
@@ -3145,9 +3149,9 @@ cmd_schedule_status() {
 	[ -n "$line" ] && installed=true
 	[ "$OC_SCH_ENABLED" = "1" ] && enabled=true
 
-	printf '{"ok":true,"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"installed":%s,"line":"%s"}\n' \
+	printf '{"ok":true,"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"keep_local":%s,"installed":%s,"line":"%s"}\n' \
 		"$enabled" "$OC_SCH_PERIOD" "$OC_SCH_WEEKDAY" "$OC_SCH_HOUR" \
-		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$installed" "$(jstr "$line")"
+		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$OC_SCH_KEEP_LOCAL" "$installed" "$(jstr "$line")"
 }
 
 cmd_schedule_apply() {
@@ -3187,6 +3191,7 @@ cloud_sched_opt() {
 		hour)    printf 'cloud_hour' ;;
 		minute)  printf 'cloud_minute' ;;
 		keep)    printf 'cloud_keep' ;;
+		keep_local) printf 'cloud_keep_local' ;;
 		*)       return 1 ;;
 	esac
 }
@@ -3209,6 +3214,8 @@ cloud_sched_check() {
 		hour)    lo=0; hi=23 ;;
 		minute)  lo=0; hi=59 ;;
 		keep)    lo=1; hi=30 ;;
+		# keep_local：0 = 不保留本地副本（旧行为），因此下限是 0。
+		keep_local) lo=0; hi=30 ;;
 		*)       return 1 ;;
 	esac
 
@@ -3307,9 +3314,9 @@ EOF
 	line="$(cloud_cron_line)"
 	if [ "$OC_SCH_ENABLED" = "1" ]; then enabled=true; else enabled=false; fi
 
-	printf '{"ok":true,"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"line":"%s"}\n' \
+	printf '{"ok":true,"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"keep_local":%s,"line":"%s"}\n' \
 		"$enabled" "$OC_SCH_PERIOD" "$OC_SCH_WEEKDAY" "$OC_SCH_HOUR" \
-		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$(jstr "$line")"
+		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$OC_SCH_KEEP_LOCAL" "$(jstr "$line")"
 }
 
 # ---------------------------------------------------------------- backup-run
@@ -3597,6 +3604,64 @@ EOF
 	printf '%s' "$n"
 }
 
+br_prune_local() {
+	# br_prune_local <dir> <keep> <except> -> stdout: 实际删除的份数
+	#
+	# 本地副本轮转（与远端 br_prune 同一语义）：把 <dir> 下符合
+	# openclaw-backup-*.tar.gz 的普通文件按 mtime 从新到旧排序，保留最新
+	# <keep> 份（<except> 指名的文件不参与统计也不参与删除——它是本次任务
+	# 刚产出的归档，去留由调用方决定，这里绝不碰）。
+	#
+	# 安全边界：glob 锚定在 <dir> 内、模式固定、只删普通文件；所有被删的
+	# 名字都来自 glob 展开结果，不拼任何用户输入。目录不存在 / keep 非法
+	# / keep < 1 时原样返回 0。删除失败只告警、继续，不让整个备份任务失败。
+	#
+	# 排序键用 mtime（oc_mtime -> stat -c %Y，GNU 与 busybox 都可用），
+	# 与 backup.sh cmd_list 的排序口径一致。
+	local dir="$1" keep="$2" except="$3" tab f n drop
+
+	[ -d "$dir" ] || { printf '0'; return 0; }
+	case "$keep" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+	[ "$keep" -ge 1 ] || { printf '0'; return 0; }
+	# except 只可能是纯文件名（backup.sh create 的返回值）；带路径一律视为空
+	case "$except" in ''|*/|*..*|*/*) except='' ;; esac
+
+	tab="$(printf '\t')"
+	drop="$(
+		{
+			for f in "$dir"/openclaw-backup-*.tar.gz; do
+				[ -f "$f" ] || continue
+				n="${f##*/}"
+				[ "$n" = "$except" ] && continue
+				printf '%s\t%s\n' "$(oc_mtime "$f")" "$n"
+			done
+		} | sort -rn 2>/dev/null | awk -F "$tab" -v keep="$keep" '
+			# 排序后第 keep 行之后的就是要删的旧副本
+			NR > keep { print $2 }
+		'
+	)"
+
+	# 用 here-doc 而不是管道：管道里的 while 在子 shell 里跑，n 回传不出来
+	# （与 br_prune 同一个坑）。
+	n=0
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		case "$f" in
+			openclaw-backup-*.tar.gz) ;;
+			*) continue ;;
+		esac
+		if rm -f "$dir/$f" 2>/dev/null; then
+			n=$((n + 1))
+			br_log "本地轮转：删除旧副本 $f"
+		else
+			br_log "警告：删除本地旧副本失败：$f"
+		fi
+	done <<EOF
+$drop
+EOF
+	printf '%s' "$n"
+}
+
 # ---------------------------------------------------------------- 手动备份（带进度）
 bk_log() {
 	# 写进度日志：前端轮询这个文件。
@@ -3719,7 +3784,7 @@ backup_bg_worker() {
 		rm -f "$CLOUD_BK_PID" 2>/dev/null
 		return 0
 	fi
-	_sz="$(wc -c <"$local_path" 2>/dev/null | tr -d ' \r\n')"
+	_sz="$(stat -c %s "$local_path" 2>/dev/null | tr -d ' \r\n')"
 	case "$_sz" in ''|*[!0-9]*) _sz=0 ;; esac
 	if [ "$_sz" -ge 1048576 ]; then
 		_szh="$((_sz / 1048576)) MB"
@@ -3848,6 +3913,21 @@ cmd_backup_run() {
 	errf="$OC_RUNDIR/cloud-br-err.$$"
 	rm -f "$out" "$errf" 2>/dev/null
 
+	# ---- a0) 本地副本先腾位置 ----
+	# 本地保留 N 份（main.cloud_keep_local，默认 2）时，打包前先把旧副本
+	# 轮转到 N-1 份：否则旧副本占着空间，backup.sh create 的空间预检可能
+	# 直接失败，连云端备份都做不成。上传随后失败也只丢最旧一份本地副本
+	# （云端仍有它），可接受。keep_local = 0 时跳过（旧行为：不保留本地）。
+	if [ "$OC_SCH_KEEP_LOCAL" -ge 1 ]; then
+		local pre_dir pre_dropped
+		pre_dir="$(sh "$OC_CLOUD_BACKUP" path 2>/dev/null)"
+		[ -n "$pre_dir" ] || pre_dir="$(oc_base_dir)/backups"
+		pre_dropped="$(br_prune_local "$pre_dir" $((OC_SCH_KEEP_LOCAL - 1)) '')"
+		case "$pre_dropped" in ''|*[!0-9]*) pre_dropped=0 ;; esac
+		[ "$pre_dropped" -gt 0 ] && br_log \
+			"打包前本地轮转：删除 ${pre_dropped} 份旧副本（本地保留 ${OC_SCH_KEEP_LOCAL} 份）"
+	fi
+
 	# ---- a) 本地备份：复用 backup.sh create ----
 	# 范围就是 backup.sh 的默认范围：/etc/config/openclaw + 数据目录
 	# （配置、会话、工作区）；程序目录与 Node 运行时本来就不在备份里。
@@ -3911,10 +3991,26 @@ cmd_backup_run() {
 			pruned=0 ;;
 	esac
 
-	# ---- d) 本机副本：上传已确认成功，删掉本次创建的归档 ----
-	# 定时任务每天跑一次，若不在本地清理，含工作区的 tar.gz 会无限堆积。
-	# 三重校验，任一不满足都保留并记日志；删除失败也不让任务失败。
+	# ---- d) 本机副本：本地与云端都留存，本地按份数轮转 ----
+	# 需求（2026-10-29）：定时备份不能只留云端 —— 网盘账号失效 / 断网时，
+	# 本地必须还有可恢复的副本。本地与云端一样按份数轮转：
+	# main.cloud_keep_local 份（默认 2；0 = 不保留本地，即旧行为）。
+	#
+	# keep_local >= 1：本次归档保留（a0 已提前腾位）；这里再兜底轮转一次，
+	# 压回 keep_local 份总量 —— a0 之后可能有手动备份落了新文件。
+	# 本次归档在排除名单里，不会被删。
+	local keep_local pruned_local
+	keep_local="$OC_SCH_KEEP_LOCAL"
 	local_removed=false
+	if [ "$keep_local" -ge 1 ]; then
+		# 总量 = keep_local-1 份旧的 + 本次 1 份 = keep_local 份
+		pruned_local="$(br_prune_local "$dir" $((keep_local - 1)) "$file")"
+		case "$pruned_local" in ''|*[!0-9]*) pruned_local=0 ;; esac
+		[ "$pruned_local" -gt 0 ] && br_log \
+			"上传后本地轮转：再删除 ${pruned_local} 份旧副本（本地保留 ${keep_local} 份）"
+	else
+	# keep_local = 0：旧行为 —— 上传已确认成功，删掉本次创建的归档。
+	# 三重校验，任一不满足都保留并记日志；删除失败也不让任务失败。
 	drop_reason=""
 	case "$local_path" in
 		/*) ;;
@@ -3950,10 +4046,11 @@ cmd_backup_run() {
 	else
 		br_log "警告：删除本机副本失败（$file），已保留"
 	fi
+	fi  # keep_local = 0 的旧删除逻辑到这里结束
 
-	br_log "完成：已上传 $remote；清理 $pruned 份旧备份（保留 $OC_SCH_KEEP 份）"
-	printf '{"ok":true,"uploaded":"%s","pruned":%s,"local_removed":%s}\n' \
-		"$(jstr "$remote")" "$pruned" "$local_removed"
+	br_log "完成：已上传 $remote；云端清理 $pruned 份旧备份（保留 $OC_SCH_KEEP 份），本地保留 ${keep_local} 份"
+	printf '{"ok":true,"uploaded":"%s","pruned":%s,"local_removed":%s,"local_kept":%s}\n' \
+		"$(jstr "$remote")" "$pruned" "$local_removed" "${keep_local:-0}"
 	exit 0
 }
 

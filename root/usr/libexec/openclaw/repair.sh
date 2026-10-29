@@ -193,6 +193,11 @@ if [ -f "$CONF" ]; then
 		bind="$(uci_get main.bind lan)"
 		case "$bind" in *[!A-Za-z0-9_.:-]* ) bind="lan" ;; esac
 		token="$(oc_rand_hex)"
+		# 宁可中止重建，也不用空 token 或弱随机值覆盖配置。
+		if [ -z "$token" ]; then
+			say FAIL "无法生成安全网关 token（随机源不可用），已中止配置重建"
+			return 1
+		fi
 			cat >"$CONF" <<EOF
 {
   "gateway": {
@@ -225,11 +230,19 @@ EOF
 				# 只有确实没有凭据时才补。SecretRef 绝不能覆盖成明文 ——
 				# 那会把凭据重新落成 plaintext，破坏 secrets audit。
 				if [ -x "$OB" ]; then
-					HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
-						"$OB" config set gateway.auth.mode token >/dev/null 2>&1
-					HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
-						"$OB" config set gateway.auth.token "$(oc_rand_hex)" >/dev/null 2>&1 \
-						&& say FIX "已补齐网关 token"
+					# 顺序很重要：必须**先**拿到 token 再去改 auth.mode。
+					# 反过来（先 set mode 再生成 token）一旦随机源失败，就会留下
+					# "mode=token 但没有 token" 的半截配置，网关直接起不来。
+					token="$(oc_rand_hex)"
+					if [ -n "$token" ]; then
+						HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+							"$OB" config set gateway.auth.mode token >/dev/null 2>&1
+						HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+							"$OB" config set gateway.auth.token "$token" >/dev/null 2>&1 \
+							&& say FIX "已补齐网关 token"
+					else
+						say WARN "无法生成安全网关 token（随机源不可用），未改写配置"
+					fi
 				fi
 				;;
 			BADREF)
