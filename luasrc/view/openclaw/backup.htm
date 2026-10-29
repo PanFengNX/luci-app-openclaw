@@ -657,6 +657,12 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
   <div class="oc-row">
     <label>保留份数</label>
     <input type="number" id="cl-sch-keep" min="1" max="30" value="7">
+    <span class="oc-hint">云端保留的份数</span>
+  </div>
+  <div class="oc-row">
+    <label>本地保留份数</label>
+    <input type="number" id="cl-sch-keeplocal" min="0" max="30" value="2">
+    <span class="oc-hint">本地也留存这么多份（按时间轮转，含手动创建的备份）；0 = 只留云端</span>
   </div>
   <div class="oc-actions">
     <button id="btn-cl-sch-save">保存定时设置</button>
@@ -1888,6 +1894,7 @@ function clRenderSch(){
   $('cl-sch-weekday').disabled = busy;
   $('cl-sch-time').disabled    = busy;
   $('cl-sch-keep').disabled    = busy;
+  $('cl-sch-keeplocal').disabled = busy;
   $('btn-cl-sch-save').disabled = busy;
 }
 
@@ -1924,6 +1931,9 @@ function clApplySchedule(r){
   $('cl-sch-time').value = ('0' + hh).slice(-2) + ':' + ('0' + mm).slice(-2);
   var kp = parseInt(d.keep, 10);
   $('cl-sch-keep').value = (isNaN(kp) || kp < 1 || kp > 30) ? 7 : kp;
+  // 本地保留份数：老版本后端不回这个字段，回落到默认 2
+  var kpl = parseInt(d.keep_local, 10);
+  $('cl-sch-keeplocal').value = (isNaN(kpl) || kpl < 0 || kpl > 30) ? 2 : kpl;
   clSchSyncWeekday();
   // crontab 行由后端给出；为空说明当前没有任何生效的定时任务。
   $('cl-sch-hint').textContent = (d.line && String(d.line).length)
@@ -1951,6 +1961,11 @@ function clSchSave(){
     clErr('cl-err-sch', '保留份数不合法：需为 1-30');
     return;
   }
+  var keeplocal = parseInt($('cl-sch-keeplocal').value, 10);
+  if (isNaN(keeplocal) || keeplocal < 0 || keeplocal > 30){
+    clErr('cl-err-sch', '本地保留份数不合法：需为 0-30');
+    return;
+  }
   var enabled = $('cl-sch-enabled').checked ? '1' : '0';
   var period  = $('cl-sch-period').value === 'weekly' ? 'weekly' : 'daily';
   var weekday = parseInt($('cl-sch-weekday').value, 10);
@@ -1964,7 +1979,8 @@ function clSchSave(){
 
   post(API.cloud_schedule_set, {
     enabled: enabled, period: period, weekday: String(weekday),
-    hour: String(hour), minute: String(min), keep: String(keep)
+    hour: String(hour), minute: String(min), keep: String(keep),
+    keep_local: String(keeplocal)
   }, function(r){
     CL.schBusy = false;
     if (!r || !r.ok){

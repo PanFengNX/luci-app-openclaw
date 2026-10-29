@@ -1823,6 +1823,8 @@ local SCH_NUM = {
 	hour    = { 0, 23 },
 	minute  = { 0, 59 },
 	keep    = { 1, 30 },
+	-- 本地保留份数：0 = 不保留本地副本（旧行为），因此下限是 0。
+	keep_local = { 0, 30 },
 }
 
 local function sch_int(key, v)
@@ -1863,16 +1865,33 @@ function api_cloud_schedule_set()
 		nums[key] = n
 	end
 
+	-- keep_local 是新字段：浏览器里缓存的旧页面不会提交它。缺席时不下发
+	-- 这一键，cloud.sh 的 schedule-set 对缺席键保持 UCI 旧值 —— 旧页面保存
+	-- 不会因此失败。提交了就严格校验（0-30）。
+	local kl = http.formvalue("keep_local")
+	if kl ~= nil and kl ~= "" then
+		local n = sch_int("keep_local", kl)
+		if n == nil then
+			out({ ok = false, error = "参数不合法：keep_local" })
+			return
+		end
+		nums.keep_local = n
+	end
+
 	-- 逐行 key=value，与 cloud.sh 的解析格式一致；值全部来自上面的白名单，
 	-- 不含换行 / 控制字符，因此不可能注入额外的键。
-	local text = table.concat({
+	local text_parts = {
 		"enabled=" .. enabled,
 		"period=" .. period,
 		"weekday=" .. nums.weekday,
 		"hour=" .. nums.hour,
 		"minute=" .. nums.minute,
 		"keep=" .. nums.keep,
-	}, "\n") .. "\n"
+	}
+	if nums.keep_local ~= nil then
+		text_parts[#text_parts + 1] = "keep_local=" .. nums.keep_local
+	end
+	local text = table.concat(text_parts, "\n") .. "\n"
 
 	-- 复用已有的 stdin 通道：私有 rundir 下 0600 临时文件 + shell 重定向，
 	-- 用完立刻删除（cloud_exec_stdin 内部负责）。
