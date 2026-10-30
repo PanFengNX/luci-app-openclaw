@@ -1752,6 +1752,41 @@ oc_as_user() {
 	su -s /bin/sh "$u" -c "$quoted" 2>/dev/null
 }
 
+oc_harden_root_paths() {
+	# oc_harden_root_paths <base> -> 把 base 下 root-only 的凭据与归档路径收紧
+	#
+	# oc_fix_perms 会 chown -R 整个安装目录给服务用户，但下列路径属于
+	# root-only：删除密码哈希、云备份加密口令、备份归档本身。它们必须保持
+	# root 属主，否则网关（或任一第三方插件）被攻陷后可直接读走，从
+	# "网关失陷"升级成"云端备份全泄"。
+	# 这里逐个收紧，而不是把 base 改成白名单递归：白名单漏一个目录就会让
+	# 网关写不了自己的运行目录，代价远高于收益。
+	# 只处理存在的路径；任何一步失败只告警，不影响调用方返回码。
+	local b="${1:-}"
+	[ -n "$b" ] || return 0
+
+	local sec="$b/secure"
+	if [ -d "$sec" ]; then
+		chown -R root:root "$sec" 2>/dev/null || oc_warn "无法把 $sec 属主改回 root"
+		chmod -R go-rwx "$sec" 2>/dev/null || oc_warn "无法收紧 $sec 的组/其他权限"
+		chmod 700 "$sec" 2>/dev/null || oc_warn "无法把 $sec 权限设为 0700"
+	fi
+
+	local pass="$b/cloud/pass"
+	if [ -f "$pass" ]; then
+		chown root:root "$pass" 2>/dev/null || oc_warn "无法把 $pass 属主改回 root"
+		chmod 600 "$pass" 2>/dev/null || oc_warn "无法把 $pass 权限设为 0600"
+	fi
+
+	local bk="$b/backups"
+	if [ -d "$bk" ]; then
+		chown -R root:root "$bk" 2>/dev/null || oc_warn "无法把 $bk 属主改回 root"
+		chmod -R go-rwx "$bk" 2>/dev/null || oc_warn "无法收紧 $bk 的组/其他权限"
+		chmod 700 "$bk" 2>/dev/null || oc_warn "无法把 $bk 权限设为 0700"
+	fi
+	return 0
+}
+
 oc_fix_perms() {
 	local base ocdir
 	base="$(oc_base_dir)"
@@ -1762,6 +1797,11 @@ oc_fix_perms() {
 			chown -R "$OC_USER":"$OC_GROUP" "$base" 2>/dev/null || chown -R "$OC_USER" "$base" 2>/dev/null
 		fi
 		chmod -R u+rwX "$base" 2>/dev/null
+		# 递归 chown 之后把 root-only 的凭据与归档路径收紧回来。
+		# 顺序不能反：先保证网关可写，再收回不该给它的东西。
+		# 必须放在这里而不是函数末尾：下面 "$base"/* 分支会提前 return，
+		# 而默认 openclaw_dir 正是 "$base/openclaw"，末尾的调用永远到不了。
+		oc_harden_root_paths "$base"
 	fi
 
 	# 程序目录可以独立于安装目录。那种情况下它不在上面的 chown -R 覆盖范围里，

@@ -444,6 +444,21 @@ start_service() {
 
 	[ "$enabled" -eq 1 ] || return 0
 
+	# main.state_dir 是用户可填的路径。_state_dir_safe() 一直只有定义、
+	# 没有调用点，等于从未校验 —— 填 /etc 就会在下面 mkdir 出 /etc/workspace、
+	# 把配置与状态写进系统目录，且 repair/adopt 的递归 chown 也会跟着打到那里。
+	#
+	# 按本文件既有的 fail-closed 口径处理（与服务用户不存在、VAR 域属主不对
+	# 同一口径）：拒绝启动并给出可直接执行的修复命令。
+	# 刻意**不**回退到默认目录 —— 那会让既有数据目录被静默换掉、用户看到的
+	# 是"配置丢了"，而数据目录属于公开契约（见 docs/UPGRADE-COMPAT.md）。
+	# 位置必须在 enabled 判断之后：未启用时不该因为配置问题报启动失败。
+	if ! _state_dir_safe "$state_dir"; then
+		logger -t openclaw "拒绝启动：main.state_dir 未通过安全校验（$state_dir）"
+		logger -t openclaw "修复：把 main.state_dir 改成安装目录下的子路径（至少两级），或清空以使用默认数据目录"
+		return 1
+	fi
+
 	# --- runtime values: JSON wins, UCI is the fallback
 	port="$(uci_get main.port 18789)"
 	bind="$(uci_get main.bind lan)"

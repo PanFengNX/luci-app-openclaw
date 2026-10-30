@@ -8,6 +8,9 @@ local sys   = require "luci.sys"
 local util  = require "luci.util"
 local http  = require "luci.http"
 local jsonc = require "luci.jsonc"
+-- 只用于 lstat（判符号链接）。加载失败不能让整个控制器挂掉，所以走 pcall；
+-- 取不到时相关调用点按 fail-closed 处理，见 api_backup_download。
+local nfs_ok, nfs = pcall(require, "nixio.fs")
 
 local SH     = "/usr/libexec/openclaw/cli.sh"
 local MODELS = "/usr/libexec/openclaw/models.sh"
@@ -294,6 +297,26 @@ local function run_capture(args)
 		txt = "…（输出过长，仅显示最后 256KB）\n" .. txt:sub(-MAX_CAPTURE)
 	end
 	return rc == 0, txt
+end
+
+-- sh() 只返回 stdout，退出码被丢掉。判定类查询（"删除密码是否已设置"）
+-- 必须两个都拿到：命令失败时 stdout 是空串，只看文本会把"查询失败"误判成
+-- "密码未设置"，于是本该执行的旧密码校验被整段跳过 —— 这是 fail-open。
+-- 沿用 run_capture 的私有临时文件套路，但只重定向 stdout：oc_warn/oc_err
+-- 走 stderr，混进来会污染 JSON 判定。
+local function sh_rc(args)
+	if not need_dir() then return nil, "" end
+	local tmp = RUNDIR .. "/rc-" .. os.date("%Y%m%d%H%M%S") .. "-" ..
+		tostring(math.random(100000, 999999))
+	local rc = sys.call(args .. " >" .. q(tmp) .. " 2>/dev/null")
+	local fh = io.open(tmp, "rb")
+	local txt = ""
+	if fh then
+		txt = fh:read("*a") or ""
+		fh:close()
+	end
+	os.remove(tmp)
+	return rc, util.trim(txt)
 end
 
 -- 网关 token 掩码：只留后 4 位；短于 8 位全掩码。空值仍给空串，
@@ -1263,7 +1286,28 @@ function api_backup_download()
 		http.write("backup directory unavailable")
 		return
 	end
-	local fh = io.open(dir .. "/" .. f, "rb")
+	local path = dir .. "/" .. f
+	-- 归档目录里若被人放进一个符号链接，io.open 会跟随链接把目标文件读出去。
+	-- LuCI 以 root 运行，那就是任意文件读取（备份目录里放 x.tar.gz -> /etc/shadow，
+	-- 管理员点下载即可）。打开前必须先看**链接本身**而不是链接目标：
+	-- stat() 跟随链接，lstat() 不跟随 —— 只能用后者才看得出它是链接。
+	-- 取不到 lstat 时按 fail-closed 拒绝，不能退回裸 io.open。
+	local got_st, st
+	if nfs_ok and nfs and nfs.lstat then
+		got_st, st = pcall(nfs.lstat, path)
+	else
+		got_st = false
+	end
+	if not got_st or not st or st.type == "lnk" then
+		if not got_st then
+			io.stderr:write("openclaw: 无法对备份文件做 lstat，已拒绝下载（" ..
+				tostring(f) .. "）\n")
+		end
+		http.status(400, "Bad Request")
+		http.write("bad file name")
+		return
+	end
+	local fh = io.open(path, "rb")
 	if not fh then
 		http.status(404, "Not Found")
 		http.write("backup not found")
@@ -1726,7 +1770,13 @@ function api_delpass_set()
 		return
 	end
 	-- 改密码必须给旧密码：否则谁打开这个页面都能把保护换掉。
-	local raw = sh(SH .. " delpass-status")
+	-- 退出码必须先判：查询失败时 raw 是空串，直接 find 会跳过整个分支，
+	-- 等于任何人都能重置保护。查不到状态就拒绝，不能放行。
+	local rc, raw = sh_rc(SH .. " delpass-status")
+	if rc ~= 0 then
+		out({ ok = false, error = "无法确认删除密码的当前状态，已拒绝本次修改" })
+		return
+	end
 	if raw:find('"set":true') then
 		local old = http.formvalue("old") or ""
 		local okold, oerr = delpass_gate(old)

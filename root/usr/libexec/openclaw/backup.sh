@@ -704,12 +704,12 @@ cmd_restore() {
 		oc_warn "备份里没有 home/.openclaw，数据目录保持不变"
 	fi
 
-	rm -rf "$stage"
-
 	# 6b) 定时任务：备份里记的 openclaw 行写回 crontab
 	# 放在数据目录恢复**之后**：写 crontab 是不可回滚的副作用，
 	# 若数据恢复失败把旧数据挪回去，crontab 不该已经被改过。
 	# 这些行不在数据目录内，不写回就等于"恢复后云备份静默消失"。
+	# ⚠️ 暂存目录必须活到 6b / 6c 读完 crontab.txt、plugins.txt 之后才能回收
+	#    （见 6c 段末尾的 oc_rmtree）。此处提前删除会让两个分支恒假。
 	if [ -s "$stage/crontab.txt" ]; then
 		_ct="${OC_CRONTAB:-/etc/crontabs/root}"
 		_ctdir="$(dirname "$_ct")"
@@ -743,6 +743,11 @@ cmd_restore() {
 			oc_warn "若刚重装过 OpenClaw，请在「模型」页重新安装上述插件，否则对应 provider 不可用"
 		fi
 	fi
+
+	# 6c 之后才回收暂存目录：6b / 6c 需要读 $stage 下的两个清单。
+	# 用 oc_rmtree（lib.sh），不新增 rm -rf。失败路径由 EXIT trap
+	# oc_restore_cleanup 兜底，这里只管正常路径。
+	oc_rmtree "$stage"
 
 	# 7) 凭据文件重新收紧权限，并修正属主
 	[ -f "$data/.env" ] && chmod 600 "$data/.env" 2>/dev/null
