@@ -159,9 +159,20 @@ rej /tmp
 rej "//etc/x"
 rej /mnt/data/../etc
 rej "relative/path"
-acc /mnt/data/OpenClaw/home/.openclaw
-acc /mnt/sda1/home/.openclaw
-acc /mnt/nvme0n1/openclaw/state
+# MSYS translates absolute POSIX paths before the shell test functions see them,
+# so a synthetic POSIX path is not portable there. The dedicated p1-fixes.sh
+# test covers safe new leaves using a native temporary root; retain only the
+# system-path rejection matrix here on Windows/MSYS.
+case "$(uname -s 2>/dev/null)" in
+	MINGW*|MSYS*|CYGWIN*)
+		printf '    skip  portable state-dir acceptance matrix on %s\n' "$(uname -s)"
+		;;
+	*)
+		acc /mnt/data/OpenClaw/home/.openclaw
+		acc /mnt/sda1/home/.openclaw
+		acc /mnt/nvme0n1/openclaw/state
+		;;
+esac
 exit $rc
 SEOF
 if sh "$TMPDIR2/oc-sd-check.sh" "$INITD" 2>/dev/null; then

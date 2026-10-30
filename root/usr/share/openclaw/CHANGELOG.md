@@ -1,8 +1,33 @@
-<!-- version: 1.8.55 -->
+<!-- version: 1.8.56 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.56
+
+修复 2026-10-30 第二轮深度审计发现的 P1 路径、维修和临时目录问题。
+完整报告见 `docs/AUDIT-2026-10-30.md`。
+
+### 修复
+
+- **普通 repair 会绕过 root-only 权限加固**：`repair.sh` 之前直接对整个安装目录递归 `chown -R openclaw`，会重新把 `secure/delpass`、`cloud/pass` 和 `backups` 交给服务用户。普通 repair 与 `owner-fix` 现在都会调用 `oc_harden_root_paths`。
+- **repair 不识别自定义 `main.state_dir`**：现在只计算一次 `oc_state_dir()`，配置、状态锁、doctor 的 `OPENCLAW_STATE_DIR` 和外置状态目录权限修复都使用同一目录。
+- **repair 对外置 state_dir 缺少安全校验**：在任何递归权限操作前，对 `BASE` 和 `DATA` 都执行同等强度的 fail-closed 路径校验；危险系统路径或符号链接路径不会被触碰，也不会回退到默认目录。
+- **路径校验漏过中间符号链接**：`lib.sh` 和 `init.d` 现在逐组件检查已有路径，最终叶节点不存在的正常新目录仍可创建，已有中间/末端符号链接拒绝。
+- **LuCI 私有临时目录安全边界不足**：`/tmp/.openclaw` 现在要求 root 上下文、root 属主、真实目录和 0700 权限；预置符号链接、普通文件或非 root 目录 fail-closed。
+
+### 回归验证
+
+- 新增 `tools/tests/p1-fixes.sh`，实际执行 lib.sh 与 init.d 的路径校验函数；修复前代码反向运行时安全路径断言失败，修复后通过。
+- 全量回归：**105 通过 / 0 失败 / 1 跳过**。
+- shell 语法检查通过；Lua 使用 `luaparser` 解析通过；三种包格式构建与结构校验通过。
+
+### 已知未完成项
+
+- `cloud/bin`、`cloud/home` 的完整属主模型仍需真实 OpenWrt 与 bdpan 流程验证，本版没有贸然修改，以免破坏云组件登录和更新。
+- 本轮未处理 P2 项（备份解析器 no-follow、api_run 命令形状、未收录云组件哈希、timeout 降级、全局 core_pattern、过期 dist-web 页面）。
+- 当前 Windows/MSYS 测试环境无法创建符号链接，相关测试项明确显示 skip；需在 OpenWrt/Linux 环境补做。
 
 ## 1.8.55
 

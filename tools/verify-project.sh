@@ -551,6 +551,19 @@ else
 	skip "缺少 tools/tests/cloud-overview-schedule.sh"
 fi
 
+head_ "7k6. 第二轮审计 P1 路径与 repair 回归"
+if [ -f tools/tests/p1-fixes.sh ]; then
+	if out="$(sh tools/tests/p1-fixes.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "p1-fixes.sh 全部断言通过"
+	else
+		bad "p1-fixes.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|误|缺失' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/p1-fixes.sh"
+fi
+
 head_ "7k5. 2026-10-29 审计修复：恢复暂存生命周期 / 权限收紧 / state_dir 校验"
 if [ -f tools/tests/audit-2026-10-29-fixes.sh ]; then
 	if out="$(sh tools/tests/audit-2026-10-29-fixes.sh 2>&1)"; then

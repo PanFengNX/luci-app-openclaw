@@ -148,6 +148,21 @@ _state_dir_shape_ok() {
 	return 0
 }
 
+_state_dir_existing_path_ok() {
+	local path="$1" rest component prefix="/"
+	rest="${path#/}"
+	while [ -n "$rest" ]; do
+		case "$rest" in
+			*/*) component="${rest%%/*}"; rest="${rest#*/}" ;;
+			*) component="$rest"; rest="" ;;
+		esac
+		[ -n "$component" ] || continue
+		prefix="${prefix%/}/$component"
+		[ -L "$prefix" ] && return 1
+	done
+	return 0
+}
+
 _state_dir_safe() {
 	# _state_dir_safe <dir> -> 0 safe / 1 unsafe
 	#
@@ -168,6 +183,7 @@ _state_dir_safe() {
 	#    这里在其基础上补了 /lib64 与 /boot；/run 也在 lib.sh 的列表里。
 	local d="$1" phys
 	_state_dir_shape_ok "$d" || return 1
+	_state_dir_existing_path_ok "$d" || return 1
 
 	# 第 3 层：路径本身就是符号链接，拒绝
 	if [ -L "$d" ]; then

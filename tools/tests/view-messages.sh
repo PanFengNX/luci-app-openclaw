@@ -823,7 +823,8 @@ check(not any('--confirm' in l for l in _lk_exec),
       "执行行不含 --confirm（绝不自动化人工确认步骤）")
 rs = (proj / 'root/usr/libexec/openclaw/repair.sh').read_text(encoding='utf-8')
 check("oc_clear_stale_state_lock" in rs, "一键修复会先做官方状态锁检查")
-check(rs.count('oc_clear_stale_state_lock "$(oc_state_dir)"') == 1,
+check(rs.count('oc_clear_stale_state_lock "$DATA"') == 1
+      or rs.count('oc_clear_stale_state_lock "$(oc_state_dir)"') == 1,
       "repair 只调用一次检查（重复调用会让 doctor 与检查抢同一把锁）")
 check("offline maintenance" in rs, "doctor 失败时单独解释维护锁")
 

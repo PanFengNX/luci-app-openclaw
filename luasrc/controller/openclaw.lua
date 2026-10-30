@@ -224,15 +224,22 @@ end
 -- 查找（模块表与 _G 里都没有），填写 API Key 保存时直接报 nil 调用。
 local RUNDIR = "/tmp/.openclaw"
 
--- RUNDIR 在全局可写的 /tmp 下：mkdir -p 会照单全收预先存在的同名条目，包括
--- 本地用户预置的符号链接，root 随后就会把上传内容写进链接指向的文件。
--- 所以先确认它不是符号链接，失败时由调用者拒绝本次写入。
+-- RUNDIR 在全局可写的 /tmp 下：拒绝任何不可信的预置对象；目录必须由
+-- root 创建/拥有且保持 0700。LuCI 控制器按约定在 root 上下文运行。
 local function need_dir()
-	if sh("test -L " .. q(RUNDIR) .. " && echo symlink") == "symlink" then
-		return false
-	end
-	os.execute("mkdir -p " .. q(RUNDIR) .. " && chmod 700 " .. q(RUNDIR) .. " 2>/dev/null")
-	return true
+	local rundir = q(RUNDIR)
+	local probe = sh("if [ ! -d /tmp ] || [ -L /tmp ] || " ..
+		"[ \"$(stat -c %U /tmp 2>/dev/null)\" != root ] || " ..
+		"[ \"$(id -u 2>/dev/null)\" != 0 ]; then echo unsafe; " ..
+		"elif [ -L " .. rundir .. " ]; then echo symlink; " ..
+		"elif [ -e " .. rundir .. " ] && [ ! -d " .. rundir .. " ]; then echo nondir; " ..
+		"elif [ -d " .. rundir .. " ]; then " ..
+		"owner=$(stat -c %U " .. rundir .. " 2>/dev/null) && mode=$(stat -c %a " .. rundir .. " 2>/dev/null); " ..
+		"[ \"$owner\" = root ] && [ \"$mode\" = 700 ] && echo trusted || echo unsafe; " ..
+		"else mkdir " .. rundir .. " 2>/dev/null && chmod 700 " .. rundir .. " 2>/dev/null && " ..
+		"owner=$(stat -c %U " .. rundir .. " 2>/dev/null) && mode=$(stat -c %a " .. rundir .. " 2>/dev/null) && " ..
+		"[ \"$owner\" = root ] && [ \"$mode\" = 700 ] && echo trusted || echo unsafe; fi")
+	return probe == "trusted"
 end
 
 -- 请求方法 / 查询串的检查放在这里（文件前部），**必须在使用之前**声明：

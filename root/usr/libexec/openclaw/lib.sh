@@ -1841,6 +1841,24 @@ oc_canonical_dir() {
 	( cd -P "$p" 2>/dev/null && pwd -P ) 2>/dev/null
 }
 
+oc_validate_existing_path() {
+	# Reject symlinks in every existing component, while allowing a new leaf.
+	local path="$1" rest component prefix="/"
+	rest="${path#/}"
+	while [ -n "$rest" ]; do
+		case "$rest" in
+			*/*) component="${rest%%/*}"; rest="${rest#*/}" ;;
+			*) component="$rest"; rest="" ;;
+		esac
+		[ -n "$component" ] || continue
+		prefix="${prefix%/}/$component"
+		if [ -L "$prefix" ]; then
+			return 1
+		fi
+	done
+	return 0
+}
+
 oc_validate_base_dir() {
 	# oc_validate_base_dir <dir> -> 0 safe / 1 unsafe
 	#
@@ -1860,6 +1878,7 @@ oc_validate_base_dir() {
 	dir="$(printf '%s' "${dir:-}" | sed 's/[[:space:]]*$//')"
 	dir="${dir%/}"
 	oc_validate_base_dir_shape "$dir" || return 1
+	oc_validate_existing_path "$dir" || return 1
 
 	if [ -L "$dir" ]; then
 		return 1

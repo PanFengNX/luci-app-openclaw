@@ -31,6 +31,23 @@ for a in "$@"; do
 	esac
 done
 
+# 这些路径必须在 owner-fix 提前分支之前初始化；否则该分支使用空变量，
+# 实际不会修复任何目录，而且不会继承 base/state 的安全校验。
+BASE="$(oc_base_dir)"
+HOME_DIR="$(oc_home_dir)"
+# Resolve state_dir once. It is user-controlled and later receives recursive
+# chown/chmod, so it needs the same fail-closed validation as BASE before any
+# branch can touch it. Do not fall back to the default on failure.
+DATA="$(oc_state_dir)"
+if ! oc_validate_base_dir "$BASE"; then
+	printf '错误：安装目录不安全：%s\n' "$BASE" >&2
+	exit 1
+fi
+if ! oc_validate_base_dir "$DATA"; then
+	printf '错误：数据目录不安全：%s\n' "$DATA" >&2
+	exit 1
+fi
+
 if [ "$OWNER_FIX" = "1" ]; then
 	# 显式维护路径：允许递归修正（这是 I4 的例外）。
 	# 启动路径只断言不修，修只能由用户显式触发 —— 这样"改错了"永远是
@@ -50,6 +67,7 @@ if [ "$OWNER_FIX" = "1" ]; then
 	_fix_owner_tree "$BASE/logs"
 	_fix_owner_tree "$BASE/tmp"
 	# 顺手清掉别的身份留下的临时根（只匹配 openclaw-<数字>）
+	oc_harden_root_paths "$BASE"
 	if command -v oc_sweep_stale_tmp >/dev/null 2>&1; then
 		oc_sweep_stale_tmp
 	fi
@@ -91,20 +109,8 @@ say() {
 	fi
 }
 
-if ! oc_validate_base_dir "$(oc_base_dir)"; then
-	say FAIL "安装目录不安全：$(oc_base_dir)（请先在状态页改为 /mnt/.../OpenClaw）"
-	# Do not fall through: the steps below create directories inside BASE and
-	# then run `chown -R` / `chmod -R` on it, so on a system path (/etc, /tmp,
-	# ...) "repair" would recursively take ownership of the system tree. The
-	# check above only helps if we actually stop here.
-	finish
-fi
-
-BASE="$(oc_base_dir)"
 NODE_DIR="$(oc_node_dir)"
 OC_DIR="$(oc_oc_dir)"
-HOME_DIR="$(oc_home_dir)"
-DATA="$HOME_DIR/.openclaw"
 CONF="$DATA/openclaw.json"
 
 # 1 ------------------------------------------------------------- base dir
@@ -307,7 +313,18 @@ if [ -d "$BASE" ]; then
 		fi
 	fi
 	chmod -R u+rwX "$BASE" 2>/dev/null
+	oc_harden_root_paths "$BASE"
 fi
+# Custom state directories outside BASE still need runtime ownership repair.
+case "$DATA" in
+	"$BASE"|"$BASE"/*) ;;
+	*)
+		if [ -d "$DATA" ] && grep -q "^${OC_USER}:" /etc/passwd 2>/dev/null; then
+			chown -R "$OC_USER":"$OC_GROUP" "$DATA" 2>/dev/null || chown -R "$OC_USER" "$DATA" 2>/dev/null
+			chmod -R u+rwX "$DATA" 2>/dev/null
+		fi
+		;;
+esac
 
 # 10 ------------------------------------------------------------ init script
 if [ -f "$INITD" ]; then
@@ -393,10 +410,10 @@ if [ -x "$OB" ] && [ -x "$NB" ]; then
 	#   openclaw gateway recover-lock --confirm  # 由它同时清 sidecar 与 DB lease
 	# 这里只调用 inspect，把 fingerprint 打进日志让人确认；检查不通过就跳过
 	# 本轮 doctor —— 否则 doctor 会去抢同一把锁，把「维护中」吞成普通 WARN。
-	if ! oc_clear_stale_state_lock "$(oc_state_dir)" "$OB"; then
+	if ! oc_clear_stale_state_lock "$DATA" "$OB"; then
 		say WARN "状态锁检查未通过，跳过本轮 doctor；请按日志中的 fingerprint 确认后重试"
 	else
-		doc_out="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+		doc_out="$(HOME="$HOME_DIR" OPENCLAW_STATE_DIR="$DATA" OPENCLAW_CONFIG_PATH="$CONF" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
 			oc_timeout 300 "$OB" doctor --fix 2>&1)"
 		doc_rc=$?
 		if [ "$doc_rc" = "0" ]; then
