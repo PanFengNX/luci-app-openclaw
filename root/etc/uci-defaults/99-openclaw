@@ -19,7 +19,7 @@ uci -q get openclaw.main >/dev/null 2>&1 || {
 # 判「键不存在」而不是「值为空」：升级时本脚本会被重跑，
 # 而 [ -n "$(...)" ] 会把用户显式写下的空值当成"未设置"再填回默认值。
 uci -q get openclaw.main.node_mode >/dev/null 2>&1 || uci -q set openclaw.main.node_mode=global
-uci -q get openclaw.main.preinstall_providers >/dev/null 2>&1 || uci -q set openclaw.main.preinstall_providers=deepseek
+uci -q get openclaw.main.preinstall_providers >/dev/null 2>&1 || uci -q set openclaw.main.preinstall_providers=''
 # 安装成功后是否自动启动服务：1=自动（默认），0=装完保持停止
 uci -q get openclaw.main.auto_start >/dev/null 2>&1 || uci -q set openclaw.main.auto_start=1
 

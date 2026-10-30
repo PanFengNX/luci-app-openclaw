@@ -134,7 +134,7 @@ check("--exclude='logs'" not in _bkp_code,
 check('_data_rel' in bkp2, '排除规则改用相对归档根的精确路径')
 # 还原：白名单 + 回滚
 check('uci -q -c "$stage/etc/config"' in bkp2, '还原只取非路径类 UCI 键')
-check('已自动回滚到还原前数据' in bkp2, '还原后起不来会自动回滚')
+check('已自动回滚到还原前状态' in bkp2, '还原后起不来会自动回滚')
 # 等待窗口
 check('while [ "$i" -lt 120 ]' in ins2, '启动等待上限 120 秒（原 15 秒）')
 # 缓存 TTL

@@ -27,7 +27,7 @@ config main 'main'
 	# 下载可执行文件（Node.js 运行时）只允许 https。内网镜像只有明文 http 时，
 	# 置 1 才会降级放行，并在安装日志里告警一次。
 	option allow_http_binaries '0'
-	option preinstall_providers 'deepseek'
+	option preinstall_providers ''
 	# 安装成功后自动启动服务（1=设置开机自启并启动，0=装完保持停止，稍后手动启动）
 	option auto_start '1'
 	# 云备份：定时备份（按周期自动打包上传，并保留最近 N 份）

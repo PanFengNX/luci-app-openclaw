@@ -1684,7 +1684,7 @@ oc_clear_stale_state_lock() {
 	#   * 由操作者照抄官方给出的确认命令；
 	#   * 无论 rc 是什么，锁都保持原样 —— 不删、不自动 --confirm。
 	#
-	# 返回：0=没有发现锁（可继续）；1=发现锁/无法检查（fail closed，给提示）。
+	# 返回：0=没有发现锁（可继续）；1=发现锁且官方检查已执行，必须人工确认；2=无法执行官方检查。
 	local sd="$1" ocbin="${2:-}" d f pid out rc
 	[ -n "$sd" ] || return 0
 	[ -d "$sd/tmp" ] || return 0
@@ -1696,22 +1696,31 @@ oc_clear_stale_state_lock() {
 			# CLI 路径由调用方传入（self 的 OB）。不在这里猜 OC_OC_DIR ——
 			# 那不是库里定义的变量，猜错会让整段逻辑永远走不到，
 			# 于是"假装修好了"而实际上什么都没检查。
-			if [ -n "$ocbin" ] && [ -x "$ocbin" ]; then
-				out="$(oc_as_user env HOME="$(oc_home_dir)" OPENCLAW_STATE_DIR="$sd" \
-					OPENCLAW_CONFIG_PATH="$sd/openclaw.json" \
-					"$ocbin" gateway recover-lock 2>&1)"
-				rc=$?
-				if [ "$rc" -ne 0 ]; then
-					oc_warn "状态锁 $f 存在（pid=${pid:-未知}），官方 recover-lock 检查返回 rc=$rc；保持原样，不手工删锁"
+							if [ -n "$ocbin" ] && [ -x "$ocbin" ]; then
+					out="$(oc_as_user env HOME="$(oc_home_dir)" OPENCLAW_STATE_DIR="$sd" OPENCLAW_CONFIG_PATH="$sd/openclaw.json" "$ocbin" gateway recover-lock 2>&1)"
+					rc=$?
+				# 126/127 表示命令不可执行；其它返回码不能单独证明结果。
+				# 只有官方输出明确给出 confirm/fingerprint/holder 线索时，
+				# 才归类为“需人工恢复”；未知输出 fail-closed 为 2。
+					if [ "$rc" = "126" ] || [ "$rc" = "127" ]; then
+						oc_warn "状态锁存在，无法执行官方 recover-lock 检查（rc=$rc）；保持原样"
+						result=2
+					elif printf '%s\n' "$out" | grep -qiE 'confirm|fingerprint|holder|owner'; then
+						oc_warn "状态锁存在，官方 recover-lock 检查已返回人工恢复线索；保持原样"
+						result=1
+					elif [ "$rc" = "0" ]; then
+						oc_warn "状态锁存在，官方 recover-lock 检查完成且未返回人工恢复线索；保持原样"
+						result=0
+					else
+						oc_warn "状态锁存在，官方 recover-lock 检查结果无法确认（rc=$rc）；保持原样"
+						result=2
+					fi
+					printf '%s\n' "$out" | while IFS= read -r _l; do oc_warn "recover-lock| $_l"; done
+					return "$result"
 				else
-					oc_warn "状态锁 $f 存在（pid=${pid:-未知}），官方 recover-lock 检查已执行；保持原样，不自动确认、不手工删锁"
+					oc_warn "状态锁存在，无法执行官方 recover-lock 检查（CLI 不可用）；保持原样"
+					return 2
 				fi
-				printf '%s\n' "$out" | while IFS= read -r _l; do oc_warn "recover-lock| $_l"; done
-				return 1
-			else
-				oc_warn "状态锁 $f 存在（pid=${pid:-未知}），未找到 OpenClaw CLI 执行官方恢复检查；保持原样，不手工删锁"
-				return 1
-			fi
 		done
 	done
 	return 0
@@ -1776,6 +1785,15 @@ oc_harden_root_paths() {
 	if [ -f "$pass" ]; then
 		chown root:root "$pass" 2>/dev/null || oc_warn "无法把 $pass 属主改回 root"
 		chmod 600 "$pass" 2>/dev/null || oc_warn "无法把 $pass 权限设为 0600"
+	fi
+
+	# bdpan 的登录态也必须保持 root-only；oc_fix_perms 先递归交给
+	# openclaw，再由这里收回，避免网关进程读到云登录凭据。
+	local cloud_home="$b/cloud/home"
+	if [ -d "$cloud_home" ]; then
+		chown -R root:root "$cloud_home" 2>/dev/null || oc_warn "无法把 $cloud_home 属主改回 root"
+		chmod -R go-rwx "$cloud_home" 2>/dev/null || oc_warn "无法收紧 $cloud_home 的组/其他权限"
+		chmod 700 "$cloud_home" 2>/dev/null || oc_warn "无法把 $cloud_home 权限设为 0700"
 	fi
 
 	local bk="$b/backups"

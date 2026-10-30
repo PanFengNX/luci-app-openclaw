@@ -30,7 +30,7 @@ OC_LIB="/usr/libexec/openclaw/lib.sh"
 [ -f "$OC_LIB" ] || OC_LIB="$(dirname "$0")/lib.sh"
 . "$OC_LIB"
 
-BACKUP_FORMAT=1
+BACKUP_FORMAT=2
 BACKUP_DIR_NAME="backups"
 
 # 还原时允许的最大解压体积（防 zip bomb / 塞满磁盘）
@@ -162,6 +162,7 @@ oc_backup_resolve() {
 				*"/../"*|*"/..") return 1 ;;
 			esac
 			[ -f "$in" ] || return 1
+			[ ! -L "$in" ] || return 1
 			printf '%s' "$in"
 			return 0
 			;;
@@ -176,6 +177,7 @@ oc_backup_resolve() {
 		*) return 1 ;;
 	esac
 	[ -f "$d/$in" ] || return 1
+	[ ! -L "$d/$in" ] || return 1
 	printf '%s/%s' "$d" "$in"
 }
 
@@ -189,48 +191,49 @@ oc_archive_inspect() {
 	#     后续条目再顺着它写出去
 	#   * 设备 / FIFO 条目同理
 	# 所以这里逐条检查类型与路径，任何一条不合规就整体拒绝。
-	local f="$1" tmp="$OC_RUNDIR/bk-list.$$" bad entries bytes
+	local f="$1" tmp="$OC_RUNDIR/bk-list.$$" names="$OC_RUNDIR/bk-names.$$" bad entries bytes
 
-	# 带 PID：两个并发 verify/restore 不能共用同一份清单，否则 A 会读到
-	# B 写入的合法清单而放行。写之前先 rm -f，避免该名字预先是个符号链接
-	# 时被 `>` 跟随写穿（本脚本以 root 运行）。
-	rm -f "$tmp" 2>/dev/null
-	tar -tzvf "$f" >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
-	[ -s "$tmp" ] || { rm -f "$tmp"; return 1; }
+	# 路径使用 tar -tzf 的纯路径输出，避免 GNU tar / BusyBox tar 的 owner
+	# 字段数量不同导致合法归档被误判。详细清单只用于首字段类型检查。
+	rm -f "$tmp" "$names" 2>/dev/null
+	tar -tzf "$f" >"$names" 2>/dev/null || { rm -f "$tmp" "$names"; return 1; }
+	[ -s "$names" ] || { rm -f "$tmp" "$names"; return 1; }
+	tar -tvzf "$f" >"$tmp" 2>/dev/null || { rm -f "$tmp" "$names"; return 1; }
+	[ -s "$tmp" ] || { rm -f "$tmp" "$names"; return 1; }
 
-	# busybox/gnu tar 的 -tv 格式：<类型><权限> <属主> <大小> <日期> <时间> <名字>
 	bad="$(awk '
 		{
-			type = substr($0, 1, 1)
-			name = ""
-			for (i = 6; i <= NF; i++) name = name (i > 6 ? " " : "") $i
-			# busybox tar 不对名字做转义：含换行的条目名会被拆成两行，
-			# 伪造出"看似合法"的清单行；链接条目还会把 " -> 目标" 打进清单。
-			# 这两种都说明"靠首字符判类型"不可靠，直接拒绝。
-			if (name ~ /[[:cntrl:]]/) { print "条目名含控制字符（疑似伪造清单）：" name; exit }
-			if (name ~ / -> /) { print "链接条目的名字被打印进清单：" name; exit }
-			if (type != "-" && type != "d") { print "非普通文件/目录的条目（" type "）：" name; exit }
-			if (name ~ /^\//)    { print "绝对路径条目：" name; exit }
-			if (name ~ /\.\./)   { print "含 .. 的条目：" name; exit }
+			name=$0
+			if (name ~ /[[:cntrl:]]/) { print "条目名含控制字符：" name; exit }
+			if (name ~ /^\//) { print "绝对路径条目：" name; exit }
+			if (name ~ /(^|\/)\.\.(\/|$)/) { print "含 .. 的条目：" name; exit }
 			if (name !~ /^\.\//) { print "非相对路径条目：" name; exit }
 		}
-	' "$tmp")"
+	' "$names")"
 	if [ -n "$bad" ]; then
-		rm -f "$tmp" 2>/dev/null
+		rm -f "$tmp" "$names" 2>/dev/null
 		oc_err "归档校验失败：$bad"
 		return 1
 	fi
-
-	# 必须是我们自己的备份
-	if ! grep -q ' \./BACKUP-INFO$' "$tmp"; then
-		rm -f "$tmp" 2>/dev/null
+	bad="$(awk '{ type=substr($0,1,1); if (type != "-" && type != "d") { print "非普通文件/目录条目（" type "）"; exit } }' "$tmp")"
+	if [ -n "$bad" ]; then
+		rm -f "$tmp" "$names" 2>/dev/null
+		oc_err "归档校验失败：$bad"
+		return 1
+	fi
+	if ! grep -q '^\./BACKUP-INFO$' "$names"; then
+		rm -f "$tmp" "$names" 2>/dev/null
 		oc_err "缺少 BACKUP-INFO，不是本程序生成的备份"
 		return 1
 	fi
 
-	entries="$(wc -l <"$tmp" 2>/dev/null | tr -d ' ')"
-	bytes="$(awk '{ s=$3; if (s ~ /^[0-9]+$/) t += s } END { printf "%d", t }' "$tmp")"
-	rm -f "$tmp" 2>/dev/null
+	entries="$(wc -l <"$names" 2>/dev/null | tr -d ' ')"
+	if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+		bytes="$(awk '{ s=$5; if (s ~ /^[0-9]+$/) t += s } END { printf "%d", t }' "$tmp")"
+	else
+		bytes="$(awk '{ s=$3; if (s ~ /^[0-9]+$/) t += s } END { printf "%d", t }' "$tmp")"
+	fi
+	rm -f "$tmp" "$names" 2>/dev/null
 	case "$entries" in ''|*[!0-9]*) entries=0 ;; esac
 	case "$bytes"   in ''|*[!0-9]*) bytes=0 ;; esac
 
@@ -244,7 +247,7 @@ oc_archive_summary() {
 	# 「校验」原来只回答"安全吗"，用户看不到里面有什么 —— 150 KB 的包会让人
 	# 怀疑是不是没备份全。这里把条目数、解压后体积、以及关键区域的条目数
 	# 一并报出来：配置 / 数据根 / 会话 / 工作区 / 密钥文件。
-	local f="$1" tmp="$OC_RUNDIR/bk-sum.$$" n_cfg n_data n_sess n_ws n_env total
+	local f="$1" tmp="$OC_RUNDIR/bk-sum.$$" n_cfg n_data n_sess n_ws n_env n_delpass n_cloudpass n_cloudhome n_plugins total
 	rm -f "$tmp" 2>/dev/null
 	# 只要**普通文件**（清单行首是 '-'）：tar -t 也列目录，目录会把
 	# "会话 2 个文件"说成 3 个 —— 用户数一遍就会发现对不上。
@@ -259,6 +262,10 @@ oc_archive_summary() {
 	n_sess="$(grep -c '^\./home/\.openclaw/agents/.*/sessions/' "$tmp" 2>/dev/null)"
 	n_ws="$(grep -c '^\./home/\.openclaw/workspace/' "$tmp" 2>/dev/null)"
 	n_data="$(grep -c '^\./home/\.openclaw/' "$tmp" 2>/dev/null)"
+	n_delpass="$(grep -c '^\./secure/delpass$' "$tmp" 2>/dev/null)"
+	n_cloudpass="$(grep -c '^\./cloud/pass$' "$tmp" 2>/dev/null)"
+	n_cloudhome="$(grep -c '^\./cloud/home/' "$tmp" 2>/dev/null)"
+	n_plugins="$(grep -c '^\./plugins/' "$tmp" 2>/dev/null)"
 	rm -f "$tmp" 2>/dev/null
 	# 逐个校验成数字，**不用 eval**：grep -c 在极少数情况下会输出空串或
 	# 带空白的值，直接拼进 JSON 就坏了；但 eval 拼变量名会把统计值当代码执行。
@@ -269,9 +276,15 @@ oc_archive_summary() {
 	n_sess="$(oc_sum_num "$n_sess")"
 	n_ws="$(oc_sum_num "$n_ws")"
 	n_data="$(oc_sum_num "$n_data")"
-	printf '"entries":%s,"has_config":%s,"has_env":%s,"sessions":%s,"workspace":%s,"data_files":%s' \
+	n_delpass="$(oc_sum_num "$n_delpass")"
+	n_cloudpass="$(oc_sum_num "$n_cloudpass")"
+	n_cloudhome="$(oc_sum_num "$n_cloudhome")"
+	n_plugins="$(oc_sum_num "$n_plugins")"
+	printf '"entries":%s,"has_config":%s,"has_env":%s,"sessions":%s,"workspace":%s,"data_files":%s,"has_delpass":%s,"has_cloud_pass":%s,"cloud_login_files":%s,"plugin_files":%s' \
 		"$total" "$([ "$n_cfg" -gt 0 ] && echo true || echo false)" \
-		"$([ "$n_env" -gt 0 ] && echo true || echo false)" "$n_sess" "$n_ws" "$n_data"
+		"$([ "$n_env" -gt 0 ] && echo true || echo false)" "$n_sess" "$n_ws" "$n_data" \
+		"$([ "$n_delpass" -gt 0 ] && echo true || echo false)" \
+		"$([ "$n_cloudpass" -gt 0 ] && echo true || echo false)" "$n_cloudhome" "$n_plugins"
 	return 0
 }
 
@@ -411,6 +424,44 @@ cmd_create() {
 		esac
 	fi
 
+	# 扩展状态使用固定相对归档路径，恢复后直接可用。
+	mkdir -p "$stage/secure" "$stage/cloud" "$stage/plugins" || die_json "无法创建扩展备份暂存目录"
+	if [ -e "$base/secure/delpass" ]; then
+		[ -f "$base/secure/delpass" ] && [ ! -L "$base/secure/delpass" ] &&
+			cp -p "$base/secure/delpass" "$stage/secure/delpass" 2>/dev/null || {
+				oc_rmtree "$stage"; die_json "删除密码凭据备份失败，已中止以免产生不完整归档"
+			}
+	fi
+	if [ -e "$base/cloud/pass" ]; then
+		[ -f "$base/cloud/pass" ] && [ ! -L "$base/cloud/pass" ] &&
+			cp -p "$base/cloud/pass" "$stage/cloud/pass" 2>/dev/null || {
+				oc_rmtree "$stage"; die_json "云备份口令备份失败，已中止以免产生不完整归档"
+			}
+	fi
+	if [ -e "$base/cloud/home" ]; then
+		[ -d "$base/cloud/home" ] && [ ! -L "$base/cloud/home" ] &&
+			cp -a "$base/cloud/home" "$stage/cloud/home" 2>/dev/null || {
+				oc_rmtree "$stage"; die_json "云登录态备份失败，已中止以免产生不完整归档"
+			}
+	fi
+	_plugroot="$(oc_oc_dir)/lib/node_modules"
+	if [ -d "$_plugroot" ]; then
+		for _nm in "$_plugroot"/*; do
+			[ -d "$_nm" ] || continue
+			case "$(basename "$_nm")" in openclaw|npm|.bin|cache|node_modules) continue ;; esac
+			cp -a "$_nm" "$stage/plugins/" 2>/dev/null || die_json "插件暂存失败"
+		done
+	fi
+	if [ -e "$base/cloud/bin" ]; then
+		[ -d "$base/cloud/bin" ] && [ ! -L "$base/cloud/bin" ] || { oc_rmtree "$stage"; die_json "云组件目录备份失败"; }
+		mkdir -p "$stage/cloud/bin" || die_json "云组件暂存失败"
+		for _cloud_src in "$base/cloud/bin"/*; do
+			[ -e "$_cloud_src" ] || [ -L "$_cloud_src" ] || continue
+			[ -f "$_cloud_src" ] && [ ! -L "$_cloud_src" ] || { oc_rmtree "$stage"; die_json "云组件包含非普通文件，已中止备份"; }
+			cp -p "$_cloud_src" "$stage/cloud/bin/" 2>/dev/null || { oc_rmtree "$stage"; die_json "云组件暂存失败"; }
+		done
+	fi
+
 	# 插件清单：skill / provider 插件装在**程序目录**
 	# （<openclaw_dir>/lib/node_modules 或 .../openclaw/node_modules），
 	# **不在数据目录里** —— 重装 OpenClaw 会全部丢失，恢复数据也带不回来。
@@ -437,7 +488,7 @@ cmd_create() {
 				*) printf '%s\n' "$_pkgname" ;;
 			esac
 		done | sort -u
-	} >"$stage/plugins.txt" 2>/dev/null || : >"$stage/plugins.txt"
+	} >"$stage/plugins.txt" 2>/dev/null || { oc_rmtree "$stage"; die_json "插件清单备份失败，已中止以免产生不完整归档"; }
 
 	# 定时任务：插件自己维护的那一行在 /etc/crontabs/root 里，
 	# **不在数据目录内**。不记录的话，恢复后云备份/自动化全部消失。
@@ -459,6 +510,11 @@ cmd_create() {
 		printf 'arch=%s\n' "$(oc_arch)"
 		printf 'system=OpenWrt %s\n' "$(oc_sys_version)"
 		printf 'with_workspace=%s\n' "$ws"
+		printf 'content=state,secure,cloud,plugins\n'
+		printf 'has_delpass=%s\n' "$( [ -f "$stage/secure/delpass" ] && printf true || printf false )"
+		printf 'has_cloud_pass=%s\n' "$( [ -f "$stage/cloud/pass" ] && printf true || printf false )"
+		printf 'cloud_login_files=%s\n' "$(find "$stage/cloud/home" -type f 2>/dev/null | wc -l | tr -d ' ')"
+		printf 'plugin_files=%s\n' "$(find "$stage/plugins" -type f 2>/dev/null | wc -l | tr -d ' ')"
 	} >"$stage/BACKUP-INFO"
 
 	# 排除运行时产物：日志、缓存、临时文件、锁。
@@ -624,7 +680,8 @@ cmd_restore() {
 	data="$(oc_data_dir)"
 
 	local stage terr old="" moved=0 _src_n _stg_n _pkgname _nm
-	local _ct _ctdir _cttmp _pl
+	local _ct _ctdir _cttmp _pl _cloud_target _plugin_target
+	local cloud_bin_status="skipped" cloud_bin_target="" cloud_bin_old="" cloud_bin_moved=0 cloud_bin_new=0
 	stage="$OC_RUNDIR/restore.$$"
 	terr="$OC_RUNDIR/bk-tar.$$.err"
 	# 同上：只回收陈旧残留，避免删掉并发实例正在用的目录。
@@ -632,18 +689,29 @@ cmd_restore() {
 	rm -rf "$stage"
 	mkdir -p "$stage" || die_json "无法创建暂存目录"
 
-	# 中断处理分两级：
-	#   EXIT         只清暂存区（正常路径也走这里，行为不变）
-	#   INT/TERM/HUP 还要把数据目录从 $old 挪回去 —— 否则 mv 之后被中断会留下
-	#                "数据目录不存在"的半残状态，网关重启会以空数据起。
-	oc_restore_cleanup() { rm -rf "${stage:-}" 2>/dev/null; }
-	oc_restore_abort() {
-		oc_restore_cleanup
-		if [ "$moved" = "1" ] && [ -n "${old:-}" ] && [ -d "$old" ] && [ ! -d "$data" ]; then
+	# 失败时所有替换都必须回滚；成功提交后才清理旧目录。
+	oc_restore_rollback() {
+		if [ "${moved:-0}" = "1" ] && [ -n "${old:-}" ] && [ -d "$old" ]; then
+			oc_rmtree "$data"
 			mv "$old" "$data" 2>/dev/null && moved=0
 		fi
+		if [ "${cloud_bin_moved:-0}" = "1" ] && [ -n "${cloud_bin_old:-}" ] && [ -d "$cloud_bin_old" ]; then
+			oc_rmtree "$cloud_bin_target"
+			mv "$cloud_bin_old" "$cloud_bin_target" 2>/dev/null && cloud_bin_moved=0
+		fi
+	}
+	oc_restore_cleanup() {
+		# EXIT 可能由 die_json 触发；在未提交成功前必须回滚，而不是只删 stage。
+		if [ "${restore_committed:-0}" != "1" ]; then
+			oc_restore_rollback
+		fi
+		oc_rmtree "${stage:-}"
+	}
+	oc_restore_abort() {
+		oc_restore_cleanup
 		exit 1
 	}
+	restore_committed=0
 	trap 'oc_restore_cleanup' EXIT
 	trap 'oc_restore_abort' INT TERM HUP
 
@@ -710,6 +778,78 @@ cmd_restore() {
 	# 这些行不在数据目录内，不写回就等于"恢复后云备份静默消失"。
 	# ⚠️ 暂存目录必须活到 6b / 6c 读完 crontab.txt、plugins.txt 之后才能回收
 	#    （见 6c 段末尾的 oc_rmtree）。此处提前删除会让两个分支恒假。
+	# 外部凭据与插件恢复：目标由当前设备路径推导，旧归档无新增目录时跳过。
+	local _ext _src _dst _parent _plugin _cloud_file _cloud_tmp
+	for _ext in secure/delpass cloud/pass cloud/home; do
+		_src="$stage/$_ext"
+		[ -e "$_src" ] || continue
+		case "$_ext" in
+			secure/delpass|cloud/pass) [ -f "$_src" ] || die_json "扩展凭据条目类型错误" ;;
+			cloud/home) [ -d "$_src" ] || die_json "云登录目录条目类型错误" ;;
+		esac
+		_dst="$base/$_ext"
+		_parent="$(dirname "$_dst")"
+		mkdir -p "$_parent" 2>/dev/null || die_json "扩展凭据目标不可用"
+		if [ -d "$_src" ]; then
+			oc_rmtree "$_dst"
+			cp -a "$_src" "$_parent/" 2>/dev/null || die_json "云登录态恢复失败"
+		else
+			_cttmp="$_dst.restore.$$"
+			rm -f "$_cttmp" 2>/dev/null
+			cp -p "$_src" "$_cttmp" 2>/dev/null && mv "$_cttmp" "$_dst" 2>/dev/null || { rm -f "$_cttmp"; die_json "扩展凭据恢复失败"; }
+		fi
+	done
+	if [ -d "$stage/plugins" ]; then
+		mkdir -p "$(oc_oc_dir)/lib/node_modules" 2>/dev/null || die_json "插件目录不可用"
+		for _plugin in "$stage/plugins"/*; do
+			[ -d "$_plugin" ] || continue
+			_dst="$(oc_oc_dir)/lib/node_modules/$(basename "$_plugin")"
+			oc_rmtree "$_dst"
+			cp -a "$_plugin" "$(dirname "$_dst")/" 2>/dev/null || die_json "插件恢复失败"
+		done
+	fi
+
+	# cloud/bin 是当前设备上的云组件安装目录，不信任归档里的路径配置。
+	# 仅恢复归档中的普通文件；先组装到同父目录的临时目录，再原子替换旧目录。
+	# 这样失败时旧目录仍在，且旧归档没有该目录时完全跳过。
+	_cloud_target="$base/cloud/bin"
+	if [ -e "$stage/cloud/bin" ] || [ -L "$stage/cloud/bin" ]; then
+		[ -d "$stage/cloud/bin" ] || die_json "云组件目录条目类型错误"
+		cloud_bin_target="$_cloud_target"
+		_cloud_tmp="$_cloud_target.restore.$$"
+		oc_rmtree "$_cloud_tmp"
+		mkdir -p "$_cloud_tmp" 2>/dev/null || die_json "无法创建云组件恢复暂存目录"
+		for _cloud_file in "$stage/cloud/bin"/*; do
+			[ -e "$_cloud_file" ] || [ -L "$_cloud_file" ] || continue
+			[ -f "$_cloud_file" ] && [ ! -L "$_cloud_file" ] || die_json "云组件归档包含非普通文件"
+			cp -p "$_cloud_file" "$_cloud_tmp/$(basename "$_cloud_file")" 2>/dev/null || die_json "云组件文件恢复失败"
+		done
+		chmod 700 "$_cloud_tmp" 2>/dev/null || true
+		for _cloud_file in "$_cloud_tmp"/*; do
+			[ -f "$_cloud_file" ] || continue
+			chmod 700 "$_cloud_file" 2>/dev/null || true
+			chown root:root "$_cloud_file" 2>/dev/null || true
+		done
+		if [ -d "$cloud_bin_target" ] && [ ! -L "$cloud_bin_target" ]; then
+			cloud_bin_old="$_cloud_target.pre-restore.$$"
+			oc_rmtree "$cloud_bin_old"
+			mv "$cloud_bin_target" "$cloud_bin_old" 2>/dev/null || { oc_rmtree "$_cloud_tmp"; die_json "无法移动旧云组件目录（原目录未改动）"; }
+			cloud_bin_moved=1
+		elif [ -e "$cloud_bin_target" ] || [ -L "$cloud_bin_target" ]; then
+			oc_rmtree "$_cloud_tmp"
+			die_json "云组件目标不是安全目录"
+		fi
+		if ! mv "$_cloud_tmp" "$cloud_bin_target" 2>/dev/null; then
+			[ "$cloud_bin_moved" = "1" ] && mv "$cloud_bin_old" "$cloud_bin_target" 2>/dev/null && cloud_bin_moved=0
+			oc_rmtree "$_cloud_tmp"
+			die_json "云组件目录替换失败，旧目录已保留"
+		fi
+		# Keep the old tree until the restored gateway is confirmed healthy.
+		# The EXIT/abort cleanup will restore it if a later step fails.
+		cloud_bin_status="restored"
+	fi
+	oc_harden_root_paths "$base"
+
 	if [ -s "$stage/crontab.txt" ]; then
 		_ct="${OC_CRONTAB:-/etc/crontabs/root}"
 		_ctdir="$(dirname "$_ct")"
@@ -784,34 +924,54 @@ cmd_restore() {
 		done
 	fi
 
-	if [ "$started" != "1" ] && [ "$moved" = "1" ]; then
-		# 起不来 + 有旧数据：自动回滚，别把用户留在"数据是新的、服务是死的"状态。
+	if [ "$started" != "1" ] && { [ "$moved" = "1" ] || [ "$cloud_bin_moved" = "1" ]; }; then
+		# 起不来时回滚已替换的组件；有旧数据时同时回滚数据目录。
 		oc_warn "还原后网关未能启动，正在回滚到还原前状态"
-		oc_rmtree "$data"
-		if mv "$old" "$data" 2>/dev/null; then
-			moved=0
-			oc_fix_perms >/dev/null 2>&1
+		if [ "$moved" = "1" ]; then
+			oc_rmtree "$data"
+			if mv "$old" "$data" 2>/dev/null; then
+				moved=0
+			else
+				oc_warn "回滚失败，原数据仍在 $old，请手动处理"
+			fi
+		fi
+		oc_fix_perms >/dev/null 2>&1
+		# cloud/bin 也必须和旧数据一起回滚；此时新目录已停止使用。
+		if [ "$cloud_bin_moved" = "1" ] && [ -d "$cloud_bin_old" ]; then
+			oc_rmtree "$cloud_bin_target"
+			if mv "$cloud_bin_old" "$cloud_bin_target" 2>/dev/null; then
+				cloud_bin_moved=0
+			else
+				oc_warn "云组件旧目录回滚失败，原目录仍在 $cloud_bin_old"
+			fi
+		fi
+		if [ "$moved" = "0" ] && [ "$cloud_bin_moved" = "0" ]; then
 			/etc/init.d/openclaw restart >/dev/null 2>&1
 			bk_detail "$(basename "$p")"
-			die_json "还原后网关未能启动（可能是不兼容的旧 schema），已自动回滚到还原前数据。还原前安全快照：${safety_file:-无}"
+			die_json "还原后网关未能启动（可能是不兼容的旧 schema），已自动回滚到还原前状态。还原前安全快照：${safety_file:-无}"
 		fi
-		oc_warn "回滚失败，原数据仍在 $old，请手动处理"
 		bk_detail "$(basename "$p")"
-		die_json "还原后网关未能启动，且自动回滚失败；原数据保留在 $old（安全快照：${safety_file:-无}）"
+		die_json "还原后网关未能启动，且自动回滚失败；原数据或云组件目录仍保留在旧路径（安全快照：${safety_file:-无}）"
 	fi
 
-	# 确认起来了才删旧数据
+	# 网关已确认应答，提交恢复；此后 EXIT 不再回滚旧目录。
+	restore_committed=1
+	# 确认起来了才删旧数据和旧云组件目录
 	if [ "$moved" = "1" ]; then
 		oc_rmtree "$old"
 		moved=0
+	fi
+	if [ "$cloud_bin_moved" = "1" ]; then
+		oc_rmtree "$cloud_bin_old"
+		cloud_bin_moved=0
 	fi
 
 	blog "已从备份还原：$(basename "$p")"
 	bk_detail "$(basename "$p")"
 	bk_finish_ok
-	printf '{"ok":true,"file":"%s","safety_backup":"%s","restarted":%s}\n' \
+	printf '{"ok":true,"file":"%s","safety_backup":"%s","restarted":%s,"cloud_bin":"%s"}\n' \
 		"$(jstr "$(basename "$p")")" "$(jstr "$safety_file")" \
-		"$([ "$started" = "1" ] && echo true || echo false)"
+		"$([ "$started" = "1" ] && echo true || echo false)" "$(jstr "$cloud_bin_status")"
 }
 
 # ---------------------------------------------------------------- delete

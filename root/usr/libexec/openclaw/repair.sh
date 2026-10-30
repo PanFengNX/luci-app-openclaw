@@ -410,27 +410,33 @@ if [ -x "$OB" ] && [ -x "$NB" ]; then
 	#   openclaw gateway recover-lock --confirm  # 由它同时清 sidecar 与 DB lease
 	# 这里只调用 inspect，把 fingerprint 打进日志让人确认；检查不通过就跳过
 	# 本轮 doctor —— 否则 doctor 会去抢同一把锁，把「维护中」吞成普通 WARN。
-	if ! oc_clear_stale_state_lock "$DATA" "$OB"; then
-		say WARN "状态锁检查未通过，跳过本轮 doctor；请按日志中的 fingerprint 确认后重试"
-	else
-		doc_out="$(HOME="$HOME_DIR" OPENCLAW_STATE_DIR="$DATA" OPENCLAW_CONFIG_PATH="$CONF" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
-			oc_timeout 300 "$OB" doctor --fix 2>&1)"
-		doc_rc=$?
-		if [ "$doc_rc" = "0" ]; then
-			say FIX "OpenClaw 自检修复完成"
-		else
-			case "$doc_out" in
-				*"offline maintenance"*|*"sqlite-maintenance"*)
-					say WARN "状态库正在做离线维护，需等维护进程结束再试：
+	# 官方检查返回 1 表示已检查并发现需人工恢复的锁，不能把它叫作检查失败；
+	# 返回 2 才表示 CLI 不可用或检查无法执行。无论哪种锁状态都不抢锁，跳过 doctor。
+	oc_clear_stale_state_lock "$DATA" "$OB"
+	lock_rc=$?
+	case "$lock_rc" in
+		0)
+			doc_out="$(HOME="$HOME_DIR" OPENCLAW_STATE_DIR="$DATA" OPENCLAW_CONFIG_PATH="$CONF" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+				oc_timeout 300 "$OB" doctor --fix 2>&1)"
+			doc_rc=$?
+			if [ "$doc_rc" = "0" ]; then
+				say FIX "OpenClaw 自检修复完成"
+			else
+				case "$doc_out" in
+					*"offline maintenance"*|*"sqlite-maintenance"*)
+						say WARN "状态库正在做离线维护，需等维护进程结束再试：
 $(printf '%s\n' "$doc_out" | grep -iE 'maintenance|retry' | head -n 3)" ;;
-				*) say WARN "OpenClaw 自检修复未完全成功（退出码 $doc_rc）" ;;
-			esac
-		fi
-		# 保留最后若干行，便于定位 doctor 修不了的问题。--json 下不能直接
-		# printf 到 stdout（会破坏 finish 输出的 JSON），统一交给 say 收集。
-		doc_tail="$(printf '%s\n' "$doc_out" | tail -n 40)"
-		[ -n "$doc_tail" ] && say OK "$doc_tail"
-	fi
+					*) say WARN "OpenClaw 自检修复未完全成功（退出码 $doc_rc）" ;;
+				esac
+			fi
+			# 保留最后若干行，便于定位 doctor 修不了的问题。--json 下不能直接
+			# printf 到 stdout（会破坏 finish 输出的 JSON），统一交给 say 收集。
+			doc_tail="$(printf '%s\n' "$doc_out" | tail -n 40)"
+			[ -n "$doc_tail" ] && say OK "$doc_tail"
+			;;
+		1) say WARN "发现状态锁，官方 recover-lock 检查已完成但需要人工恢复；保持原样，跳过本轮 doctor" ;;
+		*) say WARN "状态锁检查失败：无法执行官方 recover-lock 检查，保持原样，跳过本轮 doctor" ;;
+	esac
 else
 	say OK "未安装，跳过 doctor --fix"
 fi

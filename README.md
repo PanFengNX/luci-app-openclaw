@@ -1,7 +1,7 @@
 # luci-app-openclaw — OpenClaw 助手 for OpenWrt
 
 在 OpenWrt 上原生安装、启动并管理 **官方 OpenClaw**（npm 包 `openclaw`，非魔改版），
-内置 **DeepSeek** 与 **Z.AI（GLM / 智谱）** 默认模型。
+内置 **DeepSeek** 与 **Z.AI（GLM / 智谱）** 的随包模型预设；新安装默认不预装 provider，已有 UCI 配置升级时不覆盖既有值。
 
 LuCI 入口：**服务 → OpenClaw 助手**（`/cgi-bin/luci/admin/services/openclaw`）。
 
@@ -173,18 +173,19 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 
 ## 本版本新增 / 强化
 
-### 1. 默认模型增加 DeepSeek 与 Z.AI
+### 1. 模型支持 DeepSeek 与 Z.AI
 
 - `deepseek`：官方插件 `@openclaw/deepseek-provider`，默认 `deepseek/deepseek-v4-flash`，
-  可选 `deepseek-v4-pro`、`deepseek-chat`、`deepseek-reasoner`。
+  可选 `deepseek-v4-pro`、`deepseek-chat`、`deepseek-reasoner`。新安装默认不预装，已有 UCI 配置升级不覆盖；
+  用户在模型页选择并应用 DeepSeek 时按需安装。
 - `zai`：OpenClaw 内置 provider（Z.AI / 智谱 GLM），默认 `zai/glm-5.3`，
-  内置 19 个 GLM 模型，支持国际 / 国内 / Coding Plan 端点切换。
+  内置 19 个 GLM 模型，支持国际 / 国内 / Coding Plan 端点切换；新安装默认不预装，已有 UCI 配置升级不覆盖；
+  用户选择后按需写入配置。
 - 保留原有 openai、anthropic、google、moonshot、qwen、minimax、openrouter、ollama 与自定义。
 
 ### 2. 模型选择联动插件安装与 API Key（新增）
 
-模型页的 provider 下拉直接来自 `openclaw` 自身（`models list --all` + `providers list`），
-每个 provider 会标注状态标签：**内置 / 需插件 / 插件已装 / 已配置 / 已有 Key**。
+模型页的 provider 下拉来自随包 provider 清单，并标注状态标签：**内置 / 需插件 / 插件已装 / 已配置 / 已有 Key**。
 
 点击绿色按钮 **「安装插件 · 写入 Key · 设为默认」** 一次性完成：
 
@@ -195,8 +196,8 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 4. `openclaw config set agents.defaults.model.primary <id>/<model>`；
 5. 修复属主权限 → 重启网关 → 页面刷新。
 
-模型清单三层兜底：内置精选预设 → `openclaw models list --provider <id>` 在线发现（「刷新模型列表」
-按钮）→ 手动输入模型 ID。
+模型清单来源：选择 provider 后直接请求该服务商的 `models_url`；请求失败时仅显示随包预设并提示可能过时，
+不再从本机 OpenClaw 获取模型列表。自定义 provider 仍可手动输入模型 ID。
 
 ### 3. 一键修复 + 一键 doctor（新增）
 
@@ -263,7 +264,7 @@ openclaw.sh restore <文件名> [--no-safety]
 iStoreOS 25.12.x 基于 OpenWrt 25.12，包管理器是 **apk-tools v3**，请安装：
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.8.48-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.8.57-r1.apk
 ```
 
 **不要**装 `...-v2.apk` —— 那是 apk-tools 2.x / Alpine 的格式，不是 OpenWrt 25.12 的
@@ -321,7 +322,7 @@ python3 scripts/build_apk.py
 
   本插件不提供"迁移已有安装"功能（1.8.16 移除 —— 这是历史事实，升版时不要跟着改）。要把旧安装搬过来，用「备份与恢复」：
   在旧环境创建备份 → 在新环境恢复。程序本体与 Node 运行时请在新环境重新安装。
-- **状态页**：概览条 + 设备配对一键批准；修复按钮收敛为「体检」与「一键修复」（含 `doctor --fix`）；**设置页**拆成多张卡片，模型页按 Base URL 实时拉取上游模型列表（仅自定义 provider 可见）。
+- **状态页**：概览条 + 设备配对一键批准；修复按钮收敛为「体检」与「一键修复」（含 `doctor --fix`）；**设置页**拆成多张卡片，模型页按 provider 的 `models_url` 请求实时模型（失败时仅显示随包预设并提示可能过时）。
 - **多渠道支持**：渠道页统一管理 **Telegram、飞书、Discord、Slack、微信、钉钉、QQ**
   共 7 个平台，可启用渠道、登录并填写凭据；凭据经 0600 临时文件传递，页面不回填明文。
 
@@ -361,13 +362,13 @@ python3 scripts/build_apk.py
 ### apk（OpenWrt 25.12+ / apk-tools 3.x）
 
 ```sh
-apk add --allow-untrusted luci-app-openclaw-1.8.48-r1.apk
+apk add --allow-untrusted luci-app-openclaw-1.8.57-r1.apk
 ```
 
 ### ipk（opkg）—— **OpenWrt 24.10 及更早、iStoreOS 等 opkg 系统**
 
 ```sh
-opkg install luci-app-openclaw_1.8.48_all.ipk
+opkg install luci-app-openclaw_1.8.57_all.ipk
 ```
 
 在 LuCI / iStore 界面里也可以直接「手动上传安装」这个 ipk。
@@ -391,7 +392,7 @@ opkg install luci-app-openclaw_1.8.48_all.ipk
 ### .run 自解压（无需包管理器）
 
 ```sh
-sh luci-app-openclaw-1.8.48.run
+sh luci-app-openclaw-1.8.57.run
 ```
 
 ### 集成到固件 / SDK 编译
@@ -406,7 +407,7 @@ make package/luci-app-openclaw/compile V=s
 ### 自行生成安装包（无需 SDK）
 
 ```sh
-python3 scripts/build_apk.py --version 1.8.48 --release 1 --sign
+python3 scripts/build_apk.py --version 1.8.57 --release 1 --sign
 python3 scripts/verify_apk.py dist/*.apk dist/*.ipk   # 结构自检（v3 / v2 / ipk）
 ```
 

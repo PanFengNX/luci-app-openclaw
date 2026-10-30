@@ -396,6 +396,30 @@ else
 	skip "缺少 tools/tests/model-flags.sh"
 fi
 
+if [ -f tools/tests/model-page-source.sh ]; then
+	if out="$(sh tools/tests/model-page-source.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "model-page-source.sh 全部断言通过"
+	else
+		bad "model-page-source.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/model-page-source.sh"
+fi
+
+if [ -f tools/tests/provider-install-behavior.sh ]; then
+	if out="$(sh tools/tests/provider-install-behavior.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "provider-install-behavior.sh 全部断言通过"
+	else
+		bad "provider-install-behavior.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/provider-install-behavior.sh"
+fi
+
 if [ -f tools/tests/init-recovery.sh ]; then
 	if out="$(sh tools/tests/init-recovery.sh 2>&1)"; then
 		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
@@ -552,6 +576,17 @@ else
 fi
 
 head_ "7k6. 第二轮审计 P1 路径与 repair 回归"
+if [ -f tools/tests/state-lock-recovery.sh ]; then
+	if out="$(sh tools/tests/state-lock-recovery.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "state-lock-recovery.sh 全部断言通过"
+	else
+		bad "state-lock-recovery.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|expected' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/state-lock-recovery.sh"
+fi
 if [ -f tools/tests/p1-fixes.sh ]; then
 	if out="$(sh tools/tests/p1-fixes.sh 2>&1)"; then
 		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'

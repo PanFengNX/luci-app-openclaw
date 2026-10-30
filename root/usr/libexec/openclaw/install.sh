@@ -884,7 +884,7 @@ install_default_providers() {
 	# DeepSeek ships as an official plugin; zai (Z.AI/GLM) is bundled upstream.
 	local OC="$OC_DIR/bin/openclaw"
 	local pre
-	pre="$(uci_get main.preinstall_providers deepseek)"
+	pre="$(uci_get main.preinstall_providers '')"
 	if [ -z "$pre" ]; then
 		ilog "未配置预装模型插件（main.preinstall_providers 为空），跳过"
 		return 0

@@ -444,7 +444,6 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
   </div>
   <div class="oc-actions" id="m-model-actions" style="margin:-4px 0 12px">
     <button id="btn-refresh-models" class="oc-btn ghost">刷新上游模型</button>
-    <button id="btn-discover" class="oc-btn ghost">从 OpenClaw 刷新列表</button>
   </div>
   <div class="oc-hint" id="m-model-hint"></div>
   <div class="oc-hint" id="m-model-source" style="display:none"></div>
@@ -475,7 +474,7 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
 <div class="oc-card">
   <h3>说明</h3>
   <ul class="oc-list">
-    <li>模型清单优先级：<b>已填 API Key</b> 时直接向该服务商的上游查询；<b>未填 Key</b> 时查询公开模型目录（OpenRouter，无需鉴权）；两者都失败才回退到内置精选预设。每次拉取后都会标明当前清单来自哪一级。</li>
+    <li>选择服务商后请求对应的 models_url；成功显示实时 API 模型，失败仅显示随包预设并提示可能过时。</li>
     <li>点击绿色按钮会依次完成：<b>安装该服务商官方插件</b> → <b>写入 API Key</b>（<code>~/.openclaw/.env</code> 与配置）→ <b>设为默认模型</b> → 重启网关。</li>
     <li>标记说明：<span class="oc-tag ok">内置</span> 无需插件 · <span class="oc-tag">需插件</span> 会自动安装 · <span class="oc-tag ok">已配置</span> 已写入过配置。</li>
   </ul>
@@ -567,7 +566,6 @@ function ocBindLogTools(copyId, exportId, srcId, baseName){
 var API = {
   providers:'<%=luci.dispatcher.build_url("admin","services","openclaw","api","providers")%>',
   presets:  '<%=luci.dispatcher.build_url("admin","services","openclaw","api","presets")%>',
-  models:   '<%=luci.dispatcher.build_url("admin","services","openclaw","api","models")%>',
   models_url: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","models_url")%>',
   apply:    '<%=luci.dispatcher.build_url("admin","services","openclaw","api","apply")%>',
   run:      '<%=luci.dispatcher.build_url("admin","services","openclaw","api","run")%>',
@@ -675,8 +673,7 @@ function setModelHint(text){ $('m-model-hint').textContent = text || ''; }
 // 不把服务端数据拼进任何标记，只写 textContent。
 var MODEL_SOURCE_TEXT = {
   upstream: '模型列表来自上游（实时）',
-  public:   '未填写 API Key，模型列表来自公开目录（实时）',
-  local:    '模型列表来自本机 OpenClaw（非上游实时）'
+  public:   '模型列表来自公开目录（实时）'
 };
 function setModelSource(src, fallback){
   var el = $('m-model-source');
@@ -697,7 +694,7 @@ function setModelSource(src, fallback){
 // 自动拉取没有点击动作，必须靠文案说明正在请求；结束后恢复原文案。
 var BTN_LABELS = {};
 function setModelBusy(busy){
-  ['btn-refresh-models', 'btn-discover'].forEach(function(id){
+  ['btn-refresh-models'].forEach(function(id){
     var b = $(id); if (!b) return;
     if (!hasKey(BTN_LABELS, id)) BTN_LABELS[id] = b.textContent;
     b.disabled = !!busy;
@@ -709,8 +706,8 @@ function updateCustomRow(){
   // 手填框只留给「自定义 Provider」：它没有固定清单，下拉里只有一条
   // 「请手动输入」的占位项，除此之外没有别的来源。
   //
-  // 内置 Provider 一律不需要手填 —— 模型清单在选中服务商时就会自动拉取
-  // （上游 → 本机 OpenClaw → 内置预设），下拉里始终有可选项。之前还留了一个
+  // 内置 Provider 一律不需要手填 —— 模型清单在选中服务商时会自动拉取
+  // 失败时保留随包预设，下拉里始终有可选项。之前还留了一个
   // 「手动输入模型 ID」按钮，纯属多余，已移除。
   var custom = ($('m-provider').value === 'custom');
   $('m-model-custom-row').style.display = custom ? '' : 'none';
@@ -746,12 +743,10 @@ function autoPickText(){
   return '已自动选择 ' + id + '（可下拉更换）';
 }
 
-// 上游条目在前，原有的 configured / live / preset 条目在后，按 id 去重。
+// 实时 API 返回的条目按 id 去重；随包预设只在失败回退时加入。
 // 全部通过 DOM 节点写入，服务端返回的 id 只进 value / textContent。
-// suffix 标注第一组条目的来源（默认「上游」，本机 OpenClaw 清单传「本机」）。
-function fillModels(upstream, suffix){
+function fillModels(upstream, includePreset){
   var p = curProvider(); if (!p) return '';
-  var tag = suffix || '上游';
   var sel = $('m-model');
   var keep = sel.value;
   sel.innerHTML = '';
@@ -764,8 +759,10 @@ function fillModels(upstream, suffix){
     sel.appendChild(o);
   }
   var def = p.defaultModel || '';
-  (upstream || []).forEach(function(id){ add(id, id + '  （' + tag + '）'); });
-  (p.models || []).forEach(function(m){ add(m.id, (m.name||m.id) + '  (' + m.id + ')'); });
+  (upstream || []).forEach(function(id){ add(id, id); });
+  if (includePreset !== false){
+    (p.models || []).forEach(function(m){ add(m.id, m.name || m.id); });
+  }
   if (!sel.options.length){
     var o = document.createElement('option');
     o.value = ''; o.textContent = '（该服务商无固定清单，请手动输入模型 ID）';
@@ -790,9 +787,7 @@ function fillModels(upstream, suffix){
 }
 
 // 失败不弹框：安静回退到内置清单，并用 .oc-err 明说当前清单可能过时。
-// autoLocal 为真（页面加载 / 切换 provider）时，上游失败后自动改问本机 OpenClaw，
-// 两级都失败才提示失败；手动「刷新上游模型」传 false，行为保持不变。
-function fetchUpstream(autoLocal){
+function fetchUpstream(){
   var p = $('m-provider').value;
   if (!p) return;
   var seq = ++FETCH_SEQ;
@@ -806,59 +801,23 @@ function fetchUpstream(autoLocal){
     if (!r || r.ok !== true || !list.length){
       UPSTREAM = [];
       fillModels([]);
-      if (autoLocal){ fetchLocalModels(seq, true); return; }
       setModelBusy(false);
-      var fail = '未能获取实时模型列表：' + ((r && r.error) || '服务端未返回模型') + '，可手动填写。';
+      var fail = '未能获取实时模型列表：' + ((r && r.error) || '服务端未返回模型') + '。当前显示随包预设，可能过时。';
       var autoFail = autoPickText();
       setModelHint(fail + (autoFail ? ' ' + autoFail : ''));
-      setModelSource('fallback', '实时获取失败，当前显示内置清单，可能不是最新');
+      setModelSource('fallback', '实时获取失败，当前显示随包预设，可能过时');
       return;
     }
     setModelBusy(false);
     UPSTREAM = list.slice();
-    fillModels(UPSTREAM);
+    fillModels(UPSTREAM, false);
     // 老版本服务端没有 source 字段，按上游处理（它只可能来自上游）。
     var src = (r.source === 'public') ? 'public' : 'upstream';
-    var okMsg = '已获取 ' + UPSTREAM.length + ' 个实时模型（标注「上游」）。';
+    var okMsg = '已获取 ' + UPSTREAM.length + ' 个实时模型。';
     var autoOk = autoPickText();
     setModelHint(okMsg + (autoOk ? ' ' + autoOk : ''));
     setModelSource(src, '');
   });
-}
-
-// 本机 OpenClaw 清单（models.sh discover）。服务端内部最多等 20 秒，客户端再留
-// 启动开销与余量，统一给 60 秒，避免像 20 秒那样被客户端先掐断。
-// seq 由调用方持有：自动兜底沿用上游那次的序号，手动刷新则新开一次。
-function fetchLocalModels(seq, auto){
-  var p = $('m-provider').value;
-  if (!p){ setModelBusy(false); return; }
-  setModelHint('上游不可用，正在从本机 OpenClaw 获取模型列表…');
-  get(API.models + '?provider=' + encodeURIComponent(p), function(r){
-    if (seq !== FETCH_SEQ) return;   // provider 已切换，丢弃过期响应
-    setModelBusy(false);
-    var arr = (r && !r.net) ? jp(r.data || '[]', []) : [];
-    if (!(arr instanceof Array)) arr = [];
-    if (!arr.length){
-      if (auto){
-        // 两级都失败：保留内置预设，明确告诉用户清单可能过时。
-        var autoFail = autoPickText();
-        setModelHint('未能获取实时模型列表：上游与本机 OpenClaw 都没有返回模型，当前显示内置清单，可能不是最新。'
-          + (autoFail ? ' ' + autoFail : ''));
-        setModelSource('fallback', '上游与本机 OpenClaw 均未返回模型，当前显示内置清单');
-      } else if (r && r.net){
-        $('m-status').textContent = 'OpenClaw 响应超时（>60 秒），可能是 CLI 启动慢或网关未运行';
-      } else {
-        $('m-status').textContent = 'OpenClaw 没有返回模型：该 provider 的插件可能未安装';
-      }
-      return;
-    }
-    UPSTREAM = arr.slice();
-    fillModels(UPSTREAM, '本机');
-    setModelSource('local', '');
-    $('m-status').textContent = '来自本机 OpenClaw：' + arr.length + ' 个模型。';
-    var autoOk = autoPickText();
-    setModelHint('已获取 ' + arr.length + ' 个模型（标注「本机」）。' + (autoOk ? ' ' + autoOk : ''));
-  }, 60000);
 }
 
 // 有没有配套插件决定按钮语义：只有 plugin 非空的 provider 才谈得上「安装」。
@@ -908,14 +867,14 @@ function renderProvider(){
   updateBaseRow();
   updateApplyButton(p);
 
-  // 切换 provider 后旧的上游清单不再适用：先渲染本地清单，再异步补上游条目。
+  // 切换 provider 后旧的上游清单不再适用：先渲染随包预设，再异步请求当前 provider。
   UPSTREAM = [];
   fillModels([]);
   var auto = autoPickText();
   if (auto) setModelHint(auto);
   updateCustomRow();
-  // 自动拉取：先上游，失败自动兜底本机 OpenClaw（见 fetchUpstream）。
-  fetchUpstream(true);
+  // 自动拉取当前 provider 的 models_url；失败时保留随包预设。
+  fetchUpstream();
 }
 
 $('m-provider').onchange = function(){
@@ -938,7 +897,7 @@ $('m-model-custom').oninput = function(){
   setModelHint(v ? ('将使用手动输入的模型 ID：' + v + '。') : '');
 };
 
-$('btn-refresh-models').onclick = function(){ fetchUpstream(false); };
+$('btn-refresh-models').onclick = function(){ fetchUpstream(); };
 
 // Base URL 改动后重新拉取；尚未保存的地址服务端还看不到，先提示保存。
 $('m-base').onchange = function(){
@@ -948,37 +907,7 @@ $('m-base').onchange = function(){
     setModelHint('Base URL 已修改：保存（应用）后会按新地址拉取模型，也可保存后点「刷新上游模型」。');
     return;
   }
-  fetchUpstream(true);
-};
-
-$('btn-discover').onclick = function(){
-  var p = $('m-provider').value;
-  if (!p) return;
-  // 服务端 discover 最多等 20 秒，客户端给 60 秒，避免客户端先于服务端放弃。
-  var seq = ++FETCH_SEQ;
-  setModelBusy(true);
-  $('m-status').textContent = '正在从 OpenClaw 获取…';
-  // 这一份清单来自本地 OpenClaw，不是上游/公开目录：清掉来源提示，避免误标。
-  setModelSource('', '');
-  get(API.models + '?provider=' + encodeURIComponent(p), function(r){
-    if (seq !== FETCH_SEQ) return;   // provider 已切换，丢弃过期响应
-    setModelBusy(false);
-    var arr = (r && !r.net) ? jp(r.data||'[]', []) : [];
-    if (!(arr instanceof Array)) arr = [];
-    if (!arr.length){
-      if (r && r.net){
-        $('m-status').textContent = 'OpenClaw 响应超时（>60 秒），可能是 CLI 启动慢或网关未运行';
-      } else {
-        $('m-status').textContent = 'OpenClaw 没有返回模型：该 provider 的插件可能未安装';
-      }
-      return;
-    }
-    var sel = $('m-model'); sel.innerHTML = '';
-    arr.forEach(function(id){
-      var o = document.createElement('option'); o.value = id; o.textContent = id; sel.appendChild(o);
-    });
-    $('m-status').textContent = '来自本机 OpenClaw：' + arr.length + ' 个模型。';
-  }, 60000);
+  fetchUpstream();
 };
 
 $('btn-apply').onclick = function(){
