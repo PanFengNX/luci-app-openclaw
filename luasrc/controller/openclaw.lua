@@ -728,75 +728,49 @@ function api_apply()
 	out({ ok = run_rc(MODELS .. " apply " .. q(p) .. " - " .. q(mdl) .. " " .. q(base)) })
 end
 
--- Sub-commands the terminal box is allowed to reach. The command line is free
--- text posted from the browser and used to be spliced into a shell string
--- unquoted, so `cmd=status; reboot` ran as root. Two gates now: the first
--- token has to be in this list, and every token is single quoted by q().
-local RUN_CMDS = {
-	status = true, version = true, help = true, doctor = true, health = true,
-	update = true, models = true, plugins = true, channels = true,
-	gateway = true, config = true, agents = true, sessions = true,
-	cron = true, skills = true, logs = true, onboard = true,
-	message = true, memory = true, workspace = true,
-	-- 2026-10-20 补充：都是"看"为主的子命令。判断标准是
-	-- 「能不能通过它把任意命令塞进 shell」——这些都不能，参数仍逐 token 过 q()。
-	providers = true,  -- 列出已知的模型服务商
-	tools = true,      -- 列出可用工具（排查工具调用时最常用）
-	mcp = true,        -- 列出 / 增删 MCP 服务器（本地配置，可回退）
-	devices = true,    -- 局域网配对：list 只读，approve 与设置页的按钮等价
-	-- 2026-10-26 补充：按官方 CLI 命令树逐个核对后补上的诊断/运维子命令。
-	-- 判据仍然只有一条：它能不能绕过 q() 变成一条 shell 命令。下面这些都不能
-	-- —— 它们只做 openclaw 自己的事，参数仍然逐 token 单引号转义。
-	security = true,   -- security audit：配置与文件权限体检，排障第一步
-	secrets = true,    -- secrets audit / reload：密钥解析状态（不回显明文）
-	tasks = true,      -- 任务清单
-	nodes = true,      -- 已配对节点的状态（只查，不启动进程）
-	pairing = true,    -- 配对请求 list / approve，与设置页按钮等价
-	qr = true,         -- 配对二维码
-	hooks = true,      -- 钩子清单
-	webhooks = true,   -- webhook 清单
-	dns = true,        -- DNS 配置查询
-	docs = true,       -- 文档入口
-	directory = true,  -- 目录（self / peers / groups）
-	wiki = true,       -- 知识库检索
-	sandbox = true,    -- 沙箱清单 / explain
-	approvals = true,  -- 审批策略查看
-	agent = true,      -- 单次 agent 调用，与 message 同类
-	acp = true,        -- ACP 桥
-	capability = true, -- 能力探测（infer 的别名）
-	infer = true,
-	completion = true, -- 生成补全脚本
-	backup = true,     -- openclaw 自己的 backup create / verify
-	system = true,     -- system presence / heartbeat
-	dashboard = true,  -- 打印 Control UI 地址（不打开浏览器）
-	-- 故意**不**加（写在这里，下次不要再纠结一遍）：
-	--   reset / uninstall / migrate     删数据、卸载、迁移，破坏性且不可逆
-	--   tui / chat / setup / configure  交互式，非 TTY 下会挂满 120 秒且拿不到东西
-	--   browser                         有 evaluate 子命令，等于在浏览器里跑任意 JS
-	--   exec-policy                     改的正是"允许执行什么"，等于绕过这条线
-	--   node                            能启动 node host 进程（nodes 只查状态）
-	["--version"] = true, ["--help"] = true   -- 不带子命令的两种常规问法
+-- api_run is deliberately a small, complete argv allowlist.  Do not add a
+-- top-level command here merely because q() quotes it: several OpenClaw
+-- commands execute actions (agent, message, system, update, etc.).
+local RUN_TOP = {
+	status = true, version = true, health = true, doctor = true,
+	providers = true, tools = true, secrets = true, tasks = true,
+	nodes = true, qr = true, hooks = true, webhooks = true
 }
+local RUN_SUB = {
+	mcp = { list = true, status = true },
+	devices = { list = true, status = true },
+	pairing = { list = true, status = true },
+	backup = { list = true },
+}
+local RUN_BACKUP_FILE = "^[A-Za-z0-9][A-Za-z0-9._-]*%.tar%.gz$"
+
+local function run_argv_allowed(argv)
+	if #argv == 0 then return false end
+	local sub = argv[1]
+	if RUN_TOP[sub] then return #argv == 1 end
+	if sub == "backup" and argv[2] == "verify" then
+		return #argv == 3 and argv[3]:match(RUN_BACKUP_FILE) ~= nil
+	end
+	return RUN_SUB[sub] ~= nil and #argv == 2 and RUN_SUB[sub][argv[2]] == true
+end
 
 function api_run()
 	local cmd = tostring(http.formvalue("cmd") or "status")
 	local argv = {}
 	for tok in cmd:gmatch("%S+") do argv[#argv + 1] = tok end
-	-- 允许照官方文档写全名：`openclaw gateway auth-token --show` 直接粘进来时
-	-- argv[1] 是 "openclaw"，会被白名单当成未知子命令拒掉。它本来就是我们
-	-- 自己的程序名，剥掉即可（cli.sh 里还有一层同样的处理，两处都要有：
-	-- 这一层不做的话，请求根本到不了 cli.sh）。
+	-- The UI accepts CLI syntax, but never accepts an executable prefix or
+	-- silently strips a token: the whole submitted argv must match a shape.
 	if argv[1] == "openclaw" or argv[1] == "/usr/bin/openclaw" then
-		table.remove(argv, 1)
+		out({ ok = false, output = "不支持的命令：请只提交子命令及其只读参数" })
+		return
 	end
-	local sub = argv[1] or ""
-	if not RUN_CMDS[sub] then
-		out({ ok = false, output = "不支持的命令：" .. sub })
+	if not run_argv_allowed(argv) then
+		out({ ok = false, output = "不支持的只读命令或参数" })
 		return
 	end
 	local args = ""
-	for i = 2, #argv do args = args .. " " .. q(argv[i]) end
-	local r = sh(SH .. " run " .. q(sub) .. args)
+	for i = 1, #argv do args = args .. " " .. q(argv[i]) end
+	local r = sh(SH .. " run" .. args)
 	out({ ok = true, output = r })
 end
 

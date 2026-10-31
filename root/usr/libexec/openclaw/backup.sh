@@ -445,12 +445,23 @@ cmd_create() {
 			}
 	fi
 	_plugroot="$(oc_oc_dir)/lib/node_modules"
+	# 归档全局插件和 OpenClaw 自带的嵌套插件；保留相对布局，
+	# 否则 provider 虽然出现在清单里，恢复后仍不会被 Node 发现。
 	if [ -d "$_plugroot" ]; then
 		for _nm in "$_plugroot"/*; do
 			[ -d "$_nm" ] || continue
 			case "$(basename "$_nm")" in openclaw|npm|.bin|cache|node_modules) continue ;; esac
-			cp -a "$_nm" "$stage/plugins/" 2>/dev/null || die_json "插件暂存失败"
+			mkdir -p "$stage/plugins/global" || die_json "插件暂存失败"
+			cp -a "$_nm" "$stage/plugins/global/" 2>/dev/null || die_json "插件暂存失败"
 		done
+		if [ -d "$_plugroot/openclaw/node_modules" ]; then
+			mkdir -p "$stage/plugins/nested/openclaw" || die_json "嵌套插件暂存失败"
+			for _nm in "$_plugroot/openclaw/node_modules"/*; do
+				[ -d "$_nm" ] || continue
+				case "$(basename "$_nm")" in .bin|.cache|npm) continue ;; esac
+				cp -a "$_nm" "$stage/plugins/nested/openclaw/" 2>/dev/null || die_json "嵌套插件暂存失败"
+			done
+		fi
 	fi
 	if [ -e "$base/cloud/bin" ]; then
 		[ -d "$base/cloud/bin" ] && [ ! -L "$base/cloud/bin" ] || { oc_rmtree "$stage"; die_json "云组件目录备份失败"; }
@@ -682,28 +693,106 @@ cmd_restore() {
 	local stage terr old="" moved=0 _src_n _stg_n _pkgname _nm
 	local _ct _ctdir _cttmp _pl _cloud_target _plugin_target
 	local cloud_bin_status="skipped" cloud_bin_target="" cloud_bin_old="" cloud_bin_moved=0 cloud_bin_new=0
+	local restore_journal="" restore_uci="" restore_cron="" restore_ext="" restore_plugins=""
+	local restore_committed=0 rollback_rc=0 rollback_done=0
 	stage="$OC_RUNDIR/restore.$$"
 	terr="$OC_RUNDIR/bk-tar.$$.err"
-	# 同上：只回收陈旧残留，避免删掉并发实例正在用的目录。
+	# Private journal: every external object touched below gets an explicit
+	# present/absent marker and a copy before the first mutation.
+	restore_journal="$OC_RUNDIR/restore-journal.$$"
+	restore_uci="$restore_journal/uci"
+	restore_cron="$restore_journal/crontab"
+	restore_ext="$restore_journal/ext"
+	restore_plugins="$restore_journal/plugins"
+	restore_snapshot() {
+		local src="$1" dst="$2" kind="$3"
+		mkdir -p "$dst" || return 1
+		if [ -e "$src" ] && [ ! -L "$src" ]; then
+			printf 'present\n' >"$dst/present" || return 1
+			case "$kind" in
+				file) cp -p "$src" "$dst/object" || return 1 ;;
+				dir) cp -a "$src" "$dst/object" || return 1 ;;
+			esac
+		else
+			printf 'absent\n' >"$dst/present" || return 1
+		fi
+	}
+	if [ -e "$restore_journal" ] || [ -L "$restore_journal" ]; then
+		[ -d "$restore_journal" ] && [ ! -L "$restore_journal" ] ||
+			die_json "还原事务日志路径不是安全目录"
+	else
+		mkdir -m 700 "$restore_journal" || die_json "无法创建还原事务日志"
+	fi
+	chmod 700 "$restore_journal" 2>/dev/null || die_json "无法收紧还原事务日志权限"
+	for _journal_dir in "$restore_uci" "$restore_cron" "$restore_ext" "$restore_plugins"; do
+		if [ -e "$_journal_dir" ] || [ -L "$_journal_dir" ]; then
+			[ -d "$_journal_dir" ] && [ ! -L "$_journal_dir" ] ||
+				die_json "还原事务日志子目录不是安全目录"
+		else
+			mkdir -m 700 "$_journal_dir" || die_json "无法创建还原事务日志子目录"
+		fi
+		chmod 700 "$_journal_dir" 2>/dev/null || die_json "无法收紧还原事务日志权限"
+	done
+	# Snapshot all non-data external objects before any restore mutation.
+	restore_snapshot /etc/config/openclaw "$restore_uci" file || die_json "无法暂存 UCI 配置"
+	restore_snapshot "${OC_CRONTAB:-/etc/crontabs/root}" "$restore_cron" file || die_json "无法暂存 crontab"
+	restore_snapshot "$(oc_base_dir)/secure/delpass" "$restore_ext/delpass" file || die_json "无法暂存 secure/delpass"
+	restore_snapshot "$(oc_base_dir)/cloud/pass" "$restore_ext/cloud-pass" file || die_json "无法暂存 cloud/pass"
+	restore_snapshot "$(oc_base_dir)/cloud/home" "$restore_ext/cloud-home" dir || die_json "无法暂存 cloud/home"
+	restore_snapshot "$(oc_oc_dir)/lib/node_modules" "$restore_plugins" dir || die_json "无法暂存插件目录"
 	find "$OC_RUNDIR" -maxdepth 1 -name 'restore.*' -mmin +60 -exec rm -rf {} \; 2>/dev/null
 	rm -rf "$stage"
 	mkdir -p "$stage" || die_json "无法创建暂存目录"
 
 	# 失败时所有替换都必须回滚；成功提交后才清理旧目录。
 	oc_restore_rollback() {
+		if [ "${rollback_done:-0}" = "1" ]; then return "$rollback_rc"; fi
+		rollback_done=1
+		rollback_rc=0
 		if [ "${moved:-0}" = "1" ] && [ -n "${old:-}" ] && [ -d "$old" ]; then
-			oc_rmtree "$data"
-			mv "$old" "$data" 2>/dev/null && moved=0
+			if [ -e "$data" ] || [ -L "$data" ]; then
+				oc_rmtree "$data" || rollback_rc=1
+			fi
+			if [ ! -e "$data" ] && [ ! -L "$data" ]; then
+				if mv "$old" "$data" 2>/dev/null; then moved=0; else rollback_rc=1; fi
+			fi
 		fi
 		if [ "${cloud_bin_moved:-0}" = "1" ] && [ -n "${cloud_bin_old:-}" ] && [ -d "$cloud_bin_old" ]; then
-			oc_rmtree "$cloud_bin_target"
-			mv "$cloud_bin_old" "$cloud_bin_target" 2>/dev/null && cloud_bin_moved=0
+			if [ -e "$cloud_bin_target" ] || [ -L "$cloud_bin_target" ]; then
+				oc_rmtree "$cloud_bin_target" || rollback_rc=1
+			fi
+			if [ ! -e "$cloud_bin_target" ] && [ ! -L "$cloud_bin_target" ]; then
+				if mv "$cloud_bin_old" "$cloud_bin_target" 2>/dev/null; then cloud_bin_moved=0; else rollback_rc=1; fi
+			fi
 		fi
+		restore_copy_back() {
+			local snap="$1" dst="$2" kind="$3" present
+			present="$(cat "$snap/present" 2>/dev/null)" || return 1
+			if [ "$present" = present ]; then
+				if [ -e "$dst" ] || [ -L "$dst" ]; then
+					if [ "$kind" = dir ]; then oc_rmtree "$dst" || return 1; else rm -f "$dst" || return 1; fi
+				fi
+				mkdir -p "$(dirname "$dst")" || return 1
+				if [ "$kind" = dir ]; then cp -a "$snap/object" "$dst"; else cp -p "$snap/object" "$dst"; fi
+			else
+				if [ -e "$dst" ] || [ -L "$dst" ]; then
+					if [ "$kind" = dir ]; then oc_rmtree "$dst"; else rm -f "$dst"; fi
+				fi
+			fi
+		}
+		if ! restore_copy_back "$restore_uci" /etc/config/openclaw file; then oc_warn "UCI 回滚失败"; rollback_rc=1; fi
+		if ! restore_copy_back "$restore_cron" "${OC_CRONTAB:-/etc/crontabs/root}" file; then oc_warn "crontab 回滚失败"; rollback_rc=1; fi
+		if ! restore_copy_back "$restore_ext/delpass" "$(oc_base_dir)/secure/delpass" file; then oc_warn "secure/delpass 回滚失败"; rollback_rc=1; fi
+		if ! restore_copy_back "$restore_ext/cloud-pass" "$(oc_base_dir)/cloud/pass" file; then oc_warn "cloud/pass 回滚失败"; rollback_rc=1; fi
+		if ! restore_copy_back "$restore_ext/cloud-home" "$(oc_base_dir)/cloud/home" dir; then oc_warn "cloud/home 回滚失败"; rollback_rc=1; fi
+		if ! restore_copy_back "$restore_plugins" "$(oc_oc_dir)/lib/node_modules" dir; then oc_warn "插件目录回滚失败"; rollback_rc=1; fi
+			if [ "$rollback_rc" = "0" ] && [ -n "$restore_journal" ]; then oc_rmtree "$restore_journal" || rollback_rc=1; fi
+		return "$rollback_rc"
 	}
 	oc_restore_cleanup() {
-		# EXIT 可能由 die_json 触发；在未提交成功前必须回滚，而不是只删 stage。
 		if [ "${restore_committed:-0}" != "1" ]; then
-			oc_restore_rollback
+			oc_restore_rollback || oc_warn "还原回滚未完成，事务日志和残留目录已保留"
+			[ "${rollback_rc:-0}" = "0" ] || return 0
 		fi
 		oc_rmtree "${stage:-}"
 	}
@@ -800,13 +889,28 @@ cmd_restore() {
 		fi
 	done
 	if [ -d "$stage/plugins" ]; then
-		mkdir -p "$(oc_oc_dir)/lib/node_modules" 2>/dev/null || die_json "插件目录不可用"
-		for _plugin in "$stage/plugins"/*; do
+		_plugroot="$(oc_oc_dir)/lib/node_modules"
+		mkdir -p "$_plugroot" 2>/dev/null || die_json "插件目录不可用"
+		for _plugin in "$stage/plugins/global"/* "$stage/plugins"/*; do
+			case "${_plugin#"$stage/plugins/"}" in global|nested) continue ;; esac
 			[ -d "$_plugin" ] || continue
-			_dst="$(oc_oc_dir)/lib/node_modules/$(basename "$_plugin")"
-			oc_rmtree "$_dst"
-			cp -a "$_plugin" "$(dirname "$_dst")/" 2>/dev/null || die_json "插件恢复失败"
+			_dst="$_plugroot/$(basename "$_plugin")"
+			_plugin_target="${_dst}.restore.$$"
+			oc_rmtree "$_plugin_target"
+			cp -a "$_plugin" "$_plugin_target" 2>/dev/null || die_json "插件恢复失败"
+			[ -d "$_dst" ] && mv "$_dst" "${_dst}.pre-restore.$$" 2>/dev/null || true
+			mv "$_plugin_target" "$_dst"
+			# 2>/dev/null || die_json "插件恢复失败"
 		done
+		if [ -d "$stage/plugins/nested/openclaw" ]; then
+			mkdir -p "$(oc_oc_dir)/lib/node_modules/openclaw/node_modules" || die_json "嵌套插件目录不可用"
+			for _plugin in "$stage/plugins/nested/openclaw"/*; do
+				[ -d "$_plugin" ] || continue
+				_dst="$(oc_oc_dir)/lib/node_modules/openclaw/node_modules/$(basename "$_plugin")"
+				oc_rmtree "$_dst"
+				cp -a "$_plugin" "$(dirname "$_dst")/" 2>/dev/null || die_json "嵌套插件恢复失败"
+			done
+		fi
 	fi
 
 	# cloud/bin 是当前设备上的云组件安装目录，不信任归档里的路径配置。
@@ -925,46 +1029,33 @@ cmd_restore() {
 	fi
 
 	if [ "$started" != "1" ] && { [ "$moved" = "1" ] || [ "$cloud_bin_moved" = "1" ]; }; then
-		# 起不来时回滚已替换的组件；有旧数据时同时回滚数据目录。
+		# 起不来时统一走事务回滚；EXIT trap 只负责兜底，避免重复删除或恢复。
 		oc_warn "还原后网关未能启动，正在回滚到还原前状态"
-		if [ "$moved" = "1" ]; then
-			oc_rmtree "$data"
-			if mv "$old" "$data" 2>/dev/null; then
-				moved=0
-			else
-				oc_warn "回滚失败，原数据仍在 $old，请手动处理"
-			fi
-		fi
-		oc_fix_perms >/dev/null 2>&1
-		# cloud/bin 也必须和旧数据一起回滚；此时新目录已停止使用。
-		if [ "$cloud_bin_moved" = "1" ] && [ -d "$cloud_bin_old" ]; then
-			oc_rmtree "$cloud_bin_target"
-			if mv "$cloud_bin_old" "$cloud_bin_target" 2>/dev/null; then
-				cloud_bin_moved=0
-			else
-				oc_warn "云组件旧目录回滚失败，原目录仍在 $cloud_bin_old"
-			fi
-		fi
-		if [ "$moved" = "0" ] && [ "$cloud_bin_moved" = "0" ]; then
+		oc_restore_rollback
+		if [ "$rollback_rc" = "0" ]; then
 			/etc/init.d/openclaw restart >/dev/null 2>&1
 			bk_detail "$(basename "$p")"
 			die_json "还原后网关未能启动（可能是不兼容的旧 schema），已自动回滚到还原前状态。还原前安全快照：${safety_file:-无}"
 		fi
 		bk_detail "$(basename "$p")"
-		die_json "还原后网关未能启动，且自动回滚失败；原数据或云组件目录仍保留在旧路径（安全快照：${safety_file:-无}）"
+		die_json "还原后网关未能启动，且自动回滚失败；事务日志、旧目录和暂存目录已保留（安全快照：${safety_file:-无}）"
 	fi
 
-	# 网关已确认应答，提交恢复；此后 EXIT 不再回滚旧目录。
-	restore_committed=1
-	# 确认起来了才删旧数据和旧云组件目录
+	# Commit only after old copies are removed successfully; otherwise the
+	# journal and rollback state remain available for safe manual recovery.
 	if [ "$moved" = "1" ]; then
-		oc_rmtree "$old"
+		oc_rmtree "$old" || die_json "还原成功但无法清理旧数据目录，事务日志已保留：$restore_journal"
 		moved=0
 	fi
 	if [ "$cloud_bin_moved" = "1" ]; then
-		oc_rmtree "$cloud_bin_old"
+		oc_rmtree "$cloud_bin_old" || die_json "还原成功但无法清理旧云组件目录，事务日志已保留：$restore_journal"
 		cloud_bin_moved=0
 	fi
+	if ! oc_rmtree "$restore_journal"; then
+		bk_detail "$(basename "$p")"
+		die_json "还原已完成但无法删除事务日志，日志已保留：$restore_journal"
+	fi
+	restore_committed=1
 
 	blog "已从备份还原：$(basename "$p")"
 	bk_detail "$(basename "$p")"

@@ -537,6 +537,15 @@ else
 fi
 
 head_ "7k2. 前端 GET 调用的端点必须真的登记进 READ_ONLY（名字不一致会让功能静默失效）"
+if [ -f tools/tests/api-run.sh ]; then
+	if out="$(sh tools/tests/api-run.sh 2>&1)"; then printf '%s\n' "$out" | tail -1 | sed 's/^/    /'; ok "api-run.sh 全部断言通过"; else bad "api-run.sh 有失败断言"; fi
+else skip "缺少 tools/tests/api-run.sh"; fi
+if [ -f tools/tests/core-pattern.sh ]; then
+	if out="$(sh tools/tests/core-pattern.sh 2>&1)"; then printf '%s\n' "$out" | tail -1 | sed 's/^/    /'; ok "core-pattern.sh 全部断言通过"; else bad "core-pattern.sh 有失败断言"; fi
+else skip "缺少 tools/tests/core-pattern.sh"; fi
+if [ -f tools/tests/plugin-restore.sh ]; then
+	if out="$(sh tools/tests/plugin-restore.sh 2>&1)"; then printf '%s\n' "$out" | tail -1 | sed 's/^/    /'; ok "plugin-restore.sh 全部断言通过"; else bad "plugin-restore.sh 有失败断言"; fi
+else skip "缺少 tools/tests/plugin-restore.sh"; fi
 if [ -f tools/tests/api-readonly-route.sh ]; then
 	if out="$(sh tools/tests/api-readonly-route.sh 2>&1)"; then
 		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
@@ -573,6 +582,18 @@ if [ -f tools/tests/cloud-overview-schedule.sh ]; then
 	fi
 else
 	skip "缺少 tools/tests/cloud-overview-schedule.sh"
+fi
+
+if [ -f tools/tests/cloud-bin-secure.sh ]; then
+	if out="$(sh tools/tests/cloud-bin-secure.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "cloud-bin-secure.sh 全部断言通过"
+	else
+		bad "cloud-bin-secure.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|skip|expected' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/cloud-bin-secure.sh"
 fi
 
 head_ "7k6. 第二轮审计 P1 路径与 repair 回归"

@@ -15,6 +15,32 @@ USE_PROCD=1
 
 OC_UCI="openclaw"
 OC_USER="openclaw"
+OC_CORE_PATTERN_SAVE="/var/run/openclaw-core-pattern"
+OC_CORE_PATTERN_TARGET=""
+oc_core_pattern_save() {
+	local tmp old
+	[ -e "$OC_CORE_PATTERN_SAVE" ] && return 1
+	old="$(cat /proc/sys/kernel/core_pattern 2>/dev/null)" || return 1
+	[ -n "$old" ] || return 1
+	tmp="${OC_CORE_PATTERN_SAVE}.tmp.$$"
+	rm -f "$tmp" 2>/dev/null
+	printf '%s\n' "$old" >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+	mv "$tmp" "$OC_CORE_PATTERN_SAVE" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+oc_core_pattern_restore() {
+	[ -s "$OC_CORE_PATTERN_SAVE" ] || return 0
+	local old current target
+	old="$(cat "$OC_CORE_PATTERN_SAVE" 2>/dev/null)" || return 1
+	target="${OC_CORE_PATTERN_TARGET:-}"
+	current="$(cat /proc/sys/kernel/core_pattern 2>/dev/null)" || return 1
+	if [ -z "$target" ] || [ "$current" != "$target" ]; then
+		logger -t openclaw "core_pattern 已被其他服务修改，保留当前值并清理本服务保存值"
+		rm -f "$OC_CORE_PATTERN_SAVE" 2>/dev/null || true
+		return 0
+	fi
+	printf '%s\n' "$old" >/proc/sys/kernel/core_pattern 2>/dev/null || return 1
+	rm -f "$OC_CORE_PATTERN_SAVE" 2>/dev/null || true
+}
 
 uci_get() {
 	local v
@@ -746,8 +772,20 @@ start_service() {
 		mkdir -p "$base/dumps" 2>/dev/null || true
 		chown root:root "$base/dumps" 2>/dev/null || true
 		chmod 700 "$base/dumps" 2>/dev/null || true
-		printf '%s/core.%%e.%%t.%%p.%%s\n' "$base/dumps" >/proc/sys/kernel/core_pattern 2>/dev/null \
-			|| logger -t openclaw "无法写入 core_pattern，core 可能落到默认位置"
+		OC_CORE_PATTERN_TARGET="$base/dumps/core.%e.%t.%p.%s"
+		if [ -s "$OC_CORE_PATTERN_SAVE" ]; then
+			# A second start must not replace the original value or create a new
+			# restore point.  It may only re-assert our own target.
+			if [ "$(cat /proc/sys/kernel/core_pattern 2>/dev/null)" = "$OC_CORE_PATTERN_TARGET" ]; then
+				:
+			else
+				logger -t openclaw "core_pattern 保存值已存在，跳过重复 start 的覆盖"
+			fi
+		elif oc_core_pattern_save; then
+			printf '%s\n' "$OC_CORE_PATTERN_TARGET" >/proc/sys/kernel/core_pattern 2>/dev/null || { rm -f "$OC_CORE_PATTERN_SAVE" 2>/dev/null || true; logger -t openclaw "无法写入 core_pattern，core 可能落到默认位置"; }
+		else
+			logger -t openclaw "无法保存 core_pattern，保留旧值，core dump 路径未修改"
+		fi
 		logger -t openclaw "core dump 已开启：$base/logs"
 	fi
 	procd_set_param stdout 1
@@ -761,6 +799,7 @@ stop_service() {
 	# procd stops the instance; never blanket-kill by name here (that used to
 	# take down unrelated processes matching 'openclaw').
 	rm -f /var/run/openclaw.pid 2>/dev/null || true
+	if ! oc_core_pattern_restore; then logger -t openclaw "无法恢复 core_pattern"; fi
 	logger -t openclaw "stopped"
 }
 
