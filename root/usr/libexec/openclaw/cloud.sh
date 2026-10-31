@@ -263,9 +263,15 @@ cloud_ensure_dirs() {
 
 cloud_bin_secure() {
 	# Verify the complete path before root executes a component. Every checked
-	# directory and executable is root-owned, non-symlink, and exactly 0700.
-	local b="$1" d
+	# directory and executable is root-owned, non-symlink, and explicitly safe.
+	local b="$1" d dir_mode bin_mode
 	[ -f "$b" ] && [ ! -L "$b" ] || return 1
+	# Reject traversal spelling as well as paths outside the configured root.
+	# This keeps the textual parent walk below from treating /root/../other as
+	# part of the component chain.
+	case "$b" in
+		*"/../"*|*"/./"*|*/..|*/.) return 1 ;;
+	esac
 	# Check only the component path, from cloud root through the executable;
 	# system ancestors such as /usr are not required to be 0700.
 	d="$(dirname "$b")"
@@ -273,9 +279,11 @@ cloud_bin_secure() {
 	while :; do
 		[ -d "$d" ] && [ ! -L "$d" ] || return 1
 		[ "$(stat -c '%u:%g' "$d" 2>/dev/null)" = '0:0' ] || return 1
-		# 目录需要 root 独占写权限；兼容安装器保留的执行位组合。
-		case "$(stat -c '%a' "$d" 2>/dev/null)" in
-			700|710|750|755) ;;
+		# Directories may use only these explicit combinations.  0701/0711/0751
+		# are compatibility modes seen from installers; none grants write access.
+		dir_mode="$(stat -c '%a' "$d" 2>/dev/null)"
+		case "$dir_mode" in
+			700|701|710|711|750|751|755) ;;
 			*) return 1 ;;
 		esac
 		[ "$d" = "$OC_CLOUD_ROOT" ] && break
@@ -283,10 +291,11 @@ cloud_bin_secure() {
 		case "$d" in "$OC_CLOUD_ROOT"|"$OC_CLOUD_ROOT"/*) ;; *) return 1 ;; esac
 	done
 	[ "$(stat -c '%u:%g' "$b" 2>/dev/null)" = '0:0' ] || return 1
-	# 可执行文件允许 0700/0710/0750/0755 等常见安全组合；
-	# 不允许 group/other 写权限，且必须存在执行位。
-	case "$(stat -c '%a' "$b" 2>/dev/null)" in
-		700|710|750|755) ;;
+	# Component files have their own explicit allowlist.  In particular, all
+	# group/other write bits and every setuid/setgid/sticky mode are rejected.
+	bin_mode="$(stat -c '%a' "$b" 2>/dev/null)"
+	case "$bin_mode" in
+		700|701|710|711|750|751|755) ;;
 		*) return 1 ;;
 	esac
 	[ -x "$b" ] || return 1
