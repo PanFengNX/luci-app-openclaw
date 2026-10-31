@@ -563,14 +563,14 @@ check('oc_pty_run 120' in cli15, 'cmd_run 对这类命令改用 oc_pty_run')
 check('请在 SSH 里直接执行' in cli15, '缺 script 时给出可操作提示')
 
 # 白名单：新增的必须是"不能变成 shell 命令"的；危险的一个都不能进
-for _c in ('security', 'secrets', 'tasks', 'nodes', 'pairing', 'qr', 'hooks',
-           'webhooks', 'dns', 'docs', 'directory', 'wiki', 'sandbox',
-           'approvals', 'agent', 'acp', 'capability', 'infer', 'completion',
-           'backup', 'system', 'dashboard'):
+for _c in ('secrets', 'tasks', 'nodes', 'qr', 'hooks', 'webhooks'):
     check(('	%s = true' % _c) in ctrl15 or (' %s = true' % _c) in ctrl15,
-          '白名单含 %s' % _c)
-for _c in ('reset', 'uninstall', 'migrate', 'tui', 'browser', 'exec-policy'):
-    check(('\n\t%s = true' % _c) not in ctrl15, '白名单**不含** %s（故意排除）' % _c)
+          '只读顶层白名单含 %s' % _c)
+check('local RUN_TOP' in ctrl15 and 'local RUN_SUB' in ctrl15 and 'run_argv_allowed' in ctrl15,
+      'api_run 使用完整 argv 只读白名单')
+for _c in ('agent', 'message', 'system', 'update', 'security', 'backup'):
+    check(('	%s = true' % _c) not in ctrl15 and (' %s = true' % _c) not in ctrl15,
+          '高风险顶层命令不在首 token 白名单 %s' % _c)
 
 # 页面说明必须与白名单一致：写了却不放行 = 骗人
 check('gateway auth-token --show' in term15, '页面示例含 auth-token --show')

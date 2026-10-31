@@ -113,7 +113,7 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 
 | # | 问题 | 危害 | 修复 |
 | --- | --- | --- | --- |
-| 1 | `api_run` 把浏览器传来的 `cmd` **不加引号**拼进 shell 字符串 | 任意命令执行（root）。`cmd=status;reboot` 即可 | 首 token 白名单（20 个 openclaw 子命令）+ 每个 token 经 `q()` 单引号转义；`cmd_run` 再拦一次 `$ \` ; \| & < > ( ) { } ! \` |
+| 1 | `api_run` 把浏览器传来的 `cmd` **不加引号**拼进 shell 字符串 | 任意命令执行（root）。`cmd=status;reboot` 即可 | 完整 argv 只读白名单；仅允许明确的 status/version/health/doctor/providers/tools/secrets/tasks/nodes/qr/hooks/webhooks，以及 mcp/devices/pairing 的 list/status、backup list/verify；未知参数和写操作全部拒绝 |
 | 2 | 网关 token 以 `--token <值>` 出现在命令行 | 任何本地用户读 `/proc/<pid>/cmdline` 即可拿到凭据 | 改走 `OPENCLAW_GATEWAY_TOKEN` 环境变量（官方文档等价方式，且优先级高于配置文件） |
 | 3 | 临时文件用 `/tmp/openclaw-*` 固定名 | `/tmp` 是 1777，本地用户可预置符号链接 → 以 root 覆写任意文件；预置锁目录 → 管理功能全部被拒绝 | 统一迁入私有目录 `/tmp/.openclaw`（0700、属主校验、启动时回收异常条目） |
 | 4 | 状态页把 `d.url` / `d.token` 拼进 `<a href>` | XSS；token 进入浏览器历史与 Referer | 只以 `textContent` 显示 URL，token 仅存在于 JS 变量 |
@@ -191,7 +191,7 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 
 1. 若该 provider 需要插件且未安装 → `openclaw plugins install <plugin>`（失败自动回落
    `npm install -g --prefix <base>/openclaw`）；
-2. 把 API Key 写入 `~/.openclaw/.env`（`ENVVAR=key`，权限 600）；
+2. 把 API Key 写入当前 `<state_dir>/.env`（`ENVVAR=key`，权限 600）；
 3. `openclaw config set models.providers.<id>.apiKey/baseUrl/api`；
 4. `openclaw config set agents.defaults.model.primary <id>/<model>`；
 5. 修复属主权限 → 重启网关 → 页面刷新。
@@ -241,8 +241,8 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 - 一键创建备份，可选备注名、是否包含工作区；
 - 查看、下载、校验、删除历史备份；
 - 可直接上传 `.tar.gz` 并恢复；恢复前自动再做一份 `pre-restore` 安全快照；
-- 备份包含：`home/.openclaw`（配置、模型、渠道、会话、工作区）与 UCI 设置；
-- 不包含：Node.js、OpenClaw 程序、npm/cache、日志（这些可重新安装或生成）；
+- 备份包含：当前 `state_dir`（配置、模型、渠道、会话、工作区与 `.env`）、UCI 设置、`secure/delpass`、`cloud/pass`、`cloud/home`、`cloud/bin`，以及全局和 OpenClaw 嵌套 `node_modules` 下的 provider 插件；
+- 不包含：Node.js、OpenClaw 程序本体、npm/cache、日志（这些可重新安装或生成）；
 - 备份含 API Key，程序尝试设置权限 `600`，若底层文件系统不支持权限收紧会明确告警；
 - 恢复前逐条检查 tar：拒绝绝对路径、`..`、符号链接、硬链接、设备、FIFO、非本程序清单，
   并限制解压体积 512MB；归档先解压到私有暂存区，验证后才替换目标数据；

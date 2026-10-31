@@ -72,19 +72,17 @@ check('config_get_bool core_dumps main core_dumps 0' in init,
       'core dump 由 UCI 开关控制（默认 0）')
 check("option core_dumps '0'" in defaults, 'config.default 里 core_dumps 默认为 0')
 # 无条件出现 = 每次启动都改全局 core_pattern
-# 只数**真的写** /proc/sys/kernel/core_pattern 的行：
-# 注释与 logger 文案里也会出现这个词，不能一起算。
-core_line = [l for l in init.splitlines()
-             if '/proc/sys/kernel/core_pattern' in l and not l.strip().startswith('#')]
-check(len(core_line) == 1, 'core_pattern 只在开关分支里写一次', 'hits=%d' % len(core_line))
-if core_line:
-    idx = init.index(core_line[0])
-    # 取该 if 语句本身之前的足够窗口：DIAG 域的 mkdir/chown/chmod 也在分支内，
-    # 窗口要给够（600 会假失败）。
-    before = init[max(0, idx - 1200):idx]
-    check('if [ "$core_dumps" = "1" ]' in before, 'core_pattern 写在 core_dumps 分支内')
-    # 顺带验证落点是 DIAG 域而不是 VAR 域（core 属主取决于崩溃进程，不该进用户域）
-    check('"$base/dumps"' in before, 'core 落在 DIAG 域（dumps/），不落 VAR 域')
+# core_pattern 现在同时包含保存、目标写入和条件恢复；只统计真实写入语句，
+# 并验证目标写入位于 core_dumps 分支、恢复函数具备目标值保护。
+core_write = [l for l in init.splitlines()
+              if '>/proc/sys/kernel/core_pattern' in l and not l.strip().startswith('#')]
+check(len(core_write) >= 1, '存在 core_pattern 写入路径', 'hits=%d' % len(core_write))
+check('OC_CORE_PATTERN_TARGET' in init and 'oc_core_pattern_restore()' in init,
+      'core_pattern 有目标值与恢复函数')
+idx = init.index('OC_CORE_PATTERN_TARGET=', init.index('start_service()'))
+before = init[max(0, idx - 1200):idx]
+check('if [ "$core_dumps" = "1" ]' in before, 'core_pattern 配置位于 core_dumps 分支')
+check('"$base/dumps"' in init, 'core 落在 DIAG 域（dumps/），不落 VAR 域')
 
 # ---- core_dumps 的读写链路：能存、能读、界面能提交 ----
 cli = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
