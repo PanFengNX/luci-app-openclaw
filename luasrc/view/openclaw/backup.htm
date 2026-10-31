@@ -1058,7 +1058,9 @@ function loadBackups(){
 
 function bkLoadLocal(){
   get(API.backups, function(r){
-    var arr = jp((r && r.data) || '[]', []);
+    // 兼容旧后端的 JSON 字符串和新后端可能直接返回的数组。
+    var raw = r && r.data;
+    var arr = (typeof raw === 'string') ? jp(raw, []) : raw;
     BK.local = (arr && typeof arr.length === 'number') ? arr : [];
     BK.localErr = (r && r.ok === false && !BK.local.length)
       ? '读取本地备份失败，请刷新重试' : '';
@@ -1067,16 +1069,19 @@ function bkLoadLocal(){
 }
 
 function bkLoadCloud(){
-  // 未登录时不必发请求：cloud.sh 会直接报错，而页面上只显示本地备份就够。
-  if (!CL.logged){
-    BK.cloud = [];
-    BK.cloudErr = '';
-    bkRenderList();
-    return;
-  }
+  // 不根据 status 的登录判定短路列表请求：status 可能因网络超时、组件
+  // 输出格式或缓存暂时不确定，但网盘目录本身仍可能可读。让后端返回真实
+  // 错误，避免“有云端备份却显示暂无备份”。
   get(API.cloud_ls, function(r){
-    if (r && r.ok){
-      BK.cloud = (r.data && r.data.data) || [];
+    var raw = r && r.data;
+    var obj = (typeof raw === 'string') ? jp(raw, {}) : raw;
+    if (r && r.ok && obj){
+      // cloud_reply 返回 { ok, data: { ok, data: [...] } }；同时兼容
+      // 直接返回数组和未嵌套的 { data: [...] }。
+      if (obj.data && typeof obj.data.length === 'number') BK.cloud = obj.data;
+      else if (obj.data && obj.data.data && typeof obj.data.data.length === 'number') BK.cloud = obj.data.data;
+      else if (typeof obj.length === 'number') BK.cloud = obj;
+      else BK.cloud = [];
       BK.cloudErr = '';
     } else {
       BK.cloud = [];

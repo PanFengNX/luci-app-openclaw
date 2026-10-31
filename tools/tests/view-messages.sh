@@ -711,6 +711,8 @@ check("dpApply(" in bh13[bh13.index("function loadOverview("):][:2000],
 # 刷新按钮要绕缓存（用户点刷新就是不信缓存）
 check("loadOverview(true)" in bh13, "刷新按钮带 fresh=1")
 check("cloud_status(fresh)" not in bh13, "旧的 cloud_status 端点不再被页面调用")
+check("typeof raw === 'string'" in bh13, "本地备份列表兼容字符串和数组响应")
+check("function bkLoadCloud()" in bh13 and "get(API.cloud_ls" in bh13, "云端列表不因状态误判而跳过请求")
 
 # ---- 状态缓存：whoami 是联网调用，不能每次刷新都跑 ----
 check("clock_status_cache_read()" in cs13, "有状态缓存读")
