@@ -1,8 +1,20 @@
-<!-- version: 1.8.62 -->
+<!-- version: 1.8.63 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.63
+
+修复百度网盘云备份在真实设备上「组件已安装、已登录，但云端列表为空」的根因。
+
+- **属主策略自相矛盾（根因）**：`oc_fix_perms` 会递归把整个数据目录交给服务用户，而云组件安全校验要求 `root:root`。此前只收回了 `cloud/pass` 与 `cloud/home`，漏了 `cloud` 根目录与 `cloud/bin`（`bdpan` 本体），于是每次安装/改模型/加渠道/恢复备份后，云备份就被自己的安全检查静默挡死 —— 状态页显示「已安装」，列表却是空的。
+- 现在 `oc_harden_root_paths` 无条件收回 `cloud`（root:root / 0700）与 `cloud/bin`（递归 `root:root`、递归去掉组/其他权限含隐藏文件、目录 0700），并对 `bdpan` 补回 `0755` 执行位；被误改成 0644/0600 的组件也能由「一键修复」自愈。
+- **状态页与列表判据统一**：`cmd_status` 与 `cloud ls` 共用同一个 `cloud_secure_reason()`，并输出稳定原因码（`insecure-owner` / `insecure-mode` / `symlink` / `outside-root` / `not-executable` 等），页面按原因给出可操作提示。
+- **云端列表不再 fail-open**：组件不可用时返回 `ok:false` + 原因，而不是伪装成「暂无备份」；未登录、云端目录尚未创建仍按正常空状态处理，新用户不会看到误导性报错。
+- **安装流程安全加固**：`cloud_install_version` 对符号链接、越界路径、含 `..` 的路径在任何 `chown/chmod` 之前直接拒绝，避免以 root 修改组件目录外的目标。
+- **防御性修正**：`cloud_secure_reason` 对 `OC_CLOUD_ROOT` 为空 fail-closed，目录链上行到 `/` 即终止（防死循环）；所有调用点吞掉非零返回，避免未来启用 `set -e` 时接口变成空输出。
+- 新增 `tools/tests/cloud-install-order.sh` 固化安全契约；`cloud-ls`、`cloud-bin-secure`、`audit-2026-10-29-fixes` 同步补充断言。
 
 ## 1.8.62
 

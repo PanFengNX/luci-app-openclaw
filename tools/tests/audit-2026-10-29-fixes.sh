@@ -108,8 +108,8 @@ if [ -d "$STAGE/root/usr/libexec/openclaw" ]; then
 #!/bin/sh
 . "$1/root/usr/libexec/openclaw/lib.sh" >/dev/null 2>&1
 TB="$(mktemp -d)"
-mkdir -p "$TB/secure" "$TB/cloud" "$TB/backups" "$TB/openclaw"
-: > "$TB/secure/delpass"; : > "$TB/cloud/pass"; : > "$TB/backups/a.tar.gz"
+mkdir -p "$TB/secure" "$TB/cloud/bin" "$TB/backups" "$TB/openclaw"
+: > "$TB/secure/delpass"; : > "$TB/cloud/pass"; : > "$TB/cloud/bin/bdpan"; : > "$TB/backups/a.tar.gz"
 LOG="$(mktemp)"
 oc_base_dir() { echo "$TB"; }
 oc_oc_dir()   { echo "$TB/openclaw"; }
@@ -126,6 +126,15 @@ need "chown\[root:root .*/cloud/pass\]"
 need "chmod\[600 .*/cloud/pass\]"
 need "chown\[-R root:root .*/backups\]"
 need "chmod\[700 .*/backups\]"
+need "chown\[-R root:root .*/cloud/bin\]"
+need "chmod\[700 .*/cloud/bin\]"
+need "chmod\[-R go-rwx .*/cloud/bin\]"
+# cloud_secure_reason 会从可执行文件逐级检查到 OC_CLOUD_ROOT，父目录
+# $base/cloud 本身也必须收回，否则只修 bin 仍然判 insecure-owner。
+need "chown\[root:root .*/cloud\]"
+need "chmod\[700 .*/cloud\]"
+# 只减权限不补执行位时，0644/0600 的 bdpan 永远修不好，只能靠重装。
+need "chmod\[755 .*/cloud/bin/bdpan\]"
 rm -rf "$TB" "$LOG" 2>/dev/null
 exit $rc
 TEOF
@@ -147,6 +156,12 @@ cat > "$TMPDIR2/oc-sd-check.sh" <<'SEOF'
 #!/bin/sh
 eval "$(sed -n '/^_state_dir_shape_ok() {/,/^}/p' "$1")"
 eval "$(sed -n '/^_state_dir_safe() {/,/^}/p' "$1")"
+# 抽取失败时函数不存在，rej() 里的 && 会被 127 短路，整组断言会静默“全过”。
+# 先显式确认函数真的加载了。
+if ! command -v _state_dir_safe >/dev/null 2>&1; then
+	echo "    抽取失败：_state_dir_safe 未加载"
+	exit 1
+fi
 rc=0
 rej() { _state_dir_safe "$1" && { echo "    误放行：$1"; rc=1; }; }
 acc() { _state_dir_safe "$1" || { echo "    误拒绝：$1"; rc=1; }; }

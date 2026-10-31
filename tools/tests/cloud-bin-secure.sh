@@ -24,7 +24,7 @@ function count_braces(s,   t) {
 	sub(/#.*/, "", t)
 	return gsub(/{/, "", t) - gsub(/}/, "", t)
 }
-/^cloud_bin\(\)|^cloud_bin_ready\(\)|^cloud_bin_secure\(\)/ {
+/^cloud_bin\(\)|^cloud_bin_ready\(\)|^cloud_bin_secure\(\)|^cloud_secure_reason\(\)/ {
 	wanted = 1
 	depth = 0
 }

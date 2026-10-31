@@ -1855,6 +1855,18 @@ oc_harden_root_paths() {
 		chmod 600 "$pass" 2>/dev/null || oc_warn "无法把 $pass 权限设为 0600"
 	fi
 
+	# 云组件根目录本身也必须收回。
+	#
+	# cloud_secure_reason 是从可执行文件逐级往上检查到 OC_CLOUD_ROOT 的，
+	# 每一级都要求 root:root。只修 cloud/bin 而漏掉 $b/cloud 时，父目录仍
+	# 是 oc_fix_perms 递归交出去的服务用户，整条链照样判 insecure-owner ——
+	# 表现为「明明修了 bin，云备份还是不可用」。
+	local cloud_root="$b/cloud"
+	if [ -d "$cloud_root" ]; then
+		chown root:root "$cloud_root" 2>/dev/null || oc_warn "无法把 $cloud_root 属主改回 root"
+		chmod 700 "$cloud_root" 2>/dev/null || oc_warn "无法把 $cloud_root 权限设为 0700"
+	fi
+
 	# bdpan 的登录态也必须保持 root-only；oc_fix_perms 先递归交给
 	# openclaw，再由这里收回，避免网关进程读到云登录凭据。
 	local cloud_home="$b/cloud/home"
@@ -1862,6 +1874,30 @@ oc_harden_root_paths() {
 		chown -R root:root "$cloud_home" 2>/dev/null || oc_warn "无法把 $cloud_home 属主改回 root"
 		chmod -R go-rwx "$cloud_home" 2>/dev/null || oc_warn "无法收紧 $cloud_home 的组/其他权限"
 		chmod 700 "$cloud_home" 2>/dev/null || oc_warn "无法把 $cloud_home 权限设为 0700"
+	fi
+
+	# bdpan 本体（$b/cloud/bin）同样必须保持 root-only。
+	#
+	# 这条曾经漏掉，后果是**静默的**：oc_fix_perms 的 chown -R 把
+	# bdpan 改成服务用户，而 cloud_bin_secure 要求它 root:root，
+	# 于是「云备份」整条链被自己的安全校验挡死 —— status 仍显示
+	# 「已安装」，ls 却返回空列表，日志里只有一行 oc_warn。
+	# 触发点很多：装 OpenClaw、改模型、加渠道、恢复备份都会跑
+	# oc_fix_perms。所以必须在这里无条件收回，且覆盖目录内全部文件
+	# （安装器可能顺带留下其它辅助二进制）。
+	local cloud_bin_dir="$b/cloud/bin"
+	if [ -d "$cloud_bin_dir" ]; then
+		chown -R root:root "$cloud_bin_dir" 2>/dev/null || oc_warn "无法把 $cloud_bin_dir 属主改回 root"
+		# 递归收回全部组/其他权限，包含 .installed-version 等隐藏文件；
+		# 只做 go-rwx，不抹掉 root 的执行位。顶部目录再明确固定为 0700。
+		chmod -R go-rwx "$cloud_bin_dir" 2>/dev/null || oc_warn "无法收紧 $cloud_bin_dir 的组/其他权限"
+		chmod 700 "$cloud_bin_dir" 2>/dev/null || oc_warn "无法把 $cloud_bin_dir 权限设为 0700"
+		# 只减权限会让「文件被打成 0644/0600」永远修不好：安全校验要求
+		# 可执行，而 repair 路径不补 x 位，用户只能靠重装。这里对 bdpan
+		# 显式补回属主执行位（0755 = 白名单内的确定结果），不碰其它文件。
+		if [ -f "$cloud_bin_dir/bdpan" ] && [ ! -L "$cloud_bin_dir/bdpan" ]; then
+			chmod 755 "$cloud_bin_dir/bdpan" 2>/dev/null || oc_warn "无法恢复 bdpan 的执行权限"
+		fi
 	fi
 
 	local bk="$b/backups"

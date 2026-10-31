@@ -119,6 +119,16 @@ cloud_fail() {
 	exit "${2:-1}"
 }
 
+cloud_fail_reason() {
+	# cloud_fail_reason <reason> <message> [exit-code]
+	#
+	# reason 是给程序和前端消费的稳定标识，error 才是给人看的中文。
+	# 页面按 reason 决定提示措辞，按 error 显示细节。
+	printf '{"ok":false,"reason":"%s","error":"%s"}\n' \
+		"$(jstr "${1:-unknown}")" "$(jstr "${2:-未知错误}")"
+	exit "${3:-1}"
+}
+
 # ---------------------------------------------------------------- redaction
 cloud_redact() {
 	# stdin -> stdout。疑似凭据的整行替换掉：宁可少显示一行，也不把 token
@@ -261,45 +271,77 @@ cloud_ensure_dirs() {
 	return 0
 }
 
-cloud_bin_secure() {
-	# Verify the complete path before root executes a component. Every checked
-	# directory and executable is root-owned, non-symlink, and explicitly safe.
-	local b="$1" d dir_mode bin_mode
-	[ -f "$b" ] && [ ! -L "$b" ] || return 1
-	# Reject traversal spelling as well as paths outside the configured root.
-	# This keeps the textual parent walk below from treating /root/../other as
-	# part of the component chain.
+cloud_secure_reason() {
+	# cloud_secure_reason <path> -> stdout 一个原因码；只有 ready 时返回 0。
+	#
+	# 这个函数是「组件能不能用」的**唯一判据**。以前 status 只看 -f + -x，
+	# 而 ls/upload 走 cloud_bin_secure，于是同一台设备上 status 说「已安装
+	# v3.8.4、已登录」、ls 说「组件未安装」—— 现场就是这么自相矛盾的。
+	# 现在两边都从这里取结论，并且带上原因码，页面才能给出可操作提示。
+	#
+	# 原因码：
+	#   ready               可用
+	#   missing             文件不存在
+	#   not-executable      文件在但没有执行位
+	#   symlink             文件或父目录是符号链接
+	#   insecure-owner      属主不是 root:root（现场故障就是这一条：998:998）
+	#   insecure-mode       权限位不在白名单内（含 group/other 写、特殊位）
+	#   outside-root        路径不在 $OC_CLOUD_ROOT 之下
+	#   insecure-path       路径里带 .. / .
+	local b="${1:-}" d dir_mode bin_mode
+
+	[ -n "$b" ] || { printf 'missing'; return 1; }
+	# 判据依赖 OC_CLOUD_ROOT 的绝对路径语义。它为空的退化情形是 fail-open
+	# 且会死循环：case 模式变成 `""|/*`（任何绝对路径都算在根内），而循环
+	# 终止条件 `[ "$d" = "" ]` 永假、dirname / 恒为 / 就会一直转。这里
+	# 先 fail-closed，并让 status 这类高频入口不会卡住。
+	[ -n "${OC_CLOUD_ROOT:-}" ] || { printf 'insecure-path'; return 1; }
+	# 先检查路径文本和根目录范围，再触碰文件系统；否则不存在路径会掩盖
+	# outside-root / insecure-path，且路径类拒绝必须优先于文件存在判断。
 	case "$b" in
-		*"/../"*|*"/./"*|*/..|*/.) return 1 ;;
+		*"/../"*|*"/./"*|*/..|*/.) printf 'insecure-path'; return 1 ;;
 	esac
-	# Check only the component path, from cloud root through the executable;
-	# system ancestors such as /usr are not required to be 0700.
+	# 只检查组件链本身（云根目录到可执行文件），系统祖先如 /usr 不要求私有。
 	d="$(dirname "$b")"
-	case "$d" in "$OC_CLOUD_ROOT"|"$OC_CLOUD_ROOT"/*) ;; *) return 1 ;; esac
+	case "$d" in "$OC_CLOUD_ROOT"|"$OC_CLOUD_ROOT"/*) ;; *) printf 'outside-root'; return 1 ;; esac
+	[ -L "$b" ] && { printf 'symlink'; return 1; }
+	[ -f "$b" ] || { printf 'missing'; return 1; }
 	while :; do
-		[ -d "$d" ] && [ ! -L "$d" ] || return 1
-		[ "$(stat -c '%u:%g' "$d" 2>/dev/null)" = '0:0' ] || return 1
-		# Directories may use only these explicit combinations.  0701/0711/0751
-		# are compatibility modes seen from installers; none grants write access.
+		[ -L "$d" ] && { printf 'symlink'; return 1; }
+		[ -d "$d" ] || { printf 'missing'; return 1; }
+		[ "$(stat -c '%u:%g' "$d" 2>/dev/null)" = '0:0' ] || { printf 'insecure-owner'; return 1; }
+		# 目录只接受显式组合。0701/0711/0751 是安装器上真实见过的权限，
+		# 都不含任何写位给组/其他。
 		dir_mode="$(stat -c '%a' "$d" 2>/dev/null)"
 		case "$dir_mode" in
 			700|701|710|711|750|751|755) ;;
-			*) return 1 ;;
+			*) printf 'insecure-mode'; return 1 ;;
 		esac
 		[ "$d" = "$OC_CLOUD_ROOT" ] && break
+		# 走到 / 还没碰到根目录，说明根本不在根内。这条同时是循环终止的
+		# 兜底：dirname / 恒为 /，没有它就会原地打转。
+		[ "$d" = "/" ] && { printf 'outside-root'; return 1; }
 		d="$(dirname "$d")"
-		case "$d" in "$OC_CLOUD_ROOT"|"$OC_CLOUD_ROOT"/*) ;; *) return 1 ;; esac
+		case "$d" in "$OC_CLOUD_ROOT"|"$OC_CLOUD_ROOT"/*) ;; *) printf 'outside-root'; return 1 ;; esac
 	done
-	[ "$(stat -c '%u:%g' "$b" 2>/dev/null)" = '0:0' ] || return 1
-	# Component files have their own explicit allowlist.  In particular, all
-	# group/other write bits and every setuid/setgid/sticky mode are rejected.
+	[ "$(stat -c '%u:%g' "$b" 2>/dev/null)" = '0:0' ] || { printf 'insecure-owner'; return 1; }
+	# 可执行文件有自己的白名单：group/other 写以及 setuid/setgid/sticky 全部拒绝。
 	bin_mode="$(stat -c '%a' "$b" 2>/dev/null)"
+	# 先判可执行位：白名单里每一档都带 owner 的 x，所以 0644 这类文件落到
+	# 下面只会被判成 insecure-mode，永远得不到「没有执行权限」这个更准确、
+	# 也更可操作的结论（重新安装/补执行位）。
+	[ -x "$b" ] || { printf 'not-executable'; return 1; }
 	case "$bin_mode" in
 		700|701|710|711|750|751|755) ;;
-		*) return 1 ;;
+		*) printf 'insecure-mode'; return 1 ;;
 	esac
-	[ -x "$b" ] || return 1
+	printf 'ready'
 	return 0
+}
+
+cloud_bin_secure() {
+	# 兼容包装：只关心能不能用，不关心原因。判据统一在 cloud_secure_reason。
+	cloud_secure_reason "${1:-}" >/dev/null 2>&1
 }
 
 cloud_bin() {
@@ -1096,24 +1138,31 @@ cmd_status() {
 	fi
 
 	local arch bin installed=false executable=false path="" ver="" logged=false user="" expires="" raw=""
-	local uncertain=false tmp rc k
+	local uncertain=false tmp rc k secure_reason="missing" secure=false
 
 	arch="$(cloud_arch)"
 
-	bin="$(cloud_bin)" || bin=""
+	bin="$OC_CLOUD_BIN"
+	# -L 也要算「存在」：断链的符号链接仍然要被 cloud_secure_reason 判成
+	# symlink，否则状态页会显示「未安装」，而列表接口说「路径不安全」。
+	{ [ -e "$bin" ] || [ -L "$bin" ]; } || bin=""
 	if [ -n "$bin" ]; then
-		# installed 的语义是「文件存在」，保持不变；能不能跑单独用 executable
-		# 报出去。否则前端只能看到 installed=true，把「二进制损坏 / 架构不符」
-		# 也引导成「去登录」。
+		# installed 只表示「找到了文件」；能不能用一律由 cloud_secure_reason
+		# 判定 —— 与 ls / upload / backup-run 完全同一条判据。以前这里只查
+		# -f + -x，于是组件属主是 998（安全校验会拒绝）时 status 照样报
+		# executable=true，页面显示「已安装 v3.8.4 · 已登录」，而同一个页面
+		# 的云端列表说「组件未安装」。
 		installed=true
 		path="$bin"
-		if [ -x "$bin" ]; then
+		secure_reason="$(cloud_secure_reason "$bin")" || true
+		if [ "$secure_reason" = "ready" ]; then
 			executable=true
+			secure=true
 		fi
 	fi
 
 	if [ "$installed" = "true" ] && [ "$executable" != "true" ]; then
-		oc_warn "找到 bdpan（$bin）但不可执行，请重新安装组件"
+		oc_warn "找到 bdpan（$bin）但不可用：$secure_reason（请重新安装组件或跑一键修复）"
 	fi
 	# 版本优先取 `bdpan version`；取不到（二进制损坏 / 架构不匹配 / 临时
 	# 不可执行）时退回安装时写下的 .installed-version，两者都没有才留空。
@@ -1174,8 +1223,8 @@ cmd_status() {
 	fi
 
 	local _json
-	_json="$(printf '{"ok":true,"arch":"%s","cli":{"installed":%s,"executable":%s,"path":"%s","version":"%s"},"auth":{"logged_in":%s,"uncertain":%s,"user":"%s","expires":"%s","raw":"%s"},"remote_dir":"%s","root":"%s","dir":"%s","home":"%s"}' \
-		"$arch" "$installed" "$executable" "$(jstr "$path")" "$(jstr "$ver")" \
+	_json="$(printf '{"ok":true,"arch":"%s","cli":{"installed":%s,"executable":%s,"secure":%s,"reason":"%s","path":"%s","version":"%s"},"auth":{"logged_in":%s,"uncertain":%s,"user":"%s","expires":"%s","raw":"%s"},"remote_dir":"%s","root":"%s","dir":"%s","home":"%s"}' \
+		"$arch" "$installed" "$executable" "$secure" "$(jstr "$secure_reason")" "$(jstr "$path")" "$(jstr "$ver")" \
 		"$logged" "$uncertain" "$(jstr "$user")" "$(jstr "$expires")" "$(jstr "$raw")" \
 		"$(jstr "$OC_CLOUD_REMOTE")" "$(jstr "$OC_CLOUD_ROOT")" \
 		"$(jstr "$OC_CLOUD_DIR")" "$(jstr "$OC_CLOUD_HOME")")"
@@ -1723,7 +1772,36 @@ cloud_install_version() {
 		OC_INSTALL_ERR="安装完成但未找到 bdpan 可执行文件"
 		return 1
 	}
-	chmod +x "$bin" 2>/dev/null || true
+	# 组件由 root 执行，属主与权限必须在**落盘后立刻**收回。
+	#
+	# 安装器是原地覆写：目录会被 cloud_ensure_dirs 收紧成 root:root 0700，
+	# 但被覆写的**文件**沿用了旧 inode 的属主。历史上某次 oc_fix_perms
+	# 留下的 998 就这样一直留在 bdpan 上，随后被 cloud_bin_secure 拒绝，
+	# 而目录看起来完全合规 —— 现场表现为「状态页说已装、列表说没装」。
+	local _reason _secure_pre
+	# cloud_secure_reason 在非 ready 时返回 1；赋值语句处于非条件位置，
+	# 统一 || true 吞掉退出码，避免将来有人给本文件加 set -e 时静默中断。
+	_reason="$(cloud_secure_reason "$bin")" || true
+	case "$_reason" in
+		symlink|outside-root|insecure-path)
+			OC_INSTALL_ERR="安装后的 bdpan 路径不安全（$_reason）：$bin"
+			return 1 ;;
+	esac
+	if [ "$_reason" != "ready" ]; then
+		_secure_pre="$_reason"
+		chown root:root "$bin" 2>/dev/null || true
+		# 无条件收敛到 755，而不是「只在没有 x 位时才 chmod」。
+		# 0744/0745 这类 owner 带 x、但不在白名单里的组合，用条件写法修不动：
+		# -x 为真 → 跳过 chmod；chmod go-w 对 0744 又是空操作 → 复核仍失败，
+		# 用户按提示重装也修不好。这里直接给出白名单内的确定结果。
+		chmod 755 "$bin" 2>/dev/null || true
+		_reason="$(cloud_secure_reason "$bin")" || true
+		if [ "$_reason" != "ready" ]; then
+			OC_INSTALL_ERR="安装后的 bdpan 未通过安全校验（$_reason）：$bin"
+			return 1
+		fi
+		cblog "已把安装后的 bdpan 收回 root:root（原状态：$_secure_pre）"
+	fi
 	if [ ! -x "$bin" ]; then
 		OC_INSTALL_ERR="安装后的 bdpan 不可执行：$bin"
 		return 1
@@ -2608,13 +2686,35 @@ cloud_ls_not_logged_in() {
 }
 
 cmd_ls() {
-	local bin tmp rc out tsv err d mt name size tab sorted display enc
+	local bin tmp rc out tsv err d mt name size tab sorted display enc _reason
 
-	bin="$(cloud_bin_ready)" || {
-		oc_warn "网盘组件未安装，返回空列表"
-		printf '{"ok":true,"data":[],"note":"网盘组件未安装，安装并登录后这里会显示云端备份"}\n'
-		return 0
-	}
+	# 组件不可用必须报错，不能再返回 ok:true + 空数组。
+	#
+	# 这条曾经是 fail-open：cloud_bin_ready 失败只写一行 oc_warn（stderr，
+	# 页面上看不见），然后返回 {"ok":true,"data":[]}。前端拿到「成功 + 空」
+	# 就显示「暂无备份」，于是「组件被安全策略拒绝」在界面上变成了
+	# 「你没有备份」—— 现场 4 份云端备份就是这么"消失"的。
+	if ! bin="$(cloud_bin_ready)"; then
+		# 用 $OC_CLOUD_BIN 而不是 cloud_bin 取路径：cloud_bin 会先把 symlink
+		# 过滤成空，那样就分不清「没装」和「是链接」了。
+		_reason="$(cloud_secure_reason "$OC_CLOUD_BIN")" || true
+		case "$_reason" in
+			missing)
+				cloud_fail_reason component-missing \
+					"网盘组件未安装：未找到 $OC_CLOUD_BIN，请在上方第一步安装组件" ;;
+			not-executable)
+				cloud_fail_reason component-not-executable \
+					"网盘组件没有执行权限：$OC_CLOUD_BIN" ;;
+			symlink|outside-root|insecure-path)
+				cloud_fail_reason component-insecure \
+					"网盘组件路径不安全（$_reason）：$OC_CLOUD_BIN" ;;
+			*)
+				# insecure-owner / insecure-mode：现场主因（bdpan 被 chown 成
+				# 998:998）。提示必须指向真正可操作的动作。
+				cloud_fail_reason component-insecure \
+					"网盘组件被安全策略拒绝（$_reason）：$OC_CLOUD_BIN，请点上方「一键修复」或重装组件" ;;
+		esac
+	fi
 
 	tmp="$OC_RUNDIR/cloud-ls.$$"
 	rm -f "$tmp" 2>/dev/null
@@ -2625,17 +2725,22 @@ cmd_ls() {
 	if [ "$rc" -ne 0 ]; then
 		if cloud_ls_not_logged_in "$out"; then
 			rm -f "$tmp" 2>/dev/null
+			# 未登录是**预期状态**不是故障：保持 ok:true + note，前端按
+			# 中性提示渲染。只有组件不可用才是硬错误（见上面的 fail-loud）。
 			printf '{"ok":true,"data":[],"note":"尚未登录百度网盘，登录后这里会显示云端备份"}\n'
 			return 0
 		fi
 		if cloud_ls_empty_state "$out"; then
 			rm -f "$tmp" 2>/dev/null
+			# 远端目录只在首次上传时才创建，新装设备 ls 必然失败。这是
+			# 「还没有备份」而不是错误，报错会让新用户第一次进页面就看到红字。
 			printf '{"ok":true,"data":[]}\n'
 			return 0
 		fi
 		err="$(cloud_tail_err "$tmp" 8)"
 		rm -f "$tmp" 2>/dev/null
-		cloud_fail "读取网盘目录 $OC_CLOUD_REMOTE 失败（rc=$rc）：${err:-无输出}"
+		cloud_fail_reason network \
+			"读取网盘目录 $OC_CLOUD_REMOTE 失败（rc=$rc）：${err:-无输出}"
 	fi
 
 	if ! tsv="$(cloud_ls_tsv "$tmp")"; then
@@ -2651,7 +2756,8 @@ cmd_ls() {
 		fi
 		err="$(cloud_tail_err "$tmp" 8)"
 		rm -f "$tmp" 2>/dev/null
-		cloud_fail "网盘目录 $OC_CLOUD_REMOTE 返回内容无法解析：${err:-无输出}"
+		cloud_fail_reason network \
+			"网盘目录 $OC_CLOUD_REMOTE 返回内容无法解析：${err:-无输出}"
 	fi
 	rm -f "$tmp" 2>/dev/null
 

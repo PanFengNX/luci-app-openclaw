@@ -146,13 +146,17 @@ for label, text in REAL:
 # ---------------------------------------------------------------- cmd_ls 端到端
 ls_script = NL.join([
     '#!/bin/sh',
-    'OC_RUNDIR="$1"; OC_CLOUD_REMOTE="openclaw-backups"',
+    'OC_RUNDIR="$1"; OC_CLOUD_REMOTE="openclaw-backups"; OC_CLOUD_BIN=/nonexistent/bdpan',
     # 桩：bin 永远就绪，cloud_run 执行第二个参数之后的命令
     'cloud_bin_ready() { printf %s /bin/true; }',
     'cloud_run() { shift; "$@"; }',
     'oc_warn() { :; }',
     'jstr() { printf "%s" "$1"; }',
     'cloud_fail() { printf \'{"ok":false,"error":"%s"}\\n\' "$1"; exit "${2:-1}"; }',
+    'cloud_fail_reason() { printf \'{"ok":false,"reason":"%s","error":"%s"}\\n\' "$1" "$2"; exit "${3:-1}"; }',
+    # 组件策略本身由 cloud-bin-secure.sh 覆盖；这里只验 cmd_ls 的协议分支，
+    # 所以用原因码桩，避免重复测一遍路径/权限矩阵。
+    'cloud_secure_reason() { printf %s "${FAKE_REASON:-missing}"; }',
     'cloud_tail_err() { tail -n "${2:-5}" "$1" 2>/dev/null; }',
     'oc_cut_utf8() { cat; }',
     'cloud_redact() { cat; }',
@@ -215,14 +219,35 @@ check('"note":"尚未登录' in r, '未登录 → 提示重新登录', r[:100])
 r = run_ls('Error: 磁盘空间不足', 1)
 check('"ok":false' in r and '磁盘空间不足' in r, '真实错误仍然报错', r[:100])
 
-# 组件未安装：cloud_bin_ready 失败时也要给出可操作提示。
+# 组件不可用必须 fail-loud。原先返回 ok:true + 空数组，前端把它渲染成
+# 「暂无备份」的中性灰字，于是「组件被安全策略拒绝」在界面上等于「你没有备份」
+# —— 现场 4 份云端备份就是这么消失的。这里锁死协议：ok:false + 稳定原因码。
 no_bin_script = ls_script.replace(
     'cloud_bin_ready() { printf %s /bin/true; }',
     'cloud_bin_ready() { return 1; }')
 no_bin = work / 'no-bin.sh'
 no_bin.write_text(no_bin_script, encoding='utf-8', newline=NL)
-r = subprocess.run(['sh', P(no_bin), P(work / 'rundir')], capture_output=True, text=True)
-check('"note":"网盘组件未安装' in r.stdout, '组件未安装 → 提示安装并登录', r.stdout[:100])
+
+
+def run_no_bin(reason):
+    env = dict(os.environ)
+    env['FAKE_REASON'] = reason
+    return subprocess.run(['sh', P(no_bin), P(work / 'rundir')],
+                          capture_output=True, text=True, env=env)
+
+
+r = run_no_bin('missing')
+check('"ok":false' in r.stdout and '"reason":"component-missing"' in r.stdout,
+      '组件未安装 → ok:false + component-missing（不再伪装成空列表）', r.stdout[:120])
+
+r = run_no_bin('insecure-owner')
+check('"ok":false' in r.stdout and '"reason":"component-insecure"' in r.stdout
+      and 'insecure-owner' in r.stdout,
+      '组件属主不合法 → ok:false + component-insecure 且带上具体原因', r.stdout[:160])
+
+r = run_no_bin('not-executable')
+check('"reason":"component-not-executable"' in r.stdout,
+      '组件无执行位 → component-not-executable', r.stdout[:120])
 
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)

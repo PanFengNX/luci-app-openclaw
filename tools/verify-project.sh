@@ -609,6 +609,18 @@ else
 	skip "缺少 tools/tests/cloud-bin-secure.sh"
 fi
 
+if [ -f tools/tests/cloud-install-order.sh ]; then
+	if out="$(sh tools/tests/cloud-install-order.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "cloud-install-order.sh 全部断言通过"
+	else
+		bad "cloud-install-order.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/cloud-install-order.sh"
+fi
+
 if [ -f tools/tests/cloud-user-feedback.sh ]; then
 	if out="$(sh tools/tests/cloud-user-feedback.sh 2>&1)"; then
 		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
