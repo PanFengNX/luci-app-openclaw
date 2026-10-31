@@ -441,12 +441,15 @@ cmd_install_status() {
 		rc=""
 		if oc_inst_alive || oc_inst_starting; then
 			state=running
-		else
-			# No completion marker and no process: the install was killed
-			# (OOM, manual kill, shell exit). Saying "running" forever is
-			# what made the UI look hung.
+		elif [ -f "$OC_INST_START" ] || [ -f "$OC_INST_PID" ]; then
+			# install-bg writes these markers, so their presence means an install
+			# was started during this boot but its process has exited.
 			state=lost
 			msg="后台安装进程已退出，但没有留下完成标记，可能被系统杀死或磁盘写满；请重试安装。"
+		else
+			# Markers in /tmp disappear after reboot; no markers means no install
+			# was started during this boot, not that an install was interrupted.
+			state=idle
 		fi
 	fi
 	# 报告 install.sh **实际在用**的日志路径。它会因 /var/log 不可写而回退到

@@ -8,8 +8,9 @@
 #
 # 判定同时覆盖三种形状：
 #   * 中文 / 英文的"不存在"
-#   * 未登录（ls 在未登录时同样失败）
 #   * JSON 里的 errno（百度 PCS 用 -9 / -3 表示路径不存在）
+#   * 未登录（由 cloud_ls_not_logged_in 单独判定：未登录不是空状态，
+#     页面必须提示「重新登录」而不是显示「暂无备份」）
 #
 # 反向也要守住：**真实错误不能被当成空列表**，否则用户以为备份都丢了。
 # 磁盘满、网络超时、组件损坏都必须仍然报错。
@@ -28,6 +29,7 @@ done
 [ -n "$PY" ] || { echo "    跳过：找不到 python"; exit 0; }
 
 "$PY" - "$PROJ" <<'PYEOF'
+import os
 import pathlib
 import re
 import subprocess
@@ -79,7 +81,8 @@ def P(p):
 judge = NL.join([
     '#!/bin/sh',
     func('cloud_ls_empty_state'),
-    'cloud_ls_empty_state "$1"',
+    func('cloud_ls_not_logged_in'),
+    'if [ "$JUDGE_MODE" = login ]; then cloud_ls_not_logged_in "$JUDGE_INPUT"; else cloud_ls_empty_state "$JUDGE_INPUT"; fi',
     '',
 ])
 jf = work / 'judge.sh'
@@ -91,12 +94,30 @@ EMPTY = [
     ('英文 not exist', 'Error: file not exist'),
     ('英文 does not exist', 'path does not exist'),
     ('No such file', 'ls: No such file or directory'),
-    ('path not found', 'Error: path not found'),
+    ('路径无效', '{"error":"路径无效（错误码 -3）"}'),
+]
+for label, text in EMPTY:
+    r = subprocess.run(['sh', P(jf)], capture_output=True, text=True,
+                           env=dict(os.environ, JUDGE_INPUT=text, JUDGE_MODE='empty'))
+    check(r.returncode == 0, '判为空状态：%s' % label, ('rc=%d' % r.returncode) if r.returncode else '')
+
+NOT_LOGGED_IN = [
     ('未登录中文', '请先登录'),
     ('未登录英文', 'Error: not logged in'),
     ('login required', 'login required'),
-    # 用户真机实测的原文（1.8.17 就是漏了这条：措辞是「找不到」不是「不存在」，
-    # 错误码是文本里的「错误码 -9」而不是 JSON 字段 "errno":-9）
+]
+for label, text in NOT_LOGGED_IN:
+    r = subprocess.run(['sh', P(jf)], capture_output=True, text=True,
+                           env=dict(os.environ, JUDGE_INPUT=text, JUDGE_MODE='login'))
+    check(r.returncode == 0, '判为未登录：%s' % label)
+for label, text in [('目录不存在', 'Error: 目录不存在'), ('磁盘满', 'Error: 磁盘空间不足')]:
+    r = subprocess.run(['sh', P(jf)], capture_output=True, text=True,
+                           env=dict(os.environ, JUDGE_INPUT=text, JUDGE_MODE='login'))
+    check(r.returncode == 1, '未登录判定排除：%s' % label)
+
+# 用户真机实测的原文（1.8.17 就是漏了这条：措辞是「找不到」不是「不存在」，
+# 错误码是文本里的「错误码 -9」而不是 JSON 字段 "errno":-9）
+EMPTY += [
     ('实测：找不到指定的文件或目录',
      '{"code":1,"data":null,"error":"找不到指定的文件或目录（错误码 -9），请检查路径是否正确。"}'),
     ('实测：错误码 -9 变体', 'Error: 找不到指定的文件（错误码 -9）'),
@@ -106,7 +127,8 @@ EMPTY = [
     ('errno -3', '{"errno":-3}'),
 ]
 for label, text in EMPTY:
-    r = subprocess.run(['sh', P(jf), text], capture_output=True, text=True)
+    r = subprocess.run(['sh', P(jf)], capture_output=True, text=True,
+                           env=dict(os.environ, JUDGE_INPUT=text, JUDGE_MODE='empty'))
     check(r.returncode == 0, '判为空状态：%s' % label, ('rc=%d' % r.returncode) if r.returncode else '')
 
 REAL = [
@@ -117,7 +139,8 @@ REAL = [
     ('普通报错', 'Error: something went wrong'),
 ]
 for label, text in REAL:
-    r = subprocess.run(['sh', P(jf), text], capture_output=True, text=True)
+    r = subprocess.run(['sh', P(jf)], capture_output=True, text=True,
+                       env=dict(os.environ, JUDGE_INPUT=text, JUDGE_MODE='empty'))
     check(r.returncode != 0, '真实错误不被当成空状态：%s' % label)
 
 # ---------------------------------------------------------------- cmd_ls 端到端
@@ -135,6 +158,7 @@ ls_script = NL.join([
     'cloud_redact() { cat; }',
     func('cloud_ls_tsv'),
     func('cloud_ls_empty_state'),
+    func('cloud_ls_not_logged_in'),
     func('cmd_ls'),
     'cmd_ls',
     '',
@@ -154,7 +178,6 @@ FAKE.write_text(NL.join([
 # `sh runner out rc script rundir` 这种写法在 MSYS 下会以
 # 0xC0000005（访问冲突）退出，stdout 全空，看起来像被测代码坏了。
 # 直接把环境变量传给 subprocess 最稳。
-import os
 
 
 def run_ls(out, rc=0):
@@ -186,8 +209,20 @@ check('"ok":true' in r and '"data":[]' in r, '空数组 → 空列表', repr(r)[
 r = run_ls('[{"server_filename":"openclaw-a.tar.gz","size":123,"server_mtime":1760000000,"isdir":0}]', 0)
 check('"ok":true' in r and 'openclaw-a.tar.gz' in r, '正常列表原样返回', repr(r)[:140])
 
+r = run_ls('Error: not logged in', 1)
+check('"note":"尚未登录' in r, '未登录 → 提示重新登录', r[:100])
+
 r = run_ls('Error: 磁盘空间不足', 1)
 check('"ok":false' in r and '磁盘空间不足' in r, '真实错误仍然报错', r[:100])
+
+# 组件未安装：cloud_bin_ready 失败时也要给出可操作提示。
+no_bin_script = ls_script.replace(
+    'cloud_bin_ready() { printf %s /bin/true; }',
+    'cloud_bin_ready() { return 1; }')
+no_bin = work / 'no-bin.sh'
+no_bin.write_text(no_bin_script, encoding='utf-8', newline=NL)
+r = subprocess.run(['sh', P(no_bin), P(work / 'rundir')], capture_output=True, text=True)
+check('"note":"网盘组件未安装' in r.stdout, '组件未安装 → 提示安装并登录', r.stdout[:100])
 
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)

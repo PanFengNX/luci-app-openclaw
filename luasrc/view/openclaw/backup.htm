@@ -1005,7 +1005,7 @@ function fmtTime(ts){
 // 「哪些只在本地、哪些已经传上去了」。以前本地在「备份与恢复」卡片、
 // 云端在「百度网盘云备份」卡片，两个框各看一半，也没法从本地行直接上传。
 var BK = {
-  local: [], cloud: [], localErr: '', cloudErr: '',
+  local: [], cloud: [], localErr: '', cloudErr: '', cloudNote: '',
   t0: 0, timer: null, scope: 'bk'
 };
 
@@ -1076,16 +1076,19 @@ function bkLoadCloud(){
     var raw = r && r.data;
     var obj = (typeof raw === 'string') ? jp(raw, {}) : raw;
     if (r && r.ok && obj){
-      // cloud_reply 返回 { ok, data: { ok, data: [...] } }；同时兼容
-      // 直接返回数组和未嵌套的 { data: [...] }。
+      // 控制器 cloud_reply 的输出是 { ok, error, data: <内层> }，外层
+      // ok/error 镜像内层；obj = r.data 已经是内层对象，data 数组和 note
+      // 都在这一层。后续分支只是兼容数组直返等旧格式。
       if (obj.data && typeof obj.data.length === 'number') BK.cloud = obj.data;
       else if (obj.data && obj.data.data && typeof obj.data.data.length === 'number') BK.cloud = obj.data.data;
       else if (typeof obj.length === 'number') BK.cloud = obj;
       else BK.cloud = [];
       BK.cloudErr = '';
+      BK.cloudNote = (typeof obj.note === 'string') ? obj.note : '';
     } else {
       BK.cloud = [];
       BK.cloudErr = (r && r.error) || '读取云端列表失败';
+      BK.cloudNote = '';
     }
     bkRenderList();
   });
@@ -1131,6 +1134,12 @@ function bkRenderList(){
       e2.style.marginTop = '8px';
       e2.textContent = '云端：' + BK.cloudErr;
       host.appendChild(e2);
+    } else if (BK.cloudNote){
+      var e3 = document.createElement('div');
+      e3.className = 'oc-hint';
+      e3.style.marginTop = '8px';
+      e3.textContent = '云端：' + BK.cloudNote;
+      host.appendChild(e3);
     }
     return;
   }
@@ -1144,6 +1153,15 @@ function bkRenderList(){
     note.style.marginTop = '8px';
     note.textContent = '云端：' + BK.cloudErr;
     host.appendChild(note);
+  } else if (BK.cloudNote){
+    // 列表非空（例如只有本地备份）时也要能看见云端状态提示：
+    // 未登录 / 组件未安装时返回的是 note 而不是 error，此前这个分支
+    // 会把它整个吞掉，用户只看到本地行、不知道云端为什么缺席。
+    var cn = document.createElement('div');
+    cn.className = 'oc-hint';
+    cn.style.marginTop = '8px';
+    cn.textContent = '云端：' + BK.cloudNote;
+    host.appendChild(cn);
   }
 }
 

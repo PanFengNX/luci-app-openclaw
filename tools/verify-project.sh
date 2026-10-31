@@ -348,6 +348,19 @@ else
 	skip "缺少 tools/tests/cloud-ls.sh"
 fi
 
+head_ "7e3. install-status 的 idle/lost 判定（重启后不得误报中断）"
+if [ -f tools/tests/install-status-idle.sh ]; then
+	if out="$(sh tools/tests/install-status-idle.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "install-status-idle.sh 全部断言通过"
+	else
+		bad "install-status-idle.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/install-status-idle.sh"
+fi
+
 if [ -f tools/tests/view-messages.sh ]; then
 	if out="$(sh tools/tests/view-messages.sh 2>&1)"; then
 		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'

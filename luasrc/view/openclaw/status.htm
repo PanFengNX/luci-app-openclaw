@@ -2336,9 +2336,8 @@ function resumeInstallIfRunning(){
       // 弹窗按 lost 状态打开（不是 running），徽章才不会与实际情况矛盾。
       state.upgrading = false;
       setUpgrading(false);
-      if (!state.verLogClosed) openVerLog(true, 'lost');
       tickVerLog();
-      verUpSay('上一次升级异常中断（后台进程已退出）。可查看下方弹窗里的日志后重试。', true);
+      verUpSay('上一次升级异常中断（后台进程已退出）。可在下方「升级」区查看日志后重试。', true);
     }
   });
 }

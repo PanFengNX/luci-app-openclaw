@@ -316,7 +316,8 @@ check('.. ".1"' in il or '.1\")' in il or 'path .. ".1"' in il,
 # 弹窗状态不能硬编码 running
 stv5 = (proj / 'luasrc/view/openclaw/status.htm').read_text(encoding='utf-8')
 check('function upModalOpen(title, kind)' in stv5, 'upModalOpen 可传实际状态')
-check("openVerLog(true, 'lost')" in stv5, '中断时按 lost 状态打开弹窗')
+check("openVerLog(true, 'lost')" not in stv5, 'lost 不再自动打开弹窗（改为行内提示）')
+check('可在下方「升级」区查看日志后重试' in stv5, 'lost 提示改为行内文案')
 
 # 备份排除 diagnostics
 bkp5 = (proj / 'root/usr/libexec/openclaw/backup.sh').read_text(encoding='utf-8')
@@ -329,6 +330,7 @@ ins6 = (proj / 'root/usr/libexec/openclaw/install.sh').read_text(encoding='utf-8
 cli6 = (proj / 'root/usr/libexec/openclaw/cli.sh').read_text(encoding='utf-8')
 check('install.logpath' in ins6, 'install.sh 把实际日志路径写成标记文件')
 check('OC_INST_LOGPATH' in cli6, 'cli.sh 定义 logpath 标记路径')
+check('state=idle' in cli6, 'cli.sh 区分 idle（无标记不误报 lost）')
 st6 = cli6[cli6.index('cmd_install_status() {'):]
 st6 = st6[:st6.index('\n}\n')]
 check('OC_INST_LOGPATH' in st6, 'install-status 读标记文件而不是硬编码路径')

@@ -2564,7 +2564,7 @@ cloud_ls_empty_state() {
 	#
 	# 判定覆盖三类形状，全部来自实测输出：
 	#   * 中文 / 英文的"找不到 / 不存在"
-	#   * 未登录（ls 在未登录时同样失败）
+	#   * 未登录已拆分到 cloud_ls_not_logged_in
 	#   * 错误码：百度 PCS 用 -9 表示文件/目录不存在、-3 表示路径无效
 	#
 	# 实测真实输出长这样（rc=0，但内容是个错误对象）：
@@ -2575,7 +2575,6 @@ cloud_ls_empty_state() {
 		'') return 0 ;;
 		*不存在*|*找不到*|*未找到*|*"not exist"*|*"does not exist"*|*"No such"*|*"no such file"*) return 0 ;;
 		*"path not found"*|*"file not found"*|*目录无效*|*路径无效*|*"invalid path"*) return 0 ;;
-		*未登录*|*"not logged"*|*"login required"*|*请先登录*|*"not login"*) return 0 ;;
 	esac
 
 	# 数值错误码：**先去掉所有空白再比对**。这样 "errno": -9 与
@@ -2591,12 +2590,20 @@ cloud_ls_empty_state() {
 	return 1
 }
 
+cloud_ls_not_logged_in() {
+	# cloud_ls_not_logged_in <output> -> 0 表示未登录 / 需要登录
+	case "$1" in
+		*未登录*|*没有登录*|*请先登录*|*请登录*|*"not logged"*|*"login required"*|*"not login"*) return 0 ;;
+	esac
+	return 1
+}
+
 cmd_ls() {
 	local bin tmp rc out tsv err d mt name size tab sorted display enc
 
 	bin="$(cloud_bin_ready)" || {
 		oc_warn "网盘组件未安装，返回空列表"
-		printf '{"ok":true,"data":[]}\n'
+		printf '{"ok":true,"data":[],"note":"网盘组件未安装，安装并登录后这里会显示云端备份"}\n'
 		return 0
 	}
 
@@ -2607,6 +2614,11 @@ cmd_ls() {
 	out="$(cat "$tmp" 2>/dev/null)"
 
 	if [ "$rc" -ne 0 ]; then
+		if cloud_ls_not_logged_in "$out"; then
+			rm -f "$tmp" 2>/dev/null
+			printf '{"ok":true,"data":[],"note":"尚未登录百度网盘，登录后这里会显示云端备份"}\n'
+			return 0
+		fi
 		if cloud_ls_empty_state "$out"; then
 			rm -f "$tmp" 2>/dev/null
 			printf '{"ok":true,"data":[]}\n'
@@ -2618,6 +2630,11 @@ cmd_ls() {
 	fi
 
 	if ! tsv="$(cloud_ls_tsv "$tmp")"; then
+		if cloud_ls_not_logged_in "$out"; then
+			rm -f "$tmp" 2>/dev/null
+			printf '{"ok":true,"data":[],"note":"尚未登录百度网盘，登录后这里会显示云端备份"}\n'
+			return 0
+		fi
 		if cloud_ls_empty_state "$out"; then
 			rm -f "$tmp" 2>/dev/null
 			printf '{"ok":true,"data":[]}\n'
