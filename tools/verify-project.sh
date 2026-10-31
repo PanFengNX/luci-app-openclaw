@@ -596,6 +596,18 @@ else
 	skip "缺少 tools/tests/cloud-bin-secure.sh"
 fi
 
+if [ -f tools/tests/cloud-user-feedback.sh ]; then
+	if out="$(sh tools/tests/cloud-user-feedback.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "cloud-user-feedback.sh 全部断言通过"
+	else
+		bad "cloud-user-feedback.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/cloud-user-feedback.sh"
+fi
+
 head_ "7k6. 第二轮审计 P1 路径与 repair 回归"
 if [ -f tools/tests/state-lock-recovery.sh ]; then
 	if out="$(sh tools/tests/state-lock-recovery.sh 2>&1)"; then

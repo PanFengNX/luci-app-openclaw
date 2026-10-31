@@ -37,9 +37,9 @@ chmod 700 "$OC_CLOUD_ROOT/bin/bdpan"
 STAT_MODE=700; STAT_OWNER=root; export STAT_MODE STAT_OWNER
 cloud_bin_secure "$OC_CLOUD_ROOT/bin/bdpan"; check "$?" 0 'root-owned 0700 executable accepted'
 STAT_MODE=750; export STAT_MODE
-cloud_bin_secure "$OC_CLOUD_ROOT/bin/bdpan"; check "$?" 1 '0750 executable rejected'
+cloud_bin_secure "$OC_CLOUD_ROOT/bin/bdpan"; check "$?" 0 '0750 executable accepted'
 STAT_MODE=755; export STAT_MODE
-cloud_bin_secure "$OC_CLOUD_ROOT/bin/bdpan"; check "$?" 1 '0755 executable rejected'
+cloud_bin_secure "$OC_CLOUD_ROOT/bin/bdpan"; check "$?" 0 '0755 executable accepted'
 STAT_MODE=700; STAT_OWNER=other; export STAT_MODE STAT_OWNER
 cloud_bin_secure "$OC_CLOUD_ROOT/bin/bdpan"; check "$?" 1 'non-root executable rejected'
 if ln -s "$OC_CLOUD_ROOT/bin/bdpan" "$OC_CLOUD_ROOT/bin/link" 2>/dev/null; then

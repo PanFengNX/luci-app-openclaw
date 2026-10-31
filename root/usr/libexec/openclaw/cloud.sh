@@ -273,13 +273,22 @@ cloud_bin_secure() {
 	while :; do
 		[ -d "$d" ] && [ ! -L "$d" ] || return 1
 		[ "$(stat -c '%u:%g' "$d" 2>/dev/null)" = '0:0' ] || return 1
-		[ "$(stat -c '%a' "$d" 2>/dev/null)" = 700 ] || return 1
+		# 目录需要 root 独占写权限；兼容安装器保留的执行位组合。
+		case "$(stat -c '%a' "$d" 2>/dev/null)" in
+			700|710|750|755) ;;
+			*) return 1 ;;
+		esac
 		[ "$d" = "$OC_CLOUD_ROOT" ] && break
 		d="$(dirname "$d")"
 		case "$d" in "$OC_CLOUD_ROOT"|"$OC_CLOUD_ROOT"/*) ;; *) return 1 ;; esac
 	done
 	[ "$(stat -c '%u:%g' "$b" 2>/dev/null)" = '0:0' ] || return 1
-	[ "$(stat -c '%a' "$b" 2>/dev/null)" = 700 ] || return 1
+	# 可执行文件允许 0700/0710/0750/0755 等常见安全组合；
+	# 不允许 group/other 写权限，且必须存在执行位。
+	case "$(stat -c '%a' "$b" 2>/dev/null)" in
+		700|710|750|755) ;;
+		*) return 1 ;;
+	esac
 	[ -x "$b" ] || return 1
 	return 0
 }
@@ -1170,7 +1179,12 @@ cmd_status() {
 # ---------------------------------------------------------------- install-cli
 cloud_installer_url() {
 	# cloud_installer_url <ver> -> 官方安装器 URL
-	printf '%s/%s/bdpan-installer-linux-%s' "$OC_CLOUD_CDN" "$1" "$(cloud_arch)"
+	# 前端展示版本通常带 v 前缀，下载路径不带 v；统一归一化，
+	# 避免把 /v3.8.4/ 拼进官方 CDN 导致 404。
+	local ver
+	ver="$(cloud_norm_version "$1" 2>/dev/null)"
+	[ -n "$ver" ] || ver="$1"
+	printf '%s/%s/bdpan-installer-linux-%s' "$OC_CLOUD_CDN" "$ver" "$(cloud_arch)"
 }
 
 cloud_installer_sha() {
@@ -1185,6 +1199,8 @@ cloud_installer_sha() {
 	case "${1:-}:${2:-}" in
 		3.7.3:arm64) printf '%s' '7692f828a1af10289274e6951225fcbe9ad3c0664ebee0b492c410855220c197' ;;
 		3.7.3:amd64) printf '%s' '1678837c5ce6978f6491e76b10e344fba2beef6f81eb067c7ecc5668cf38fedb' ;;
+		3.8.4:arm64) printf '%s' 'abb39a1f7dc0bf44883bbb30b057e6e65c5db64ffdce7c2ae92dea60a136362a' ;;
+		3.8.4:amd64) printf '%s' '02050e9a5ed5c5ddc314bf920c103238a669366a130e3bd43a125d83fdd00548' ;;
 		3.7.1:arm64) printf '%s' 'cbebb8d5b1fd1c880feedf4766067386aa8006112c18758fa43d3bb8195d4592' ;;
 		3.7.1:amd64) printf '%s' '41ef80f0372c0ca881df0a361564b78fc7070126060e0b00fedc6c9310565698' ;;
 		*) return 1 ;;
@@ -1487,6 +1503,13 @@ cloud_install_version() {
 
 	cloud_version_valid "$ver" || {
 		OC_INSTALL_ERR="bdpan 版本号非法：$ver"
+		return 1
+	}
+	# UI 版本通常带 v 前缀（例如 v3.8.4），官方 CDN 路径和哈希表使用
+	# 纯数字版本；统一归一化，避免 URL 404 或哈希白名单未命中。
+	ver="$(cloud_norm_version "$ver" 2>/dev/null)"
+	cloud_version_valid "$ver" || {
+		OC_INSTALL_ERR="bdpan 版本号无法归一化：$1"
 		return 1
 	}
 	arch="$(cloud_arch)"
