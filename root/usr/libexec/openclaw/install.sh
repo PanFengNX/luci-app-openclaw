@@ -254,11 +254,9 @@ die() {
 # 由调用方负责用 ilog 说明「本次不设超时上限」。
 run_with_timeout() {
 	local secs="$1"; shift
-	if command -v timeout >/dev/null 2>&1; then
-		timeout "$secs" "$@"
-	else
-		"$@"
-	fi
+	# lib.sh 的 fallback 在没有 timeout applet 时后台运行并按 TERM/KILL/wait
+	# 收束，安装流程也必须使用同一条有限路径。
+	oc_timeout "$secs" "$@"
 }
 
 # append_tail <file> <lines> <label>
