@@ -828,42 +828,108 @@ oc_json_str() {
 	}'
 }
 
-oc_safe_url() {
-	# oc_safe_url <url> [mode] -> 0 when the URL may be handed to curl/wget.
-	#
-	# 两种模式：
-	#   allow-http（缺省）接受 http:// 与 https://。这是历史行为，内网镜像
-	#                       大量使用明文 http，一刀切禁掉会让它们全部失效。
-	#   strict            只接受 https://，用于下载**可执行文件**（Node.js
-	#                      运行时压缩包等）。http 会被拒绝，除非用户显式
-	#                      打开 main.allow_http_binaries=1（此时退化为
-	#                      allow-http，并告警一次）。
-	# 两种模式都拒绝选项注入（以 "-" 开头）与内嵌空白的 URL —— 这些值来自
-	# UCI，可被 LuCI 编辑，而这个函数后面接的是以 root 执行的 curl/wget。
-	local url="${1:-}" mode="${2:-allow-http}"
-	case "$mode" in
-		strict) ;;
-		*) mode="allow-http" ;;
+oc_url_ip_private() {
+	# Reject loopback, RFC1918, link-local, multicast and unspecified ranges.
+	local ip="$1" rc
+	case "$ip" in
+		*.*)
+			printf '%s\n' "$ip" | awk -F. 'NF!=4 { exit 2 } { for(i=1;i<=4;i++) if($i !~ /^[0-9]+$/ || $i>255) exit 2; if($1==0 || $1==10 || $1==127 || ($1==100 && $2>=64 && $2<=127) || ($1==169 && $2==254) || ($1==172 && $2>=16 && $2<=31) || ($1==192 && (($2==0 && ($3==0 || $3==2)) || $2==168)) || ($1==198 && (($2>=18 && $2<=19) || ($2==51 && $3==100))) || ($1==203 && $2==0 && $3==113) || $1>=224) exit 1; exit 0 }' >/dev/null 2>&1
+			rc=$?
+			[ "$rc" = 1 ] && return 0
+			[ "$rc" = 0 ] && return 1
+			return 1
+			;;
+		*)
+			case "$(printf '%s' "$ip" | tr 'A-F' 'a-f')" in
+				::|::1|fc*|fd*|fe[89a-f]*|ff*|::ffff:*|*::*:ffff:*) return 0 ;;
+				*:*[0-9a-f]*) return 1 ;;
+				*) return 1 ;;
+			esac
+			;;
 	esac
-	case "$url" in
-		*' '*|*'	'*) return 1 ;;
+}
+
+oc_url_host_valid() {
+	local host="$1"
+	[ -n "$host" ] || return 1
+	case "$host" in *[!A-Za-z0-9.:-]*) return 1 ;; esac
+	case "$host" in
+		*:) return 1 ;;
+		*:* ) printf '%s' "$host" | awk 'BEGIN { n=gsub(/:/, ":"); if (n < 2 || n > 7) exit 1 } /[^0-9A-Fa-f:.]/ { exit 1 }' || return 1 ;;
+		*.*) printf '%s' "$host" | awk -F. 'NF==4 { for(i=1;i<=4;i++) if($i !~ /^[0-9]+$/ || (length($i)>1 && $i ~ /^0/) || $i>255) exit 1; exit 0 } { exit 1 }' || return 1 ;;
+		*[!A-Za-z0-9.-]*) return 1 ;;
+		*) case "$host" in *[!A-Za-z0-9-]*) return 1 ;; esac ;;
 	esac
-	case "$url" in
-		https://*) ;;
-		http://*)
-			[ "$mode" = "strict" ] || return 0
-			[ "$(uci_get main.allow_http_binaries 0)" = "1" ] || {
-				oc_err "拒绝通过明文 http 下载可执行文件：$url（请把镜像改成 https；确需明文请设置 uci set openclaw.main.allow_http_binaries=1）"
+	case "$host" in .*) return 1 ;; esac
+	return 0
+}
+
+oc_url_resolve_public() {
+	local host="$1" line ip found=""
+	OC_URL_IP=""
+	[ -n "$host" ] || return 1
+	case "$host" in
+		*[!0-9.]*)
+			if command -v getent >/dev/null 2>&1; then
+				while IFS= read -r line; do
+					ip="$(printf '%s\n' "$line" | awk '{print $1}')"
+					[ -n "$ip" ] || continue
+					oc_url_ip_private "$ip" && return 1
+					[ -n "$found" ] || found="$ip"
+				done <<EOF
+$(getent ahosts "$host" 2>/dev/null)
+EOF
+			elif command -v nslookup >/dev/null 2>&1; then
+				while IFS= read -r ip; do
+					case "$ip" in *.*|*:*)
+						oc_url_ip_private "$ip" && return 1
+						[ -n "$found" ] || found="$ip" ;;
+					esac
+				done <<EOF
+$(nslookup "$host" 2>/dev/null | awk '/[Aa]ddress[^:]*:[[:space:]]/ { print $NF }')
+EOF
+			else
 				return 1
-			}
-			# 每次调用都告警会刷屏（下载路径可能被调用两次），只警告一次。
-			if [ "${OC_HTTP_BINARIES_WARNED:-0}" != "1" ]; then
-				OC_HTTP_BINARIES_WARNED=1
-				oc_warn "main.allow_http_binaries=1：已允许通过明文 http 下载可执行文件（校验和不保护传输过程）"
 			fi
 			;;
+		*) found="$host" ;;
+	esac
+	[ -n "$found" ] || return 1
+	oc_url_ip_private "$found" && return 1
+	OC_URL_IP="$found"
+	return 0
+}
+
+oc_safe_url() {
+	# oc_safe_url validates URL syntax for all download callers. Model discovery
+	# additionally calls oc_url_resolve_public before handing the URL to curl.
+	local url="${1:-}" mode="${2:-allow-http}" rest authority host port tab
+	tab="$(printf '\t')"
+	case "$url" in *' '*|*"$tab"*) return 1 ;; esac
+	case "$url" in
+		https://*) rest="${url#https://}"; port=443 ;;
+		http://*)
+			if [ "$mode" = strict ] && [ "$(uci_get main.allow_http_binaries 0)" != 1 ]; then
+				oc_err "拒绝通过明文 http 下载可执行文件：$url"
+				return 1
+			fi
+			rest="${url#http://}"; port=80 ;;
 		*) return 1 ;;
 	esac
+	authority="${rest%%/*}"; [ -n "$authority" ] || return 1
+	case "$authority" in *'@'*|*'?'*|*'#'*) return 1 ;; esac
+	case "$authority" in
+		\[*\]:[0-9]*) host="${authority#\[}"; host="${host%%\]*}"; port="${authority##*]:}" ;;
+		\[*\]) host="${authority#\[}"; host="${host%\]}" ;;
+		*:*:*) return 1 ;;
+		*:*) host="${authority%%:*}"; port="${authority##*:}" ;;
+		*) host="$authority" ;;
+	esac
+	[ -n "$host" ] || return 1
+	case "$port" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$port" -le 65535 ] 2>/dev/null || return 1
+	OC_URL_HOST="$host"
+	OC_URL_PORT="$port"
 	return 0
 }
 
@@ -1709,8 +1775,10 @@ oc_clear_stale_state_lock() {
 						oc_warn "状态锁存在，官方 recover-lock 检查已返回人工恢复线索；保持原样"
 						result=1
 					elif [ "$rc" = "0" ]; then
-						oc_warn "状态锁存在，官方 recover-lock 检查完成且未返回人工恢复线索；保持原样"
-						result=0
+						# A lock is present: rc=0 is not a documented proof that no
+						# recovery is needed. Unknown output must never allow doctor.
+						oc_warn "状态锁存在，官方 recover-lock 返回 rc=0 但输出未确认人工恢复；fail-closed，保持原样"
+						result=2
 					else
 						oc_warn "状态锁存在，官方 recover-lock 检查结果无法确认（rc=$rc）；保持原样"
 						result=2

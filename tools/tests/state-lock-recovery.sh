@@ -21,6 +21,9 @@ run_case() {
 			cat > "$base/oc" <<EOF
 #!/bin/sh
 printf '%s\\n' '$output'
+if [ '$name' = rc0-empty ] || [ '$name' = rc0-unknown ]; then
+	exit 0
+fi
 exit 1
 EOF
 			chmod +x "$base/oc"
@@ -41,8 +44,12 @@ EOF
 			exit 1
 		}
 	if [ "$cli" = "yes" ]; then
-		grep -q '官方 recover-lock 检查已返回人工恢复线索' "$base/log" || exit 1
-		grep -q -- "$output" "$base/log" || exit 1
+		[ -z "$output" ] || grep -q -- "$output" "$base/log" || exit 1
+		if [ "$name" = human-recovery ]; then
+			grep -q '官方 recover-lock 检查已返回人工恢复线索' "$base/log" || exit 1
+		else
+			grep -q fail-closed "$base/log" || exit 1
+		fi
 		else
 			grep -q '无法执行官方 recover-lock 检查' "$base/log" || exit 1
 		fi
@@ -54,6 +61,8 @@ EOF
 }
 
 run_case human-recovery 1 yes '需要确认：gateway recover-lock --confirm fp-test'
+run_case rc0-empty 2 yes ''
+run_case rc0-unknown 2 yes 'operation completed successfully'
 run_case cli-missing 2 no ''
 
 # No lock is the only path that permits doctor to proceed.

@@ -675,23 +675,30 @@ models_public() {
 	# 只在「没有 API Key」时调用：请求公开目录，请求里不含任何凭据。
 	# 成功时 baseUrl 仍是该 provider 自己的地址（后续 apply 会用到），
 	# 不是公开目录的地址。
-	local p="$1" base="$2" envname="$3" prefix body errf code rc msg ids first m
+	local p="$1" base="$2" envname="$3" prefix body errf code rc msg ids first m public_ip public_host public_port
 	prefix="$(public_prefix "$p")" || return 1
 
 	if ! command -v curl >/dev/null 2>&1; then
 		oc_warn "系统缺少 curl，无法访问公开模型目录"
 		return 1
 	fi
+	if ! oc_safe_url "$PUBLIC_MODELS_URL" || ! oc_url_resolve_public "$OC_URL_HOST"; then
+		oc_warn "公开模型目录地址未通过公网地址校验（需要可用的 DNS 探测工具）"
+		return 1
+	fi
+	public_ip="$OC_URL_IP"; public_host="$OC_URL_HOST"; public_port="$OC_URL_PORT"
+
 	if [ ! -d "$OC_RUNDIR" ] || [ ! -w "$OC_RUNDIR" ]; then
 		oc_warn "临时目录不可用"
 		return 1
 	fi
-
 	body="$OC_RUNDIR/models-public.$$.json"
 	errf="$OC_RUNDIR/models-public.$$.err"
 	# 公开目录不需要 Authorization：这里刻意不写任何 header 文件。
 	code="$(oc_timeout 20 curl -sS --max-time 20 --connect-timeout 10 \
 		-H 'Accept: application/json' -o "$body" -w '%{http_code}' \
+		--max-redirs 0 --noproxy '*' \
+		--resolve "$public_host:$public_port:$public_ip" \
 		"$PUBLIC_MODELS_URL" 2>"$errf")"
 	rc=$?
 
@@ -773,7 +780,7 @@ env_key() {
 
 models_url() {
 	# models_url <provider-id> -> {"ok":true,"source":"...","baseUrl":"...","models":[...]}
-	local p="${1:-}" base url envname key esc code rc body errf ids first m msg
+	local p="${1:-}" base url envname key esc code rc body errf ids first m msg url_host url_port url_ip
 	case "$p" in
 		''|*[!A-Za-z0-9_.-]*|-*) models_url_fail "Provider 名称无效"; return 1 ;;
 	esac
@@ -785,10 +792,15 @@ models_url() {
 		models_url_fail "该 provider 没有 Base URL"
 		return 1
 	fi
-	if ! oc_safe_url "$base"; then
-		models_url_fail "Base URL 不合法（只支持 http/https）：$base"
+	if ! oc_safe_url "$base" || ! oc_url_resolve_public "$OC_URL_HOST"; then
+		models_url_fail "Base URL 不合法、无法解析或解析到本地网络（需要可用的 DNS 探测工具；本地 Ollama/自定义内网地址不允许用于此操作）：$base"
 		return 1
 	fi
+	# Pin the address checked above and never follow redirects: a redirect
+	# changes authority and is rejected rather than re-resolved implicitly.
+	url_host="$OC_URL_HOST"
+	url_port="$OC_URL_PORT"
+	url_ip="$OC_URL_IP"
 
 	# Variable name mirrors apply(): the preset's env field, otherwise
 	# <UPPER(provider)>_API_KEY.
@@ -827,6 +839,8 @@ models_url() {
 	code="$(printf 'header = "Authorization: Bearer %s"\n' "$esc" | \
 		oc_timeout 20 curl -sS --max-time 20 --connect-timeout 10 \
 			-H 'Accept: application/json' -o "$body" -w '%{http_code}' \
+			--max-redirs 0 --noproxy '*' \
+			--resolve "$url_host:$url_port:$url_ip" \
 			--config - "$url" 2>"$errf")"
 	rc=$?
 

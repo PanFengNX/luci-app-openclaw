@@ -242,40 +242,68 @@ cloud_arch() {
 }
 
 cloud_ensure_dirs() {
-	# root 0700；bin / home 都在 root 之下，同样收紧到 0700。
-	# pass 是 root 下的普通文件，父目录已由下面第一段建好。
-	mkdir -p "$OC_CLOUD_ROOT" 2>/dev/null || return 1
-	chmod 700 "$OC_CLOUD_ROOT" 2>/dev/null || true
-	mkdir -p "$OC_CLOUD_DIR" 2>/dev/null || return 1
-	chmod 700 "$OC_CLOUD_DIR" 2>/dev/null || true
-	mkdir -p "$OC_CLOUD_HOME" 2>/dev/null || return 1
-	chmod 700 "$OC_CLOUD_HOME" 2>/dev/null || true
+	# Every directory in the root-executed component chain is root-only.
+	# Do not remove or silently migrate an existing path: a failed hardening
+	# operation must leave the old installation intact and explain the failure.
+	local d
+	for d in "$OC_CLOUD_ROOT" "$OC_CLOUD_DIR" "$OC_CLOUD_HOME"; do
+		if [ -e "$d" ] || [ -L "$d" ]; then
+			[ -d "$d" ] && [ ! -L "$d" ] || { printf '%s\n' "云组件路径不是安全目录：$d" >&2; return 1; }
+		else
+			mkdir "$d" 2>/dev/null || { printf '%s\n' "无法创建云组件目录：$d" >&2; return 1; }
+		fi
+		chown root:root "$d" 2>/dev/null || { printf '%s\n' "无法把云组件目录设为 root 属主：$d" >&2; return 1; }
+		chmod 700 "$d" 2>/dev/null || { printf '%s\n' "无法把云组件目录收紧为 0700：$d" >&2; return 1; }
+		[ "$(stat -c %u "$d" 2>/dev/null)" = 0 ] && [ "$(stat -c %a "$d" 2>/dev/null)" = 700 ] || {
+			printf '%s\n' "云组件目录权限复核失败：$d" >&2; return 1
+		}
+	done
+	return 0
+}
+
+cloud_bin_secure() {
+	# Verify the complete path before root executes a component. Every checked
+	# directory and executable is root-owned, non-symlink, and exactly 0700.
+	local b="$1" d
+	[ -f "$b" ] && [ ! -L "$b" ] || return 1
+	# Check only the component path, from cloud root through the executable;
+	# system ancestors such as /usr are not required to be 0700.
+	d="$(dirname "$b")"
+	case "$d" in "$OC_CLOUD_ROOT"|"$OC_CLOUD_ROOT"/*) ;; *) return 1 ;; esac
+	while :; do
+		[ -d "$d" ] && [ ! -L "$d" ] || return 1
+		[ "$(stat -c '%u:%g' "$d" 2>/dev/null)" = '0:0' ] || return 1
+		[ "$(stat -c '%a' "$d" 2>/dev/null)" = 700 ] || return 1
+		[ "$d" = "$OC_CLOUD_ROOT" ] && break
+		d="$(dirname "$d")"
+		case "$d" in "$OC_CLOUD_ROOT"|"$OC_CLOUD_ROOT"/*) ;; *) return 1 ;; esac
+	done
+	[ "$(stat -c '%u:%g' "$b" 2>/dev/null)" = '0:0' ] || return 1
+	[ "$(stat -c '%a' "$b" 2>/dev/null)" = 700 ] || return 1
+	[ -x "$b" ] || return 1
 	return 0
 }
 
 cloud_bin() {
-	# 打印 bdpan 路径（不要求可执行）；找不到时返回 1。
+	# Print bdpan only after rejecting symlink targets.
 	if [ -f "$OC_CLOUD_BIN" ]; then
+		[ ! -L "$OC_CLOUD_BIN" ] || return 1
 		printf '%s' "$OC_CLOUD_BIN"
 		return 0
 	fi
 	[ -d "$OC_CLOUD_ROOT" ] || return 1
-	# 兜底只在 $OC_CLOUD_ROOT 内找；只认普通文件（不收符号链接），
-	# 且 basename 必须正好是 bdpan —— 目录内容由安装器写入，不能把它
-	# 当成「可执行任意目标」的入口。
 	local p
 	p="$(find "$OC_CLOUD_ROOT" -maxdepth 4 -type f -name bdpan 2>/dev/null | head -n1)"
-	[ -n "$p" ] || return 1
-	[ "$(basename "$p" 2>/dev/null)" = "bdpan" ] || return 1
-	[ -f "$p" ] || return 1
+	[ -n "$p" ] && [ "$(basename "$p" 2>/dev/null)" = bdpan ] || return 1
+	[ ! -L "$p" ] || return 1
 	printf '%s' "$p"
 }
 
 cloud_bin_ready() {
-	# 只返回可执行的 bdpan
 	local b
 	b="$(cloud_bin)" || return 1
-	[ -n "$b" ] && [ -x "$b" ] || return 1
+	cloud_bin_secure "$b" || { oc_warn "拒绝执行不安全的云组件路径：$b"; return 1; }
+	[ -x "$b" ] || return 1
 	printf '%s' "$b"
 }
 
