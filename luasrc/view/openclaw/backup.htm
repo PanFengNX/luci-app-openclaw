@@ -977,6 +977,17 @@ function get(url, cb, timeoutMs){
   x.send();
 }
 function jp(s, fb){ try { return JSON.parse(s); } catch(e){ return fb; } }
+
+// 统一的响应负载解包：controller 的 cloud_reply 会把后端一行 JSON 解析成
+// 对象放进 data，而部分老端点仍返回字符串。以前各调用点各自写
+// `typeof x === 'object' ? x : jp(x,{})`，漏一处就静默退回 {} ——
+// 备份进度曾因此永远停在「等待 / 暂无输出」。全部走这里。
+function payloadObject(r, fb){
+  var d = r && r.data;
+  if (d && typeof d === 'object') return d;
+  if (typeof d === 'string') return jp(d, fb || {});
+  return fb || {};
+}
 function fields(v){ var a=(v||'0.0.0').replace(/^v/,'').split('.'); for(var i=0;i<3;i++){ a[i]=parseInt((a[i]||'0').replace(/[^0-9].*$/,''),10)||0; } return a; }
 
 // ---------------------------------------------------------------- 备份 / 恢复
@@ -1365,8 +1376,7 @@ function dpApply(r){
   // delpass_status 的 data 是 JSON 字符串；cloud_overview 的 data 已经是对象。
   // 统一归一化，不能无条件 JSON.parse：对对象 parse 会抛异常，
   // 然后每次都回退到 {}，界面就永久停在「读取中…」。
-  var d = (r && r.data && typeof r.data === 'object')
-    ? r.data : jp((r && r.data) || '{}', {});
+  var d = payloadObject(r);
   if (r && r.ok && typeof d.set === 'boolean'){
     DP.known = true;
     DP.set = d.set;
@@ -2190,7 +2200,7 @@ function clDoRestore(it, pass, panel){
         clOut('恢复完成，网关已重启。');
         loadBackups();
       } else {
-        var d = jp(rr && rr.data, {});
+        var d = payloadObject(rr);
         clErr('cl-err3', '恢复失败：' + ((d && d.error) || (rr && rr.error) || '未知错误'));
         clOut('恢复失败。');
       }
@@ -2609,7 +2619,8 @@ function clPollBackup(){
         return;
       }
       CL.bkFails = 0;
-      var d = jp((r && r.data) || '{}', {});
+      // 走统一解包：data 可能已是对象（cloud_reply）或字符串（老端点）。
+      var d = payloadObject(r);
       var log = String(d.log || '');
       clOutSet(log || '（暂无输出）');
       clPhaseFromLog(log, d);
@@ -2845,7 +2856,8 @@ clResumeBackup();
 
 function clResumeBackup(){
   get(API.cloud_backup_poll, function(r){
-    var d = jp((r && r.data) || '{}', {});
+    // 同 clPollBackup：刷新页面后也要能接上正在跑的备份。
+    var d = payloadObject(r);
     if (!d.running) return;          // 没在跑：保持初始状态，不打扰
     CL.busy = true;
     clRender();

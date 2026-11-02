@@ -298,11 +298,60 @@ oc_archive_ok_size() {
 }
 
 # ---------------------------------------------------------------- create
+# Gateway 运行时 SQLite 等文件正在被写入，tar 读到一半会报
+# "file changed as we read it" 并以非 0 退出。这类错误没有确定性，重试
+# 可能拿到一致快照；磁盘满、权限、I/O 等确定性错误立即失败。
+# 返回：0 成功 / 73 三次都只是文件变化 / 74 确定性错误 / 75 清理失败。
+oc_tar_create_retry() {
+	local _out="$1" _stage="$2" _err="$OC_RUNDIR/bk-tar.err"
+	local _try=1 _rc _cls
+	shift 2
+	while [ "$_try" -le 3 ]; do
+		rm -f "$_out" 2>/dev/null || return 75
+		[ ! -e "$_out" ] && [ ! -L "$_out" ] || return 75
+		# LC_ALL=C：把 tar 的消息语言钉死为英文，否则分类短语在非英文
+		# locale 下匹配不到，本应重试的文件变化会被当成确定性错误。
+		# busybox tar 本身不做本地化，这一句对它是无操作。
+		LC_ALL=C tar -czf "$_out" -C "$_stage" "$@" . 2>"$_err"
+		_rc=$?
+		if [ "$_rc" -eq 0 ]; then
+			# 成功判据只看退出码 —— 与改动前的原始语义一致（原代码就是
+			# `if ! tar …; then`）。stderr 里可能只有无害 warning，删除它
+			# 会丢诊断（终审指出），所以原样保留，交由 cmd_create 之外的
+			# 调用方自行忽略。
+			return 0
+		fi
+		# 分类策略（功能优先，同时不放行真实错误）：
+		#   * 出现「文件变化」短语就允许重试 —— 即使 tar 还输出了别的无害
+		#     诊断行（例如 removing leading …），不采取「除少数行外全算真实
+		#     错误」的反向策略，否则现场最常见的组合会被误判成确定性失败。
+		#   * 只有命中明确的致命特征（磁盘满 / 权限 / 读写失败 / I/O 错误 /
+		#     文件损坏）才立刻判确定性错误。
+		#   * 两者都不命中（rc≠0 且没有变化短语）按确定性错误处理，保守不重试。
+		# awk 与 tar 同样钉在 C locale，保证英文文案匹配。
+		_cls="$(LC_ALL=C awk '
+			/No space left|Permission denied|Operation not permitted|Cannot write|Cannot open|Cannot stat|Read error|write error|Input\/output error|is not a directory|No such file|Unexpected EOF|truncated/ { fatal=1; next }
+			/file changed as we read it/ { changed=1; next }
+			{ next }
+			END { if (fatal) print "real"; else if (changed) print "changed"; else print "real" }
+		' "$_err" 2>/dev/null)"
+		if [ "$_cls" != "changed" ]; then
+			rm -f "$_out" 2>/dev/null || return 75
+			[ ! -e "$_out" ] && [ ! -L "$_out" ] || return 75
+			return 74
+		fi
+		_try=$((_try + 1))
+	done
+	rm -f "$_out" 2>/dev/null || return 75
+	[ ! -e "$_out" ] && [ ! -L "$_out" ] || return 75
+	return 73
+}
+
 cmd_create() {
 	local name="" ws=1
 	# 下面这些是本函数用的临时变量，必须 local：ash 里未 local 的赋值会污染
 	# 全局，而 cmd_restore 也用了 _pl/_ct* 这类名字 —— 会互相踩。
-	local _src_n _stg_n _pkgname _nm _crontab _data_rel
+	local _src_n _stg_n _pkgname _nm _crontab _data_rel _tar_rc
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--name) shift; name="${1:-}"; [ $# -eq 0 ] || shift ;;
@@ -545,9 +594,24 @@ cmd_create() {
 		--exclude='node_modules'
 	[ "$ws" = "1" ] || set -- "$@" --exclude="${_data_rel}/workspace"
 
-	if ! tar -czf "$out" -C "$stage" "$@" . 2>"$OC_RUNDIR/bk-tar.err"; then
-		rm -rf "$stage"
-		rm -f "$out"
+	oc_tar_create_retry "$out" "$stage" "$@"
+	_tar_rc=$?
+	if [ "$_tar_rc" -ne 0 ]; then
+		_oc_stage_cleanup_rc=0
+		oc_rmtree "$stage" || _oc_stage_cleanup_rc=1
+		[ ! -e "$stage" ] && [ ! -L "$stage" ] || _oc_stage_cleanup_rc=1
+		_oc_out_cleanup_rc=0
+		rm -f "$out" 2>/dev/null || _oc_out_cleanup_rc=1
+		[ ! -e "$out" ] && [ ! -L "$out" ] || _oc_out_cleanup_rc=1
+		if [ "$_oc_stage_cleanup_rc" -ne 0 ] || [ "$_oc_out_cleanup_rc" -ne 0 ]; then
+			die_json "清理失败：无法删除不完整的备份暂存目录或输出文件，已中止（请检查备份目录权限与文件系统）"
+		fi
+		if [ "$_tar_rc" -eq 73 ]; then
+			die_json "备份期间文件持续变化，已重试 3 次仍无法生成一致归档，建议暂停高频会话写入后重试"
+		fi
+		if [ "$_tar_rc" -eq 75 ]; then
+			die_json "无法清理不完整的备份输出，已中止（请检查备份目录权限与文件系统）"
+		fi
 		die_json "打包失败：$(head -n1 "$OC_RUNDIR/bk-tar.err" 2>/dev/null)"
 	fi
 	rm -rf "$stage"

@@ -770,8 +770,8 @@ check("^loadBackups();" not in lb_code, "代码里不再提前调用 loadBackups
 # boolean —— 页面永久停在「删除密码 读取中…」。
 _dp = backup[backup.index("function dpApply("):]
 _dp = _dp[:_dp.index(NL + "}" + NL)]
-check("typeof r.data === 'object'" in _dp,
-      "dpApply 认得对象形式的 data（否则删除密码永远读取中）")
+check("payloadObject(r)" in _dp and "function payloadObject" in backup,
+      "dpApply 通过统一 helper 认得对象形式的 data（否则删除密码永远读取中）")
 
 initd = (proj / 'root/etc/init.d/openclaw').read_text(encoding='utf-8')
 # 凭据判定已收敛到唯一的 credential.sh：init.d 只 source 它、不自己再写一份

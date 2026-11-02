@@ -443,7 +443,7 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
     <select id="m-model"></select>
   </div>
   <div class="oc-actions" id="m-model-actions" style="margin:-4px 0 12px">
-    <button id="btn-refresh-models" class="oc-btn ghost">刷新上游模型</button>
+    <button id="btn-refresh-models" class="oc-btn ghost">刷新模型</button>
   </div>
   <div class="oc-hint" id="m-model-hint"></div>
   <div class="oc-hint" id="m-model-source" style="display:none"></div>
@@ -642,7 +642,7 @@ function loadCatalog(){
       if (arr.length){ CATALOG = arr; renderCatalog(); return; }
       if (!base.length){
         $('m-status').textContent = '读取服务商列表失败：服务端与内置清单都为空。'
-          + '可点「刷新上游模型」重试，或检查网关是否在运行。';
+          + '可点「刷新模型」重试，或检查网关是否在运行。';
       }
     }, 60000);
   });
@@ -904,7 +904,7 @@ $('m-base').onchange = function(){
   var p = curProvider();
   var b = $('m-base').value.trim();
   if (p && b && b !== (p.baseUrl || '')){
-    setModelHint('Base URL 已修改：保存（应用）后会按新地址拉取模型，也可保存后点「刷新上游模型」。');
+    setModelHint('Base URL 已修改：保存（应用）后会按新地址拉取模型，也可保存后点「刷新模型」。');
     return;
   }
   fetchUpstream();
