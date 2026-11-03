@@ -864,6 +864,43 @@ oc_url_host_valid() {
 	return 0
 }
 
+oc_url_host_ips() {
+	# oc_url_host_ips <host> -> 该主机名的全部解析结果，一行一个（失败时不输出）
+	#
+	# oc_url_resolve_public 把「解析到内网地址」和「根本没有 DNS 工具 / 解析不
+	# 出来」都归成同一个失败返回值。模型列表这条路径需要把两者分开：
+	#   * 解析到内网  -> 必须拒绝（云元数据 169.254.169.254 这类目标）
+	#   * 解析不出来  -> 放宽，交给 curl 自己解析（内网设备常常没有 DNS 工具，
+	#     这正是不放宽就永远拉不到模型的原因）
+	# 所以单独暴露一个"只取结果、不做判定"的版本。
+	local host="$1"
+	[ -n "$host" ] || return 1
+	if command -v getent >/dev/null 2>&1; then
+		getent ahosts "$host" 2>/dev/null | awk '{print $1}'
+	elif command -v nslookup >/dev/null 2>&1; then
+		nslookup "$host" 2>/dev/null | awk '/[Aa]ddress[^:]*:[[:space:]]/ { print $NF }'
+	else
+		return 1
+	fi
+}
+
+oc_url_host_resolves_private() {
+	# oc_url_host_resolves_private <host> -> 0 表示"确实解析到了内网地址"
+	#
+	# 与"解析不出来"严格区分：拿不到任何解析结果时返回 1（非内网），
+	# 由调用方决定是否放宽。宁可在这条路径上放宽，也不能把内网目标放过去。
+	local ip any=0
+	while IFS= read -r ip; do
+		case "$ip" in *.*|*:*) ;; *) continue ;; esac
+		any=1
+		oc_url_ip_private "$ip" && return 0
+	done <<EOF
+$(oc_url_host_ips "$1")
+EOF
+	[ "$any" = "1" ] && return 1
+	return 1
+}
+
 oc_url_resolve_public() {
 	local host="$1" line ip found=""
 	OC_URL_IP=""

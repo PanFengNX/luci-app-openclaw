@@ -426,6 +426,66 @@ live_has() {
 	printf '%s\n' "$(live_list)" | grep -qxF -- "$1"
 }
 
+catalog_models() {
+	# catalog_models <provider> -> 结果写进 OC_CM_OUT，诊断写进 OC_CM_MSG
+	#
+	# 官方文档（docs.openclaw.ai/cli/models）写得很明确：
+	#   `openclaw models list --provider <id>` 读的是该 provider **已发布的模型
+	#   目录**，不等待 provider 发现、不联网、不需要 API Key；
+	#   `--provider` 已经隐含完整目录，不必再带 `--all`；
+	#   `--plain` 的 stdout 是「一行一个模型 key」，诊断信息一律走 stderr。
+	#
+	# 这正是"这个服务商支持哪些模型"的权威答案，而且在内网/无外网环境下依然可用。
+	# 旧实现只问上游 /models：没有 Key 或没有外网时永远拉不到，页面长期停在
+	# 随包预设上（用户实测：三个 provider 全部"实时获取失败"）。
+	#
+	# **不用命令替换调用**：`ids="$(catalog_models p)"` 会把函数放进子 shell，
+	# 失败原因（OC_CM_MSG）就丢了 —— 页面只能看到一句笼统的"未能取得模型列表"。
+	# 结果与原因都通过全局变量回传（与 cloud_probe_latest 同一约定）。
+	# 返回值：0 = 有清单；1 = 没有（原因见 OC_CM_MSG）。
+	#
+	# node 启动 1~5 秒，所以只在用户选定 provider / 点「刷新模型」时调用。
+	local p="$1" out rc
+	OC_CM_OUT=""
+	OC_CM_MSG=""
+	[ -n "$p" ] || { OC_CM_MSG="没有指定服务商"; return 1; }
+	if [ ! -x "$(oc_oc_bin)" ]; then
+		OC_CM_MSG="本机没有可执行的 openclaw"
+		return 1
+	fi
+	# 超时给足 15 秒：路由器上 node 冷启动常常超过 5 秒，给 8 秒会把
+	# "慢"误判成"没有"，页面于是又退回预设（那正是要修的现象）。
+	out="$(oc_run_q 15 models list --provider "$p" --plain)"; rc=$?
+	# 非零退出说明这个版本不认 --plain / 不认识这个 provider。此时 stdout 可能
+	# 是用法说明，绝不能当模型清单用 —— 直接放弃，交给上层回退。
+	if [ "$rc" -ne 0 ]; then
+		OC_CM_MSG="openclaw models list 退出码 $rc（可能不支持 --plain）"
+		return 1
+	fi
+	if [ -z "$out" ]; then
+		OC_CM_MSG="openclaw models list 返回空清单"
+		return 1
+	fi
+	OC_CM_OUT="$(printf '%s\n' "$out" | awk -v prov="$p" '
+		{
+			sub(/\r$/, "", $0)
+			gsub(/^[ \t]+|[ \t]+$/, "", $0)
+			if ($0 == "") next
+			# 有的版本带 provider 前缀（moonshot/kimi-k2.5），有的不带
+			if (index($0, prov "/") == 1) $0 = substr($0, length(prov) + 2)
+			# 形状过滤：模型 key 里不会有空格（带空格的 token 一定是表格列或
+			# 提示语）。允许大小写与 . _ : - /（MiniMax-M2、嵌套 id 都是合法值）。
+			if ($0 !~ /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/) next
+			print
+		}
+	' | sort -u)"
+	if [ -z "$OC_CM_OUT" ]; then
+		OC_CM_MSG="openclaw models list 的输出里没有可识别的模型"
+		return 1
+	fi
+	return 0
+}
+
 discover() {
 	# discover <provider> -> JSON array (live first, presets as fallback)
 	local p="$1" ids out first=1
@@ -635,14 +695,17 @@ catalog() {
 }
 
 # ---------------------------------------------------------------- upstream models
-# 「刷新上游模型」：按 provider 的 Base URL 直接问上游要一份模型清单。
+# 「刷新模型」：拿到当前 provider 的模型清单。
 # 只读、无副作用；stdout 只允许出现一行 JSON，诊断信息一律走 stderr。
 #
-# 清单分三级，优先级从高到低：
-#   1. 有 API Key  -> 问 provider 自己的 Base URL（权威、实时）
-#   2. 没有 Key    -> 问公开模型目录（无需鉴权，实时；绝不携带凭据）
-#   3. 都失败      -> 由前端回退到随包发布的内置清单
-# 返回的 JSON 里带 "source"（upstream / public），前端据此告诉用户清单来源。
+# 清单优先级（从高到低）：
+#   1. Base URL 仍是预设值 -> `openclaw models list --provider <id> --plain`
+#      （插件已发布目录：离线、不需要 Key、秒级，内网也能用）
+#   2. 有 API Key -> 问 provider 自己的 Base URL（最新的可用清单）
+#   3. 没有 Key  -> 问公开模型目录（无需鉴权，实时；绝不携带凭据）
+#   4. 改过 Base URL 且上游没给清单 -> 再退回第 1 层
+#   5. 全失败 -> 由前端回退到随包发布的内置清单并提示可能过时
+# 返回的 JSON 带 "source"（catalog / upstream / public），前端据此告诉用户来源。
 #
 # 密钥绝不能进 argv（/proc/<pid>/cmdline 全局可读）：Key 从 .env 读出后通过
 # curl 的 --config - 从 stdin 交给 curl，命令行里只有 URL 和固定参数。
@@ -650,6 +713,25 @@ catalog() {
 
 models_url_fail() {
 	printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "$1")"
+}
+
+models_json() {
+	# models_json <source> <base-url>  (stdin: model ids, one per line)
+	#
+	# 三处成功路径共用同一个 JSON 组装，避免各写一份 while 循环后不一致
+	# （漏转义 / 多一个逗号都会让前端 JSON.parse 失败，整页显示"读取失败"）。
+	local src="$1" base="$2" first=1 m
+	printf '{"ok":true,"source":"%s","baseUrl":"%s","models":[' "$src" "$(oc_json_str "$base")"
+	while IFS= read -r m; do
+		[ -n "$m" ] || continue
+		if [ "$first" = "1" ]; then
+			printf '"%s"' "$(oc_json_str "$m")"
+			first=0
+		else
+			printf ',"%s"' "$(oc_json_str "$m")"
+		fi
+	done
+	printf ']}\n'
 }
 
 # 公开模型目录：GET，无需鉴权。返回 {"data":[{"id":"z-ai/glm-5.3",...}]}。
@@ -679,9 +761,12 @@ models_public() {
 	prefix="$(public_prefix "$p")" || return 1
 
 	if ! command -v curl >/dev/null 2>&1; then
-		oc_warn "系统缺少 curl，无法访问公开模型目录"
+		OC_MU_MSG="系统缺少 curl，无法访问公开模型目录"
+		oc_warn "$OC_MU_MSG"
 		return 1
 	fi
+	# 公开目录只是个补充来源：没有 DNS 探测工具（内网常见）就安静放弃，
+	# 不要覆盖后面更权威的失败原因。
 	if ! oc_safe_url "$PUBLIC_MODELS_URL" || ! oc_url_resolve_public "$OC_URL_HOST"; then
 		oc_warn "公开模型目录地址未通过公网地址校验（需要可用的 DNS 探测工具）"
 		return 1
@@ -689,7 +774,8 @@ models_public() {
 	public_ip="$OC_URL_IP"; public_host="$OC_URL_HOST"; public_port="$OC_URL_PORT"
 
 	if [ ! -d "$OC_RUNDIR" ] || [ ! -w "$OC_RUNDIR" ]; then
-		oc_warn "临时目录不可用"
+		OC_MU_MSG="临时目录不可用"
+		oc_warn "$OC_MU_MSG"
 		return 1
 	fi
 	body="$OC_RUNDIR/models-public.$$.json"
@@ -706,12 +792,14 @@ models_public() {
 		msg="$(head -n1 "$errf" 2>/dev/null)"
 		rm -f "$body" "$errf"
 		[ -n "$msg" ] || msg="curl 退出码 $rc"
-		oc_warn "公开模型目录不可用：$msg"
+		OC_MU_MSG="公开模型目录不可用：$msg"
+		oc_warn "$OC_MU_MSG"
 		return 1
 	fi
 	if [ "$code" != "200" ]; then
 		rm -f "$body" "$errf"
-		oc_warn "公开模型目录返回 HTTP ${code:-未知}"
+		OC_MU_MSG="公开模型目录返回 HTTP ${code:-未知}"
+		oc_warn "$OC_MU_MSG"
 		return 1
 	fi
 
@@ -741,18 +829,7 @@ models_public() {
 		return 1
 	fi
 
-	printf '{"ok":true,"source":"public","baseUrl":"%s","models":[' "$(oc_json_str "$base")"
-	first=1
-	printf '%s\n' "$ids" | while IFS= read -r m; do
-		[ -n "$m" ] || continue
-		if [ "$first" = "1" ]; then
-			printf '"%s"' "$(oc_json_str "$m")"
-			first=0
-		else
-			printf ',"%s"' "$(oc_json_str "$m")"
-		fi
-	done
-	printf ']}\n'
+	printf '%s\n' "$ids" | models_json public "$base"
 	return 0
 }
 
@@ -780,27 +857,74 @@ env_key() {
 
 models_url() {
 	# models_url <provider-id> -> {"ok":true,"source":"...","baseUrl":"...","models":[...]}
-	local p="${1:-}" base url envname key esc code rc body errf ids first m msg url_host url_port url_ip
+	local p="${1:-}" base url envname key esc code rc body errf ids first m msg url_host url_port url_ip live
+	OC_MU_MSG=""
 	case "$p" in
 		''|*[!A-Za-z0-9_.-]*|-*) models_url_fail "Provider 名称无效"; return 1 ;;
 	esac
 
 	oc_env
 	base="$(configured_field "$p" baseUrl)"
+	if [ -n "$base" ] && [ "$base" != "$(preset_field "$p" baseUrl)" ]; then
+		# 用户把地址改成了自己的网关/代理：上游 /models 才是他要的清单，
+		# 不要再拿"官方目录"顶替。
+		live=0
+	else
+		live=1
+	fi
 	[ -n "$base" ] || base="$(preset_field "$p" baseUrl)"
 	if [ -z "$base" ]; then
 		models_url_fail "该 provider 没有 Base URL"
 		return 1
 	fi
-	if ! oc_safe_url "$base" || ! oc_url_resolve_public "$OC_URL_HOST"; then
-		models_url_fail "Base URL 不合法、无法解析或解析到本地网络（需要可用的 DNS 探测工具；本地 Ollama/自定义内网地址不允许用于此操作）：$base"
+	if ! oc_safe_url "$base"; then
+		models_url_fail "Base URL 不合法（需要 http(s) 地址）：$base"
 		return 1
 	fi
-	# Pin the address checked above and never follow redirects: a redirect
-	# changes authority and is rejected rather than re-resolved implicitly.
 	url_host="$OC_URL_HOST"
 	url_port="$OC_URL_PORT"
-	url_ip="$OC_URL_IP"
+	url_ip=""
+	# 地址钉扎是**尽力而为**，不再是前置条件：
+	#   * 内网设备常常没有 getent/nslookup，以前这里直接判失败 —— 模型列表
+	#     在内网于是永远拉不到（用户实测：三个 provider 全部"实时获取失败"）；
+	#   * 企业内网也常把上游域名解析到内网代理地址，同样被判失败。
+	# 能解析到公网地址就钉扎（防 DNS rebinding），否则交给 curl 自己解析。
+	#
+	# **保留的最低防线**（不能因为放宽就全部撤掉）：
+	#   * 字面量内网地址（10./127./169.254./::1/…）在 oc_safe_url 之后仍直接拒绝 ——
+	#     云元数据 169.254.169.254 这类目标必须是硬失败，而不是"解析不到公网
+	#     就给 curl 直连"；
+	#   * 域名解析结果里只要有一个是内网地址，仍然拒绝（oc_url_resolve_public
+	#     内部就是这么判的，返回 1 时无法区分"内网"与"没有 DNS 工具"，
+	#     所以内网判定要单独再做一次）；
+	#   * --max-redirs 0 保持：跳转改变 authority 一律拒绝。
+	# 这里的 URL 是管理员在模型页亲手填的 provider 地址（apply/CLI 同样只能由
+	# root 写入 openclaw.json），不按外部输入的 SSRF 攻击面处理；下载/升级路径
+	# 仍走 oc_download 的严格校验。
+	case "$url_host" in
+		*[!0-9.]*)
+			: ;;                     # 域名：交给下面解析判定
+		*)
+			if oc_url_ip_private "$url_host"; then
+				models_url_fail "拒绝访问内网地址（含云元数据地址）：$base"
+				return 1
+			fi
+			url_ip="$url_host"       # 字面量公网 IP，本身就是钉扎目标
+			;;
+	esac
+	if [ -z "$url_ip" ]; then
+		if oc_url_resolve_public "$url_host"; then
+			url_ip="$OC_URL_IP"
+		else
+			# 解析失败要区分两种原因：解析到了内网地址（必须拒绝），
+			# 还是根本没有 DNS 工具 / 解析不到（放宽，交给 curl）。
+			oc_url_host_resolves_private "$url_host" && {
+				models_url_fail "该地址解析到内网地址，已拒绝（含云元数据地址）：$base"
+				return 1
+			}
+			oc_warn "上游地址未解析到公网 IP：$url_host（按直连处理，不做地址钉扎）"
+		fi
+	fi
 
 	# Variable name mirrors apply(): the preset's env field, otherwise
 	# <UPPER(provider)>_API_KEY.
@@ -810,89 +934,120 @@ models_url() {
 		''|*[!A-Za-z0-9_]*) models_url_fail "无法确定该 provider 的 API Key 变量名"; return 1 ;;
 	esac
 	key="$(env_key "$envname" | head -n1)"
-	if [ -z "$key" ]; then
-		# 没有 Key 不等于没有实时清单：先问公开目录（无需鉴权、不带凭据）。
-		# 取不到（无映射 / 网络失败 / 一条都没有）才走原来的报错路径。
-		models_public "$p" "$base" "$envname" && return 0
-		models_url_fail "未找到 ${envname}，请先在模型页填写并保存 API Key"
-		return 1
-	fi
 
-	if ! command -v curl >/dev/null 2>&1; then
-		models_url_fail "系统缺少 curl，无法访问上游"
-		return 1
-	fi
-	if [ ! -d "$OC_RUNDIR" ] || [ ! -w "$OC_RUNDIR" ]; then
-		models_url_fail "临时目录不可用"
-		return 1
-	fi
-
-	# strip trailing slashes, then append the OpenAI-compatible path
-	url="$base"
-	while [ "${url%/}" != "$url" ]; do url="${url%/}"; done
-	url="$url/models"
-
-	# curl config syntax: backslash first, then the double quote
-	esc="$(printf '%s' "$key" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
-	body="$OC_RUNDIR/models-url.$$.json"
-	errf="$OC_RUNDIR/models-url.$$.err"
-	code="$(printf 'header = "Authorization: Bearer %s"\n' "$esc" | \
-		oc_timeout 20 curl -sS --max-time 20 --connect-timeout 10 \
-			-H 'Accept: application/json' -o "$body" -w '%{http_code}' \
-			--max-redirs 0 --noproxy '*' \
-			--resolve "$url_host:$url_port:$url_ip" \
-			--config - "$url" 2>"$errf")"
-	rc=$?
-
-	if [ "$rc" -ne 0 ]; then
-		msg="$(head -n1 "$errf" 2>/dev/null)"
-		rm -f "$body" "$errf"
-		[ -n "$msg" ] || msg="curl 退出码 $rc"
-		models_url_fail "无法连接上游：$msg"
-		return 1
-	fi
-
-	case "$code" in
-		200) ;;
-		401|403)
-			rm -f "$body" "$errf"
-			models_url_fail "上游拒绝访问（HTTP $code），API Key 可能无效或无权限"
-			return 1 ;;
-		404)
-			rm -f "$body" "$errf"
-			models_url_fail "上游没有 /models 接口（HTTP 404）"
-			return 1 ;;
-		''|*[!0-9]*)
-			rm -f "$body" "$errf"
-			models_url_fail "未取得 HTTP 状态码"
-			return 1 ;;
-		*)
-			rm -f "$body" "$errf"
-			models_url_fail "上游返回 HTTP $code"
-			return 1 ;;
-	esac
-
-	# {"data":[{"id":"..."}]} (and, for good measure, ["..."])
-	ids="$(json_slice data <"$body" 2>/dev/null | json_model_ids)"
-	rm -f "$body" "$errf"
-	ids="$(printf '%s\n' "$ids" | grep -v '^[[:space:]]*$' | sort -u)"
-	if [ -z "$ids" ]; then
-		models_url_fail "上游返回的内容中没有可识别的模型列表（HTTP 200）"
-		return 1
-	fi
-
-	printf '{"ok":true,"source":"upstream","baseUrl":"%s","models":[' "$(oc_json_str "$base")"
-	first=1
-	printf '%s\n' "$ids" | while IFS= read -r m; do
-		[ -n "$m" ] || continue
-		if [ "$first" = "1" ]; then
-			printf '"%s"' "$(oc_json_str "$m")"
-			first=0
-		else
-			printf ',"%s"' "$(oc_json_str "$m")"
+	# ---------- 1) provider 已发布目录（离线、无需 API Key、秒级） ----------
+	# 官方 CLI 的 `models list --provider <id> --plain` 就是"这个服务商支持
+	# 哪些模型"的权威答案，随插件一起发布，不依赖外网。旧实现没有这一层，
+	# 没填 Key / 没有外网时页面只能显示随包预设（用户看到的"实时获取失败"）。
+	OC_CM_MSG=""
+	if [ "$live" = "1" ] && [ -x "$(oc_oc_bin)" ]; then
+		if catalog_models "$p"; then
+			printf '%s\n' "$OC_CM_OUT" | models_json catalog "$base"
+			return 0
 		fi
-	done
-	printf ']}\n'
+	fi
+
+	# ---------- 2) 有 API Key 就问上游 ----------
+	if [ -n "$key" ]; then
+		if ! command -v curl >/dev/null 2>&1; then
+			OC_MU_MSG="系统缺少 curl，无法访问上游"
+		elif [ ! -d "$OC_RUNDIR" ] || [ ! -w "$OC_RUNDIR" ]; then
+			OC_MU_MSG="临时目录不可用"
+		else
+			# strip trailing slashes, then append the OpenAI-compatible path
+			url="$base"
+			while [ "${url%/}" != "$url" ]; do url="${url%/}"; done
+			url="$url/models"
+
+			# curl config syntax: backslash first, then the double quote
+			esc="$(printf '%s' "$key" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+			body="$OC_RUNDIR/models-url.$$.json"
+			errf="$OC_RUNDIR/models-url.$$.err"
+			# 参数用 set -- 拼：`--resolve host:port:`（IP 为空）会被 curl 判为
+			# 解析失败，所以没有钉扎地址时这一项**必须整条不传**。
+			set -- -sS --max-time 20 --connect-timeout 10 \
+				-H 'Accept: application/json' -o "$body" -w '%{http_code}' \
+				--max-redirs 0 --noproxy '*'
+			if [ -n "$url_ip" ]; then
+				set -- "$@" --resolve "$url_host:$url_port:$url_ip"
+			fi
+			code="$(printf 'header = "Authorization: Bearer %s"\n' "$esc" | \
+				oc_timeout 20 curl "$@" --config - "$url" 2>"$errf")"
+			rc=$?
+
+			if [ "$rc" -ne 0 ]; then
+				msg="$(head -n1 "$errf" 2>/dev/null)"
+				rm -f "$body" "$errf"
+				[ -n "$msg" ] || msg="curl 退出码 $rc"
+				OC_MU_MSG="无法连接上游：$msg"
+			else
+				case "$code" in
+					200)
+						# {"data":[{"id":"..."}]} (and, for good measure, ["..."])
+						ids="$(json_slice data <"$body" 2>/dev/null | json_model_ids)"
+						rm -f "$body" "$errf"
+						ids="$(printf '%s\n' "$ids" | grep -v '^[[:space:]]*$' | sort -u)"
+						if [ -n "$ids" ]; then
+							printf '%s\n' "$ids" | models_json upstream "$base"
+							return 0
+						fi
+						OC_MU_MSG="上游返回的内容中没有可识别的模型列表（HTTP 200）"
+						;;
+					401|403)
+						# Key 无效是**必须**让用户知道的事：不能被"目录里有几个
+						# 模型"掩盖过去，否则用户会以为 Key 已经生效。
+						rm -f "$body" "$errf"
+						models_url_fail "上游拒绝访问（HTTP $code），API Key 可能无效或无权限"
+						return 1 ;;
+					404)
+						rm -f "$body" "$errf"
+						OC_MU_MSG="上游没有 /models 接口（HTTP 404）"
+						;;
+					''|*[!0-9]*)
+						rm -f "$body" "$errf"
+						OC_MU_MSG="未取得 HTTP 状态码"
+						;;
+					*)
+						rm -f "$body" "$errf"
+						OC_MU_MSG="上游返回 HTTP $code"
+						;;
+				esac
+			fi
+		fi
+	else
+		# 没有 Key 不等于没有清单：公开模型目录无需鉴权，也不带任何凭据。
+		models_public "$p" "$base" "$envname" && return 0
+	fi
+
+	# ---------- 3) 最后再试已发布目录 ----------
+	# 走到这里说明上游没给出结果（改过 Base URL / 没有外网 / 网络失败）。
+	# 目录清单至少能让用户选到一个真实可用的模型，而不是对着过时的预设猜。
+	if [ "$live" = "0" ] && [ -x "$(oc_oc_bin)" ]; then
+		if catalog_models "$p"; then
+			printf '%s\n' "$OC_CM_OUT" | models_json catalog "$base"
+			return 0
+		fi
+	fi
+
+	# ---------- 4) 全都拿不到：回最具体的原因 ----------
+	# 优先级：上游的诊断 > 目录的诊断 > 缺 Key。
+	# 上游诊断是网络层/HTTP 层的真实结果（"无法连接上游：xxx"、"上游返回
+	# HTTP 500"），比"CLI 退出码 1"更可操作；只有在没有走上游那一步
+	# （没 Key 或 live=1）时才退到目录诊断。两者都有时拼接，不丢信息。
+	if [ -n "$OC_MU_MSG" ]; then
+		if [ -n "$OC_CM_MSG" ]; then
+			models_url_fail "$OC_MU_MSG；同时 ${OC_CM_MSG}"
+		else
+			models_url_fail "$OC_MU_MSG"
+		fi
+	elif [ -n "$OC_CM_MSG" ]; then
+		models_url_fail "$OC_CM_MSG"
+	elif [ -z "$key" ]; then
+		models_url_fail "未找到 ${envname}，请先在模型页填写并保存 API Key"
+	else
+		models_url_fail "未能取得模型列表"
+	fi
+	return 1
 }
 
 # ---------------------------------------------------------------- apply
@@ -1032,7 +1187,34 @@ apply() {
 
 setkey() {
 	# setkey <provider> <apikey>
-	apply "$1" "$2" "" ""
+	#
+	# 保留「位置参数传 Key」这层**对外兼容**：它从本包第一个版本起就是这个签名，
+	# 用户脚本与排障手册都可能在用，不能因为内部改成安全通道就把它打死
+	# （实测过：apply 拒绝位置参数后，这个子命令 100% 返回 2，功能直接没了）。
+	#
+	# 安全通道仍是唯一的落盘路径：先把 Key 写进 0600 临时文件，再走 --key-file。
+	# 仍然无法完全避免 Key 进 argv（这是调用方选择的接口形态），但落盘/落配置
+	# 的过程中它不会再出现在任何子进程的命令行里。
+	local provider="$1" key="${2:-}" kf rc
+	[ -n "$provider" ] || { oc_err "未指定 Provider"; return 1; }
+	if [ -n "$key" ]; then
+		if [ -d "$OC_RUNDIR" ] && [ -w "$OC_RUNDIR" ]; then
+			kf="$OC_RUNDIR/setkey.$$"
+			# umask 077 + 立即写：不出现「先 0644 后 chmod」的窗口
+			if ( umask 077; printf '%s\n' "$key" >"$kf" ) 2>/dev/null && [ -f "$kf" ]; then
+				apply "$provider" --key-file "$kf" "" ""
+				rc=$?
+				rm -f "$kf" 2>/dev/null
+				return "$rc"
+			fi
+		fi
+		# 临时目录不可用时回退到环境变量通道：Key 只在本进程环境里，
+		# 不进任何子进程的 argv。
+		OC_APPLY_KEY="$key" apply "$provider" - "" ""
+		return $?
+	fi
+	# 没给 Key：只应用 provider 的地址与默认模型
+	apply "$provider" --key-file /dev/null "" ""
 }
 
 current() {

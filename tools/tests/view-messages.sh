@@ -565,11 +565,17 @@ check('oc_pty_run 120' in cli15, 'cmd_run 对这类命令改用 oc_pty_run')
 check('请在 SSH 里直接执行' in cli15, '缺 script 时给出可操作提示')
 
 # 命令行采用黑名单 + argv 结构约束：内网环境开放正常 CLI，危险入口拒绝
+# 注意：断言必须锚定 RUN_DENY 表内的写法。早先的 `_c in ctrl15` 对 node
+# 恒真（控制器里 node_version / node_mirror 到处都是），等于没测。
 check('local RUN_DENY' in ctrl15 and 'run_argv_allowed' in ctrl15,
       'api_run 使用危险命令黑名单')
+_deny_blk = ''
+if 'local RUN_DENY' in ctrl15:
+    _deny_blk = ctrl15[ctrl15.index('local RUN_DENY'):]
+    _deny_blk = _deny_blk[:_deny_blk.index(chr(10) + '}')] if (chr(10) + '}') in _deny_blk else _deny_blk
 for _c in ('reset', 'uninstall', 'migrate', 'tui', 'chat', 'browser', 'node'):
-    check(_c in ctrl15, '黑名单包含 %s' % _c)
-check('exec-policy' in ctrl15, '黑名单包含 exec-policy')
+    check(('%s = true' % _c) in _deny_blk, 'RUN_DENY 表内含 %s' % _c)
+check('["exec-policy"] = true' in _deny_blk, 'RUN_DENY 表内含 exec-policy')
 
 # 页面说明必须与真实策略一致
 check('gateway auth-token --show' in term15, '页面示例含 auth-token --show')

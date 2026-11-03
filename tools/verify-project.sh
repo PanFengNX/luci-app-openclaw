@@ -421,6 +421,18 @@ else
 	skip "缺少 tools/tests/model-page-source.sh"
 fi
 
+if [ -f tools/tests/models-catalog.sh ]; then
+	if out="$(sh tools/tests/models-catalog.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "models-catalog.sh 全部断言通过"
+	else
+		bad "models-catalog.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/models-catalog.sh"
+fi
+
 if [ -f tools/tests/provider-install-behavior.sh ]; then
 	if out="$(sh tools/tests/provider-install-behavior.sh 2>&1)"; then
 		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
@@ -553,6 +565,10 @@ head_ "7k2. 前端 GET 调用的端点必须真的登记进 READ_ONLY（名字�
 if [ -f tools/tests/api-run.sh ]; then
 	if out="$(sh tools/tests/api-run.sh 2>&1)"; then printf '%s\n' "$out" | tail -1 | sed 's/^/    /'; ok "api-run.sh 全部断言通过"; else bad "api-run.sh 有失败断言"; fi
 else skip "缺少 tools/tests/api-run.sh"; fi
+head_ "7k2b. 命令行绕过路径与备份互斥的行为级回归（跨模型审计 v1.8.65）"
+if [ -f tools/tests/audit-1865-fixes.sh ]; then
+	if out="$(PY="$PY" sh tools/tests/audit-1865-fixes.sh 2>&1)"; then printf '%s\n' "$out" | tail -1 | sed 's/^/    /'; ok "audit-1865-fixes.sh 全部断言通过"; else printf '%s\n' "$out" | grep -E 'FAIL' | sed 's/^/        /'; bad "audit-1865-fixes.sh 有失败断言"; fi
+else skip "缺少 tools/tests/audit-1865-fixes.sh"; fi
 if [ -f tools/tests/core-pattern.sh ]; then
 	if out="$(sh tools/tests/core-pattern.sh 2>&1)"; then printf '%s\n' "$out" | tail -1 | sed 's/^/    /'; ok "core-pattern.sh 全部断言通过"; else bad "core-pattern.sh 有失败断言"; fi
 else skip "缺少 tools/tests/core-pattern.sh"; fi

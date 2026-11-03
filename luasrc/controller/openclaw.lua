@@ -751,14 +751,19 @@ local RUN_DENY = {
 -- 允许执行；需要用户自己知道在做什么。
 
 local function run_argv_allowed(argv)
-	if #argv == 0 then return false end
-	-- 允许照官方文档写全名：剥掉一层前缀（cli.sh 侧也会再剥一次）
-	if argv[1] == "openclaw" or argv[1] == "/usr/bin/openclaw" then
+	-- cli.sh 也会剥前缀，因此这里循环剥离，避免
+	-- `openclaw openclaw reset` 被控制器当作普通 openclaw 放行后，
+	-- 再由 cli.sh 剥成 reset 执行。
+	while #argv > 0 and (argv[1] == "openclaw" or argv[1] == "/usr/bin/openclaw") do
 		table.remove(argv, 1)
 	end
 	if #argv == 0 then return false end
+
+	-- 只允许两个明确的只读全局参数。不能把所有 --* / -* 放行，
+	-- 否则 `-- reset`、`-y uninstall` 等会把黑名单命令推到第二位。
 	local first = argv[1]
-	if first:match("^%-%-") then return true end   -- --version / --help
+	if first == "--version" or first == "--help" then return true end
+	if first:match("^%-") then return false end
 	return RUN_DENY[first] ~= true
 end
 

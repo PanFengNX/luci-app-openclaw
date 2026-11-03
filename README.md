@@ -196,8 +196,10 @@ OpenClaw 与 Node.js 统一使用 **musl** 运行时（Node 取 `unofficial-buil
 4. `openclaw config set agents.defaults.model.primary <id>/<model>`；
 5. 修复属主权限 → 重启网关 → 页面刷新。
 
-模型清单来源：选择 provider 后直接请求该服务商的 `models_url`；请求失败时仅显示随包预设并提示可能过时，
-不再从本机 OpenClaw 获取模型列表。自定义 provider 仍可手动输入模型 ID。
+模型清单来源按优先级依次尝试：**OpenClaw 已发布目录**（`openclaw models list --provider <id> --plain`，
+离线读取、不需要 API Key，内网设备同样可用）→ **上游接口**（已填 Key 且 Base URL 为自定义地址时）
+→ **公开目录** → 随包预设。全部拿不到时才提示「可能过时」，并给出具体原因。
+自定义 provider 仍可手动输入模型 ID。
 
 ### 3. 一键修复 + 一键 doctor（新增）
 

@@ -3904,16 +3904,34 @@ cmd_backup_bg() {
 	cloud_ensure_dirs || cloud_fail "无法创建云备份目录" 2
 	[ -d "$OC_RUNDIR" ] && [ -w "$OC_RUNDIR" ] || cloud_fail "临时目录不可用：$OC_RUNDIR" 2
 
-	# 已有任务在跑：pid 活着就报 busy；否则清掉陈旧状态继续
+	# 已有任务在跑：pid 活着就报 busy；否则清掉陈旧状态继续。
+	# 占位值是 "starting <epoch>"。它在 worker 起来前也算忙；但必须会过期 ——
+	# 否则 worker 启动失败时占位永远留着，用户再也没法启动备份（只能手工删）。
 	if [ -f "$CLOUD_BK_PID" ]; then
-		local _p
-		_p="$(head -n1 "$CLOUD_BK_PID" 2>/dev/null | tr -d ' \r\n')"
-		if [ -n "$_p" ] && bk_pid_alive "$_p"; then
+		local _p _ts _now
+		_p="$(head -n1 "$CLOUD_BK_PID" 2>/dev/null | tr -d '\r\n')"
+		case "$_p" in
+			starting\ *) _ts="${_p#starting }" ;;
+			*) _ts="" ;;
+		esac
+		if [ -n "$_ts" ]; then
+			# 时间戳就在占位里，不用 stat（精简 busybox 未必支持 stat -c）
+			case "$_ts" in ''|*[!0-9]*) _ts="" ;; esac
+			_now="$(date +%s 2>/dev/null | tr -d ' \r\n')"
+			case "$_now" in ''|*[!0-9]*) _now="" ;; esac
+			if [ -n "$_ts" ] && [ -n "$_now" ] && [ $((_now - _ts)) -le 120 ]; then
+				printf '{"ok":false,"busy":true,"error":"%s"}\n' \
+					"$(jstr "已有备份任务正在启动，请稍等")"
+				return 0
+			fi
+			rm -f "$CLOUD_BK_PID" "$CLOUD_BK_RC" 2>/dev/null
+		elif [ -n "$_p" ] && bk_pid_alive "$_p"; then
 			printf '{"ok":false,"busy":true,"error":"%s"}\n' \
 				"$(jstr "已有备份任务在运行，请等它结束")"
 			return 0
+		else
+			rm -f "$CLOUD_BK_PID" "$CLOUD_BK_RC" 2>/dev/null
 		fi
-		rm -f "$CLOUD_BK_PID" "$CLOUD_BK_RC" 2>/dev/null
 	fi
 	# 定时备份（backup-run）自己会取全局锁；手动这条不取锁，所以必须显式问
 	# 一次锁：否则「定时任务正在打包时用户又点立即备份」会同时跑两份 tar，
@@ -3936,18 +3954,77 @@ cmd_backup_bg() {
 	# 备份就半途死掉（表现为「进度停在打包中，之后没了」）。
 	# setsid 让 worker 自成一个会话，父进程退出不再影响它。
 	# 没有 setsid（精简 busybox）时退回普通后台启动：至少不比原来差。
-	if command -v setsid >/dev/null 2>&1; then
-		( setsid backup_bg_worker "$ws" ) >/dev/null 2>&1 </dev/null &
-	else
-		( backup_bg_worker "$ws" ) >/dev/null 2>&1 </dev/null &
+	#
+	# setsid 是外部程序，无法执行当前 shell 函数，必须调用脚本自身的真实入口。
+	# PID 文件先写 sentinel "starting"，由 worker 用自己真实的 $$ 覆盖：
+	# 父进程若也写 $!，与 worker 的 $$ 会互相覆盖（setsid 可能 fork，$! 未必
+	# 等于 worker），轮询可能追踪到已退出的中间进程而误判"任务已中断"。
+	# 只留一个写者，才没有竞态。
+	local _self
+	_self="$0"
+	case "$_self" in
+		/*) ;;
+		*/*) _self="$(cd "$(dirname "$_self")" 2>/dev/null && pwd)/$(basename "$_self")" ;;
+		*) _self="$(command -v "$_self" 2>/dev/null || printf '%s' "$_self")" ;;
+	esac
+	[ -x "$_self" ] || _self="/usr/libexec/openclaw/cloud.sh"
+	# 找不到自身可执行文件时明确报错。以前这种情况会被 2>&1 吞掉，
+	# 页面显示"已启动"但备份根本没跑（审计指出的静默失效）。
+	# 此处还没写过任何状态文件，不要动 PID/rc（可能是别的任务的）。
+	if [ ! -x "$_self" ]; then
+		cloud_fail "无法定位 cloud.sh 自身路径（$_self），请重新安装插件"
 	fi
-	printf '%s\n' "$!" >"$CLOUD_BK_PID" 2>/dev/null || true
+	# PID 文件只由 worker 自己写一次，父进程只留占位 "starting <epoch>"：
+	# 若父进程也写 $!，setsid 可能 fork，$! 未必是 worker，两个写者会互相
+	# 覆盖，轮询可能追踪到已退出的中间进程而误判"任务已中断"。
+	# 单一写者 = 没有竞态。
+	#
+	# 占位里带时间戳（而不是靠 stat 取 mtime）：精简 busybox 未必有
+	# `stat -c`，拿不到时间就永远判不出"启动失败"，会一直转圈。
+	# date +%s 是 busybox 必备，用它最稳。
+	printf 'starting %s\n' "$(date +%s 2>/dev/null)" >"$CLOUD_BK_PID" 2>/dev/null || true
+	if command -v setsid >/dev/null 2>&1; then
+		# setsid 是外部程序，只能 exec 可执行文件，不能执行 shell 函数，
+		# 所以走脚本自身的真实子命令入口 backup-bg-worker。
+		setsid sh -c 'exec "$1" backup-bg-worker "$2"' sh "$_self" "$ws" \
+			</dev/null >/dev/null 2>&1 &
+	else
+		"$_self" backup-bg-worker "$ws" </dev/null >/dev/null 2>&1 &
+	fi
 	printf '{"ok":true,"started":true}\n'
 }
 
 backup_bg_worker() {
 	# 后台 worker：打包 → 上传。所有输出进进度日志，最后写 rc。
 	local ws="${1:-1}" out errf rc file dir local_path remote _sz _szh
+
+	# 真正的互斥防线：cmd_backup_bg 里的 oc_lock_busy 只是「立即回 busy」的
+	# 快速路径，检查到启动之间有空窗。这里原子取锁（成功即挂 EXIT trap 自动
+	# 释放），才能挡住反向竞态 —— 手动备份运行期间，定时备份 oc_lock_acquire
+	# 必然失败而跳过，反之亦然。
+	#
+	# 必须先取锁、再写 PID：抢锁失败说明另一个任务正在跑，此时绝不能
+	# 覆盖/删除它的 PID 与 rc 文件，否则会把对方正在进行的备份标记成
+	# 「已中断」。也不能 bk_log —— 那是同一个日志文件，写进去会把对方
+	# 正在显示的进度污染成「已取消本次备份」。
+	if ! oc_lock_acquire; then
+		# 抢锁失败说明另一个任务在跑。只有在 PID 文件仍是我们父进程留下的
+		# 占位值时才收尾 —— 那说明没有别人的手动任务写过它，写 rc 不会
+		# 覆盖对方结果；否则保持原样。
+		# 注意 tr 只删换行不删空格：占位是 "starting <epoch>"，删空格会
+		# 把两个字段粘成一个，判定随之失效。
+		if head -n1 "$CLOUD_BK_PID" 2>/dev/null | grep -q '^starting '; then
+			bk_log "[local] ✗ 另一个备份/安装任务正在运行，本次未启动"
+			printf '1\n' >"$CLOUD_BK_RC" 2>/dev/null || true
+			rm -f "$CLOUD_BK_PID" 2>/dev/null
+		fi
+		return 0
+	fi
+
+	# 取锁成功，本次才是真正的执行者：写自己真实的 $$，这是 PID 文件的
+	# 唯一写入点（父进程只写占位值）。
+	printf '%s\n' "$$" >"$CLOUD_BK_PID" 2>/dev/null || true
+
 	out="$OC_RUNDIR/bk-bg-out.$$"
 	errf="$OC_RUNDIR/bk-bg-err.$$"
 	rm -f "$out" "$errf" 2>/dev/null
@@ -4027,7 +4104,7 @@ backup_bg_worker() {
 
 cmd_backup_poll() {
 	# backup-poll -> {"ok":true,"running":bool,"done":bool,"rc":"","log":"..."}
-	local pid running=false done=false rc="" out=""
+	local pid running=false done=false rc="" out="" _st_ts _st_now
 
 	# 从未启动过：不返回 done，避免前端把"没开始"当成"已完成"
 	if [ ! -f "$CLOUD_BK_LOG" ] && [ ! -f "$CLOUD_BK_RC" ] && [ ! -f "$CLOUD_BK_PID" ]; then
@@ -4035,11 +4112,42 @@ cmd_backup_poll() {
 		return 0
 	fi
 
-	pid="$(head -n1 "$CLOUD_BK_PID" 2>/dev/null | tr -d ' \r\n')"
+	# 只删行尾换行，不删空格：占位是 "starting <epoch>"，两个字段靠空格分隔。
+	pid="$(head -n1 "$CLOUD_BK_PID" 2>/dev/null | tr -d '\r\n')"
+	# 占位值是 "starting <epoch>"，时间戳自带，不依赖 stat。
+	_st_ts=""
+	case "$pid" in
+		starting\ *) _st_ts="${pid#starting }" ;;
+	esac
 	# 与 cmd_backup_bg 用同一个精确判据：宽松判据会把轮询请求本身
 	# （也是 cloud.sh）误判成"任务在跑"，于是 running 永远为 true。
 	if [ -n "$pid" ] && bk_pid_alive "$pid"; then
 		running=true
+	elif [ -n "$_st_ts" ]; then
+		# worker 还没写下自己的 pid（刚 spawn）。这一段不能判 done ——
+		# 否则前端会立刻显示"任务已中断"，而备份其实正在启动。
+		# 但也不能无限等：worker 启动失败时占位会一直留着，超时就判失败。
+		#
+		# 时间戳来自占位本身（"starting <epoch>"），不用 stat —— 精简
+		# busybox 未必支持 stat -c，拿不到时间就会永远转圈。两侧都必须是
+		# 纯数字才计算差值，否则按「还在启动」处理，不猜。
+		case "$_st_ts" in
+			''|*[!0-9]*) running=true ;;
+			*)
+				_st_now="$(date +%s 2>/dev/null | tr -d ' \r\n')"
+				case "$_st_now" in
+					''|*[!0-9]*) running=true ;;
+					*)
+						if [ $((_st_now - _st_ts)) -gt 120 ]; then
+							printf '1\n' >"$CLOUD_BK_RC" 2>/dev/null || true
+							printf '%s\n' "任务未能启动（超过 120 秒没有进度写入），请重试。" \
+								>>"$CLOUD_BK_LOG" 2>/dev/null
+							rm -f "$CLOUD_BK_PID" 2>/dev/null
+						else
+							running=true
+						fi ;;
+				esac ;;
+		esac
 	fi
 
 	if [ "$running" = "true" ]; then
@@ -4286,6 +4394,7 @@ case "${1:-}" in
 	schedule-clear)  cmd_schedule_clear ;;
 	backup-run)      cmd_backup_run ;;
 	backup-bg)       cmd_backup_bg "$@" ;;
+	backup-bg-worker) shift; backup_bg_worker "$@" ;;
 	backup-poll)     cmd_backup_poll ;;
 	*)
 		printf '{"ok":false,"error":"%s"}\n' "$(jstr "未知动作：${1:-}")"

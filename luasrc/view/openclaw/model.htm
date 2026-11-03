@@ -474,7 +474,7 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
 <div class="oc-card">
   <h3>说明</h3>
   <ul class="oc-list">
-    <li>选择服务商后请求对应的 models_url；成功显示实时 API 模型，失败仅显示随包预设并提示可能过时。</li>
+    <li>选定服务商后自动读取模型清单，顺序为：<b>OpenClaw 已发布目录</b>（离线、无需 Key）→ <b>上游接口</b>（已填 Key 且 Base URL 为自定义时）→ <b>公开目录</b> → 随包预设。全都拿不到时才提示「可能过时」。</li>
     <li>点击绿色按钮会依次完成：<b>安装该服务商官方插件</b> → <b>写入 API Key</b>（<code>~/.openclaw/.env</code> 与配置）→ <b>设为默认模型</b> → 重启网关。</li>
     <li>标记说明：<span class="oc-tag ok">内置</span> 无需插件 · <span class="oc-tag">需插件</span> 会自动安装 · <span class="oc-tag ok">已配置</span> 已写入过配置。</li>
   </ul>
@@ -577,6 +577,8 @@ var UPSTREAM = [];       // 当前 provider 从上游拉到的模型 id
 var FETCH_SEQ = 0;       // 切换 provider 时丢弃过期的异步响应
 var MODEL_USER_PICKED = false; // 用户是否手动选过模型（之后不再自动覆盖）
 var MODEL_AUTO_PICKED = '';    // 最近一次自动选中的模型 id（空表示未自动选）
+var CURRENT_MODEL = '';        // 配置里的默认模型（形如 provider/model）
+var PROVIDER_TOUCHED = false;  // 用户是否手动切过服务商
 function $(id){ return document.getElementById(id); }
 function hasKey(o, k){ return Object.prototype.hasOwnProperty.call(o, k); }
 // get(url, cb, timeoutMs)：默认 20 秒。超时 / 网络错误统一回调 {ok:false, net:true}，
@@ -617,8 +619,37 @@ function loadCurrent(){
   // 子命令 —— 页面上「当前生效」显示的是一整段报错文字。
   get(API.model_current, function(r){
     var v = (r && r.current) ? String(r.current).replace(/^\s+|\s+$/g, '') : '';
+    CURRENT_MODEL = v;
     $('cur-model').textContent = v || '(未设置)';
+    syncProviderToCurrent();
   });
+}
+
+function providerOfModel(v){
+  // "longai/qwen3.8-max" -> "longai"；没有斜杠时返回空串。
+  v = String(v || '');
+  var i = v.indexOf('/');
+  return i > 0 ? v.slice(0, i) : '';
+}
+
+function catalogHas(id){
+  for (var i = 0; i < CATALOG.length; i++) if (CATALOG[i].id === id) return true;
+  return false;
+}
+
+function syncProviderToCurrent(){
+  // 页面默认应该停在「当前生效模型所属的服务商」上。以前固定选 deepseek，
+  // 于是当前生效是 longai/qwen3.8-max 时，界面却在展示 DeepSeek 的模型，
+  // 用户以为配置丢了。用户手动切过服务商之后不再自动改。
+  if (PROVIDER_TOUCHED) return;
+  var want = providerOfModel(CURRENT_MODEL);
+  if (!want || !CATALOG.length || !catalogHas(want)) return;
+  if ($('m-provider').value === want) return;
+  $('m-provider').value = want;
+  MODEL_USER_PICKED = false;
+  MODEL_AUTO_PICKED = '';
+  $('m-model').innerHTML = '';
+  renderProvider();
 }
 
 function loadCatalog(){
@@ -648,14 +679,19 @@ function loadCatalog(){
   });
 }
 function renderCatalog(){
-  var sel = $('m-provider'); sel.innerHTML = '';
+  var sel = $('m-provider');
+  // 重新渲染（先用随包清单、再用服务端清单）时要保留当前选择，
+  // 否则第二次渲染会把用户/自动选好的服务商重置掉。
+  var keep = sel.value;
+  sel.innerHTML = '';
   CATALOG.forEach(function(p){
     var o = document.createElement('option');
     o.value = p.id;
     o.textContent = (p.name||p.id) + '  (' + p.id + ')' + (p.hasKey ? '  ●' : '');
-    if (p.id === 'deepseek') o.selected = true;
     sel.appendChild(o);
   });
+  var want = keep || providerOfModel(CURRENT_MODEL);
+  if (want && catalogHas(want)) sel.value = want;
   $('m-status').textContent = '共 ' + CATALOG.length + ' 个服务商（● 表示已写入 Key）。';
   renderProvider();
 }
@@ -669,17 +705,18 @@ function addTag(host, text, ok){
 
 function setModelHint(text){ $('m-model-hint').textContent = text || ''; }
 
-// 清单来源提示：服务端返回 source（upstream / public / local）。文案是固定常量，
-// 不把服务端数据拼进任何标记，只写 textContent。
+// 清单来源提示：服务端返回 source（upstream / public / catalog）。
+// 文案是固定常量，不把服务端数据拼进任何标记，只写 textContent。
 var MODEL_SOURCE_TEXT = {
-  upstream: '模型列表来自上游（实时）',
-  public:   '模型列表来自公开目录（实时）'
+  upstream: '模型列表来自上游接口（实时）',
+  public:   '模型列表来自公开目录（实时）',
+  catalog:  '模型列表来自 OpenClaw 已发布目录（离线读取，不需要 API Key）'
 };
 function setModelSource(src, fallback){
   var el = $('m-model-source');
   if (!el) return;
   var text = '', cls = 'oc-hint';
-  if (src === 'upstream' || src === 'public' || src === 'local'){
+  if (src && hasKey(MODEL_SOURCE_TEXT, src)){
     text = MODEL_SOURCE_TEXT[src];
   } else if (fallback){
     // 兜底清单可能已经过时：用 .oc-err 让它醒目，不新增样式。
@@ -802,22 +839,25 @@ function fetchUpstream(){
       UPSTREAM = [];
       fillModels([]);
       setModelBusy(false);
-      var fail = '未能获取实时模型列表：' + ((r && r.error) || '服务端未返回模型') + '。当前显示随包预设，可能过时。';
+      var fail = '未能获取模型列表：' + ((r && r.error) || '服务端未返回模型') + '。当前显示随包预设，可能过时。';
       var autoFail = autoPickText();
       setModelHint(fail + (autoFail ? ' ' + autoFail : ''));
-      setModelSource('fallback', '实时获取失败，当前显示随包预设，可能过时');
+      setModelSource('fallback', '未能读取模型列表，当前显示随包预设，可能过时');
       return;
     }
     setModelBusy(false);
     UPSTREAM = list.slice();
     fillModels(UPSTREAM, false);
-    // 老版本服务端没有 source 字段，按上游处理（它只可能来自上游）。
-    var src = (r.source === 'public') ? 'public' : 'upstream';
-    var okMsg = '已获取 ' + UPSTREAM.length + ' 个实时模型。';
+    // 服务端会带 source：upstream（问上游接口）/ public（公开目录）/
+    // catalog（OpenClaw 已发布目录，离线可读）。老版本没有该字段，按上游处理。
+    var src = hasKey(MODEL_SOURCE_TEXT, r.source) ? r.source : 'upstream';
+    var okMsg = (src === 'catalog')
+      ? ('已获取 ' + UPSTREAM.length + ' 个可用模型（OpenClaw 已发布目录）。')
+      : ('已获取 ' + UPSTREAM.length + ' 个实时模型。');
     var autoOk = autoPickText();
     setModelHint(okMsg + (autoOk ? ' ' + autoOk : ''));
     setModelSource(src, '');
-  });
+  }, 45000);   // 后端要跑一次 CLI（目录）或一次上游请求，20 秒默认值会误报超时
 }
 
 // 有没有配套插件决定按钮语义：只有 plugin 非空的 provider 才谈得上「安装」。
@@ -878,6 +918,7 @@ function renderProvider(){
 }
 
 $('m-provider').onchange = function(){
+  PROVIDER_TOUCHED = true;
   MODEL_USER_PICKED = false;
   MODEL_AUTO_PICKED = '';
   $('m-model').innerHTML = '';   // 不把上一个 provider 的选中项带过来
