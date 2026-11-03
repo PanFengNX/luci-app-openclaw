@@ -830,10 +830,22 @@ oc_json_str() {
 
 oc_url_ip_private() {
 	# Reject loopback, RFC1918, link-local, multicast and unspecified ranges.
+	#
+	# **198.18.0.0/15 必须放行**（实测踩过）：它是 RFC 2544 网络设备基准测试段，
+	# 同时是 Clash / sing-box / mihomo 这类透明代理 **fake-ip 模式的默认段**。
+	# 开着 OpenClash 的设备上，github.com / nodejs.org / 各家 API 的域名全部解析
+	# 成 198.18.x.x，而真实流量由代理接管（curl 实测 HTTP 200）。把它当内网拒绝
+	# 的后果是：整台设备上所有走代理的域名都被判为"攻击目标"，模型列表、公开
+	# 目录、上游接口全线失败 —— 而网络其实是通的。
+	#
+	# 安全性上放行它是成立的：198.18.0.0/15 不在公网路由表里，也没有任何真实
+	# 主机使用它；没有透明代理时连接直接失败（no route），有代理时流量被送出去
+	# 解析回原域名。它**不是**内网服务的可达地址，因此不构成 SSRF 落点。
+	# 真正危险的 169.254.169.254（云元数据）在下面仍然拒绝。
 	local ip="$1" rc
 	case "$ip" in
 		*.*)
-			printf '%s\n' "$ip" | awk -F. 'NF!=4 { exit 2 } { for(i=1;i<=4;i++) if($i !~ /^[0-9]+$/ || $i>255) exit 2; if($1==0 || $1==10 || $1==127 || ($1==100 && $2>=64 && $2<=127) || ($1==169 && $2==254) || ($1==172 && $2>=16 && $2<=31) || ($1==192 && (($2==0 && ($3==0 || $3==2)) || $2==168)) || ($1==198 && (($2>=18 && $2<=19) || ($2==51 && $3==100))) || ($1==203 && $2==0 && $3==113) || $1>=224) exit 1; exit 0 }' >/dev/null 2>&1
+			printf '%s\n' "$ip" | awk -F. 'NF!=4 { exit 2 } { for(i=1;i<=4;i++) if($i !~ /^[0-9]+$/ || $i>255) exit 2; if($1==0 || $1==10 || $1==127 || ($1==100 && $2>=64 && $2<=127) || ($1==169 && $2==254) || ($1==172 && $2>=16 && $2<=31) || ($1==192 && (($2==0 && ($3==0 || $3==2)) || $2==168)) || ($1==198 && ($2==51 && $3==100)) || ($1==203 && $2==0 && $3==113) || $1>=224) exit 1; exit 0 }' >/dev/null 2>&1
 			rc=$?
 			[ "$rc" = 1 ] && return 0
 			[ "$rc" = 0 ] && return 1
@@ -873,12 +885,27 @@ oc_url_host_ips() {
 	#   * 解析不出来  -> 放宽，交给 curl 自己解析（内网设备常常没有 DNS 工具，
 	#     这正是不放宽就永远拉不到模型的原因）
 	# 所以单独暴露一个"只取结果、不做判定"的版本。
+	#
+	# **busybox nslookup 的坑（真机实测）**：它的输出第一段是 DNS 服务器自己 ——
+	#   Server:		127.0.0.1
+	#   Address:	127.0.0.1:53
+	# 旧解析把 `127.0.0.1:53` 当成了 IP：它按 `.` 切是 4 段、末段是 "1:53"，
+	# oc_url_ip_private 里的数字校验失败后返回"不是私网"，于是被当成可用地址
+	# 交给 curl --resolve —— 直接报 `(49) Could not parse CURLOPT_RESOLVE entry`。
+	# 规则：**同时含点和冒号的 token 一定是 "IPv4:端口"（服务器行），丢弃**；
+	# 纯 IPv6 不含点，正常保留。
 	local host="$1"
 	[ -n "$host" ] || return 1
 	if command -v getent >/dev/null 2>&1; then
 		getent ahosts "$host" 2>/dev/null | awk '{print $1}'
 	elif command -v nslookup >/dev/null 2>&1; then
-		nslookup "$host" 2>/dev/null | awk '/[Aa]ddress[^:]*:[[:space:]]/ { print $NF }'
+		nslookup "$host" 2>/dev/null | awk '
+			/[Aa]ddress[ \t]*:[ \t]/ {
+				v = $NF
+				if (v ~ /\./ && v ~ /:/) next        # 127.0.0.1:53 —— 服务器行
+				if (v ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print v; next }
+				if (v ~ /^[0-9A-Fa-f]*:[0-9A-Fa-f:]*$/)    { print v; next }
+			}'
 	else
 		return 1
 	fi
@@ -902,32 +929,21 @@ EOF
 }
 
 oc_url_resolve_public() {
-	local host="$1" line ip found=""
+	local host="$1" ip found=""
 	OC_URL_IP=""
 	[ -n "$host" ] || return 1
 	case "$host" in
 		*[!0-9.]*)
-			if command -v getent >/dev/null 2>&1; then
-				while IFS= read -r line; do
-					ip="$(printf '%s\n' "$line" | awk '{print $1}')"
-					[ -n "$ip" ] || continue
-					oc_url_ip_private "$ip" && return 1
-					[ -n "$found" ] || found="$ip"
-				done <<EOF
-$(getent ahosts "$host" 2>/dev/null)
+			# 域名：解析逻辑统一走 oc_url_host_ips（含 busybox nslookup
+			# 服务器行的过滤）。不要在这里再抄一份解析 —— 两份实现必然漂移，
+			# 而 `127.0.0.1:53` 这个坑正是抄第二份时漏掉的。
+			while IFS= read -r ip; do
+				[ -n "$ip" ] || continue
+				oc_url_ip_private "$ip" && return 1
+				[ -n "$found" ] || found="$ip"
+			done <<EOF
+$(oc_url_host_ips "$host")
 EOF
-			elif command -v nslookup >/dev/null 2>&1; then
-				while IFS= read -r ip; do
-					case "$ip" in *.*|*:*)
-						oc_url_ip_private "$ip" && return 1
-						[ -n "$found" ] || found="$ip" ;;
-					esac
-				done <<EOF
-$(nslookup "$host" 2>/dev/null | awk '/[Aa]ddress[^:]*:[[:space:]]/ { print $NF }')
-EOF
-			else
-				return 1
-			fi
 			;;
 		*) found="$host" ;;
 	esac

@@ -1,8 +1,20 @@
-<!-- version: 1.8.66 -->
+<!-- version: 1.8.67 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.67
+
+真机实测确认 1.8.66 的两个残留问题，都已修掉 —— 现在 8 个服务商全部能拿到真实模型清单。
+
+- **198.18.0.0/15 被误判成内网，整机所有走代理的域名被拒**：这个段是 RFC 2544 网络设备基准测试段，同时是 Clash / sing-box / mihomo 这类透明代理 **fake-ip 模式的默认段**。开着 OpenClash 的设备上，`github.com` / `openrouter.ai` / 各家 API 的域名全部解析成 `198.18.x.x`，而真实流量由代理接管（`curl` 实测 HTTP 200）。旧代码把它当内网拒绝，于是模型列表、公开目录、上游接口全线失败 —— 网络其实是通的。现已放行该段；`169.254.169.254` 云元数据、RFC1918、环回仍然拒绝。
+- **busybox `nslookup` 的服务器行被当成 IP**：输出首段是 `Address: 127.0.0.1:53`（DNS 服务器自己），旧解析把它当解析结果交给 `curl --resolve`，实测报 `(49) Could not parse CURLOPT_RESOLVE entry`。现在丢弃"同时含点和冒号"的 token（IPv4:端口），纯 IPv6 正常保留。
+- **`models list --provider <id>` 对未配置的服务商会直接失败**：该参数在 provider 尚未配置/未装插件时返回非零并打印 "The CLI command failed."，而不是返回空清单。用户在模型页选一个还没配过的服务商（Moonshot、Qwen、Anthropic…）时，目录这一层永远拿不到东西。改为 `models list --all --plain` 一次取全量、再按 `<provider>/` 前缀本地过滤：一次 CLI 调用服务所有服务商，未配置的只是"没有对应行"，不会让整次调用失败。
+- **公开目录缺 qwen 的厂商前缀**：没有 Key 的 Qwen 因此永远拿不到清单。已补 `qwen → qwen`。
+
+真机验证（iStoreOS 25.12.6 / x86_64 / OpenClaw 2026.10.9 / OpenClash fake-ip）：
+`longai`、`deepseek` 走已发布目录；`moonshot`、`qwen`、`anthropic`、`zai`、`minimax`、`google` 走公开目录，8/8 全部返回真实清单（Anthropic 15 个、Qwen 40+ 个、Moonshot 8 个）。
 
 ## 1.8.66
 

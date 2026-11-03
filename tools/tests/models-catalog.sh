@@ -84,11 +84,15 @@ def P(p):
 # ---------------------------------------------------------------- 静态断言
 check('catalog_models()' in src, 'models.sh 新增已发布目录来源 catalog_models')
 body = code_of('catalog_models')
-check('models list' in body and '--provider' in body, '目录查询用 models list --provider')
+check('models list' in body and '--all' in body,
+      '目录查询用 models list --all（真机：--provider 对未配置服务商会直接失败）')
+check('--provider' not in body,
+      '目录查询**不**按 --provider 过滤（未配置的 provider 会让整次调用失败）')
 check('--plain' in body, '目录查询用 --plain（一行一个 key，stdout 无噪声）')
-check('--all' not in body, '目录查询不带 --all（--provider 已隐含完整目录）')
 check('[ "$rc" -ne 0 ]' in body, '非零退出不解析 stdout（用法说明不是模型清单）')
 check('oc_run_q 15' in body, 'node 冷启动给足 15 秒（太短会把"慢"误判成"没有"）')
+check('index($0, prov "/") != 1' in body, '按 "<provider>/" 前缀本地过滤')
+check('尚未配置' in body, '目录里没有该 provider 时给出可读原因')
 check('models list' not in code_of('models_public'),
       '公开目录路径没有混进 CLI 调用')
 
@@ -133,6 +137,34 @@ check('oc_url_ip_private' in url_body, '字面量内网地址仍然被拒绝')
 check('oc_url_host_resolves_private' in url_body, '解析到内网的域名仍然被拒绝')
 
 
+
+# ---------------------------------------------------------------- 真机回归（2026-11-04）
+# 以下三条全部来自真机实测，任何一条回退都会让用户重新看到"实时获取失败"。
+
+# 1) 198.18.0.0/15 是 Clash/sing-box fake-ip 默认段，**不能**判成内网。
+#    实测设备：github.com / openrouter.ai / 各家 API 全解析到 198.18.x.x，
+#    而 curl 走代理返回 200。误判的后果是整机所有走代理的域名被拒。
+lib = (proj / 'root/usr/libexec/openclaw/lib.sh').read_text(encoding='utf-8')
+# 只看代码行：注释里会解释"为什么放行 198.18"，那是文档不是实现
+ipp = NL.join(l.split('#', 1)[0] for l in func('oc_url_ip_private', lib).splitlines())
+check('$2>=18' not in ipp, '198.18.0.0/15 不再被当作内网（fake-ip 代理段）')
+check('169 && $2==254' in ipp, '云元数据 169.254.0.0/16 仍然拒绝')
+check('$1==10 ' in ipp or '$1==10|' in ipp or '$1==10 ' in ipp, 'RFC1918 10/8 仍然拒绝')
+check('$1==127' in ipp, '环回 127/8 仍然拒绝')
+
+# 2) busybox nslookup 的输出首段是 DNS 服务器自己（Address: 127.0.0.1:53）。
+#    旧解析把它当 IP 交给 curl --resolve，实测报 (49) Could not parse。
+hips = func('oc_url_host_ips', lib)
+check('v ~ /\\./ && v ~ /:/' in hips or 'v ~ /\./ && v ~ /:/' in hips,
+      'nslookup 解析丢弃 "IPv4:端口" 的服务器行')
+check('nslookup' in hips, '仍然使用 nslookup 兜底（内网设备常见）')
+
+# 3) 公开目录必须能覆盖 qwen（实测漏过：没有 Key 的 Qwen 永远拿不到清单）
+pp = func('public_prefix')
+check('qwen)' in pp and "'qwen'" in pp, 'public_prefix 覆盖 qwen')
+for k in ['moonshot', 'anthropic', 'zai', 'minimax', 'google', 'openai', 'deepseek']:
+    check(k + ')' in pp, 'public_prefix 覆盖 ' + k)
+
 # ---------------------------------------------------------------- 目录解析
 runner = work / 'catalog.sh'
 runner.write_text(NL.join([
@@ -170,12 +202,19 @@ got = run_catalog('moonshot/kimi-k2.5' + NL + 'moonshot/kimi-k2-turbo-preview' +
 check(got == ['kimi-k2-turbo-preview', 'kimi-k2.5'],
       '带 provider 前缀的 key 被剥掉、去重、排序', repr(got))
 
-got = run_catalog('kimi-k2.5' + NL + 'MiniMax-M2' + NL + 'qwen3:7b')
-check(got == ['MiniMax-M2', 'kimi-k2.5', 'qwen3:7b'],
-      '不带前缀的 key 原样保留，大小写与冒号不丢', repr(got))
+# `--all` 会返回所有 provider 的行；只保留当前 provider 的
+got = run_catalog('moonshot/kimi-k3' + NL + 'deepseek/deepseek-v4-pro' + NL
+                  + 'longai/glm-5.3' + NL + 'moonshot/kimi-k2.5')
+check(got == ['kimi-k2.5', 'kimi-k3'],
+      '只保留当前 provider 的行，其它 provider 被过滤掉', repr(got))
 
-got = run_catalog('No models found.' + NL + 'Usage: openclaw models list' + NL
-                  + 'kimi-k2.5')
+# 没有前缀的裸 id 不再被采纳（`--all` 的输出一定带前缀；裸行只可能是噪声）
+got = run_catalog('kimi-k2.5' + NL + 'MiniMax-M2' + NL + 'moonshot/kimi-k3')
+check(got == ['kimi-k3'], '没有 provider 前缀的行被丢弃', repr(got))
+
+got = run_catalog('moonshot/No models found.' + NL
+                  + 'moonshot/Usage: openclaw models list' + NL
+                  + 'moonshot/kimi-k2.5')
 check(got == ['kimi-k2.5'], '带空格的提示语不会被当成模型 id', repr(got))
 
 got = run_catalog('Usage: openclaw models list [options]', rc=1)
@@ -187,10 +226,11 @@ got = run_catalog('')
 check(got == [], '空输出不产出模型', repr(got))
 check('空清单' in run_catalog_msg(''), '空输出时诊断说明是空清单')
 
-got = run_catalog('No models found.')
-check(got == [], '全是提示语时不产出模型', repr(got))
-check('没有可识别' in run_catalog_msg('No models found.'),
-      '输出里没有可识别模型时诊断说明原因')
+# 目录里没有这个 provider（未配置/未装插件）——真机实测就是这个分支
+got = run_catalog('deepseek/deepseek-v4-pro' + NL + 'longai/glm-5.3')
+check(got == [], '目录里没有该 provider 时不产出模型', repr(got))
+check('尚未配置' in run_catalog_msg('deepseek/deepseek-v4-pro' + NL + 'longai/glm-5.3'),
+      '未配置的 provider 给出可读原因（不是"退出码 1"）')
 
 # catalog_models 必须用全局变量回传，否则诊断会在子 shell 里丢失
 runner_src = runner.read_text(encoding='utf-8')

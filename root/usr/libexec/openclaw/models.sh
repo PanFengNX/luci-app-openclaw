@@ -429,22 +429,26 @@ live_has() {
 catalog_models() {
 	# catalog_models <provider> -> 结果写进 OC_CM_OUT，诊断写进 OC_CM_MSG
 	#
-	# 官方文档（docs.openclaw.ai/cli/models）写得很明确：
-	#   `openclaw models list --provider <id>` 读的是该 provider **已发布的模型
-	#   目录**，不等待 provider 发现、不联网、不需要 API Key；
-	#   `--provider` 已经隐含完整目录，不必再带 `--all`；
-	#   `--plain` 的 stdout 是「一行一个模型 key」，诊断信息一律走 stderr。
+	# 官方文档（docs.openclaw.ai/cli/models）：
+	#   `openclaw models list --plain` 的 stdout 是「一行一个模型 key」，
+	#   形如 `provider/model`，诊断信息一律走 stderr。
 	#
-	# 这正是"这个服务商支持哪些模型"的权威答案，而且在内网/无外网环境下依然可用。
-	# 旧实现只问上游 /models：没有 Key 或没有外网时永远拉不到，页面长期停在
-	# 随包预设上（用户实测：三个 provider 全部"实时获取失败"）。
+	# **不能按 `--provider <id>` 过滤**（真机实测）：该参数对「未配置/未装插件」
+	# 的 provider 会直接失败（打印 "The CLI command failed." 并返回非零），
+	# 而不是返回空清单。用户在模型页选一个还没配置过的服务商（Moonshot、Qwen、
+	# Anthropic…）时，目录这一层就永远拿不到东西 —— 这正是"选了服务商却没有
+	# 实时模型"的第二个原因。
+	#
+	# 所以改成 `--all --plain` 一次取全量，再按 `<provider>/` 前缀本地过滤：
+	#   * 一次 CLI 调用服务所有 provider（切换下拉不再重复启动 node）；
+	#   * 未配置的 provider 只是"没有对应行"，不会让整次调用失败。
+	# 真机实测：`models list --all --plain` 输出 11 行（longai/* 与 deepseek/*），
+	# 耗时约 3 秒。
 	#
 	# **不用命令替换调用**：`ids="$(catalog_models p)"` 会把函数放进子 shell，
 	# 失败原因（OC_CM_MSG）就丢了 —— 页面只能看到一句笼统的"未能取得模型列表"。
 	# 结果与原因都通过全局变量回传（与 cloud_probe_latest 同一约定）。
 	# 返回值：0 = 有清单；1 = 没有（原因见 OC_CM_MSG）。
-	#
-	# node 启动 1~5 秒，所以只在用户选定 provider / 点「刷新模型」时调用。
 	local p="$1" out rc
 	OC_CM_OUT=""
 	OC_CM_MSG=""
@@ -455,8 +459,8 @@ catalog_models() {
 	fi
 	# 超时给足 15 秒：路由器上 node 冷启动常常超过 5 秒，给 8 秒会把
 	# "慢"误判成"没有"，页面于是又退回预设（那正是要修的现象）。
-	out="$(oc_run_q 15 models list --provider "$p" --plain)"; rc=$?
-	# 非零退出说明这个版本不认 --plain / 不认识这个 provider。此时 stdout 可能
+	out="$(oc_run_q 15 models list --all --plain)"; rc=$?
+	# 非零退出说明这个版本不认 --plain / CLI 本身出错。此时 stdout 可能
 	# 是用法说明，绝不能当模型清单用 —— 直接放弃，交给上层回退。
 	if [ "$rc" -ne 0 ]; then
 		OC_CM_MSG="openclaw models list 退出码 $rc（可能不支持 --plain）"
@@ -471,8 +475,9 @@ catalog_models() {
 			sub(/\r$/, "", $0)
 			gsub(/^[ \t]+|[ \t]+$/, "", $0)
 			if ($0 == "") next
-			# 有的版本带 provider 前缀（moonshot/kimi-k2.5），有的不带
-			if (index($0, prov "/") == 1) $0 = substr($0, length(prov) + 2)
+			# 只要属于当前 provider 的行；其余 provider 直接跳过
+			if (index($0, prov "/") != 1) next
+			$0 = substr($0, length(prov) + 2)
 			# 形状过滤：模型 key 里不会有空格（带空格的 token 一定是表格列或
 			# 提示语）。允许大小写与 . _ : - /（MiniMax-M2、嵌套 id 都是合法值）。
 			if ($0 !~ /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/) next
@@ -480,7 +485,9 @@ catalog_models() {
 		}
 	' | sort -u)"
 	if [ -z "$OC_CM_OUT" ]; then
-		OC_CM_MSG="openclaw models list 的输出里没有可识别的模型"
+		# 目录里没有这个 provider 的行：它还没被配置/装插件。这不是错误，
+		# 但要让上层知道"目录这一层没拿到"，好继续去问上游或公开目录。
+		OC_CM_MSG="本机 OpenClaw 目录里没有 ${p} 的模型（该服务商尚未配置）"
 		return 1
 	fi
 	return 0
@@ -740,6 +747,12 @@ PUBLIC_MODELS_URL="https://openrouter.ai/api/v1/models"
 public_prefix() {
 	# public_prefix <provider> -> 公开目录里的厂商前缀；无映射时返回 1。
 	# 没在表里的 provider 不做公开目录查询，直接按原来的方式报错。
+	#
+	# 前缀必须与 openrouter 目录里的实际写法一致（实测取值）：
+	#   qwen/qwen3.8-max-prime、moonshotai/kimi-k3、anthropic/claude-haiku-5.5、
+	#   z-ai/glm-5.3-prime、minimax/minimax-m3、google/gemini-4-argon、
+	#   deepseek/deepseek-v4.1-flash、openai/gpt-6.1-terra-pro
+	# **qwen 曾经漏了**：没有 Key 的 Qwen 因此永远拿不到清单（用户实测之一）。
 	case "$1" in
 		zai)       printf '%s' 'z-ai' ;;
 		openai)    printf '%s' 'openai' ;;
@@ -747,6 +760,7 @@ public_prefix() {
 		anthropic) printf '%s' 'anthropic' ;;
 		google)    printf '%s' 'google' ;;
 		moonshot)  printf '%s' 'moonshotai' ;;
+		qwen)      printf '%s' 'qwen' ;;
 		minimax)   printf '%s' 'minimax' ;;
 		*)         return 1 ;;
 	esac
