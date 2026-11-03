@@ -436,16 +436,12 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
     <code>plugins list</code>、<code>models list --provider zai</code>、
     <code>config set gateway.bind lan</code>、<code>security audit</code>、
     <code>skills list</code>。单条命令超时 120 秒。<br>
-    出于安全考虑，只允许白名单内的子命令：status、version、help、doctor、health、update、
-    models、providers、tools、mcp、devices、plugins、channels、gateway、config、agents、
-    agent、sessions、cron、skills、logs、onboard、message、memory、workspace、security、
-    secrets、tasks、nodes、pairing、qr、hooks、webhooks、dns、docs、directory、wiki、
-    sandbox、approvals、acp、infer、capability、completion、backup、system、dashboard；
+    除下面列出的少数命令外，其余子命令都可用（内网环境，以功能可用为准）；
     也支持 <code>--version</code> 与 <code>--help</code>。参数中不允许出现
-    <code>$ ` ; | &amp; &lt; &gt; ( ) { } ! \</code>。<br>
-    不在白名单里的子命令会直接拒绝 —— 这条线是防止「命令行」变成任意 root 执行的唯一屏障。
-    <b>reset / uninstall / migrate / tui / chat / browser / exec-policy / node</b>
-    是故意不加的：前三个不可逆，中间三个在非交互环境里会挂住，后两个能绕过这条线。<br>
+    <code>$ ` ; | &amp; &lt; &gt; ( ) { } ! \</code> —— 这些字符可能把参数变成命令。<br>
+    <b>reset / uninstall / migrate</b> 不可逆，<b>tui / chat / browser</b>
+    在非交互环境里会等终端而挂住，<b>exec-policy / node</b> 能绕过本限制，
+    所以这几条会被直接拒绝。除此之外的命令请自行确认后果再执行。<br>
     <code>gateway auth-token --show</code> 这类命令只在交互式终端下输出，这里会用
     <code>script(1)</code> 造一个伪终端来跑；本机没有 script 时会明确告诉你，而不是静默空白。
   </div>

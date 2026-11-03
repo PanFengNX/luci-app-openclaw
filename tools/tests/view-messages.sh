@@ -564,19 +564,16 @@ check('"gateway auth-token"*) return 0' in cli15, 'gateway auth-token 走 pty')
 check('oc_pty_run 120' in cli15, 'cmd_run 对这类命令改用 oc_pty_run')
 check('请在 SSH 里直接执行' in cli15, '缺 script 时给出可操作提示')
 
-# 白名单：新增的必须是"不能变成 shell 命令"的；危险的一个都不能进
-for _c in ('secrets', 'tasks', 'nodes', 'qr', 'hooks', 'webhooks'):
-    check(('	%s = true' % _c) in ctrl15 or (' %s = true' % _c) in ctrl15,
-          '只读顶层白名单含 %s' % _c)
-check('local RUN_TOP' in ctrl15 and 'local RUN_SUB' in ctrl15 and 'run_argv_allowed' in ctrl15,
-      'api_run 使用完整 argv 只读白名单')
-for _c in ('agent', 'message', 'system', 'update', 'security', 'backup'):
-    check(('	%s = true' % _c) not in ctrl15 and (' %s = true' % _c) not in ctrl15,
-          '高风险顶层命令不在首 token 白名单 %s' % _c)
+# 命令行采用黑名单 + argv 结构约束：内网环境开放正常 CLI，危险入口拒绝
+check('local RUN_DENY' in ctrl15 and 'run_argv_allowed' in ctrl15,
+      'api_run 使用危险命令黑名单')
+for _c in ('reset', 'uninstall', 'migrate', 'tui', 'chat', 'browser', 'node'):
+    check(_c in ctrl15, '黑名单包含 %s' % _c)
+check('exec-policy' in ctrl15, '黑名单包含 exec-policy')
 
-# 页面说明必须与白名单一致：写了却不放行 = 骗人
+# 页面说明必须与真实策略一致
 check('gateway auth-token --show' in term15, '页面示例含 auth-token --show')
-check('security' in term15 and 'pairing' in term15, '页面列出新增的子命令')
+check('除此之外的命令' in term15, '页面说明内网开放策略')
 check('script(1)' in term15, '页面说明 pty 机制')
 
 # ---- 删除密码：只存哈希、口令不进 argv、服务端强制 ----

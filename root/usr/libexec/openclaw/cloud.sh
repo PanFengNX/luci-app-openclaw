@@ -3915,6 +3915,14 @@ cmd_backup_bg() {
 		fi
 		rm -f "$CLOUD_BK_PID" "$CLOUD_BK_RC" 2>/dev/null
 	fi
+	# 定时备份（backup-run）自己会取全局锁；手动这条不取锁，所以必须显式问
+	# 一次锁：否则「定时任务正在打包时用户又点立即备份」会同时跑两份 tar，
+	# 既互相抢磁盘，也会在轮转时把对方刚写的归档算进待删集合。
+	if oc_lock_busy; then
+		printf '{"ok":false,"busy":true,"error":"%s"}\n' \
+			"$(jstr "另一个备份/安装任务正在运行，请等它结束")"
+		return 0
+	fi
 	rm -f "$CLOUD_BK_RC" 2>/dev/null
 	: >"$CLOUD_BK_LOG" 2>/dev/null || cloud_fail "无法写入进度日志：$CLOUD_BK_LOG"
 
@@ -3923,7 +3931,16 @@ cmd_backup_bg() {
 	bk_log "[local] 开始打包（$([ "$ws" = "1" ] && echo '配置 + 会话 + 工作区' || echo '配置 + 会话，不含工作区')）"
 	bk_log "[local] tar 不提供可靠总量，故不显示百分比；完成时给出文件名与体积"
 
-	( backup_bg_worker "$ws" ) >/dev/null 2>&1 </dev/null &
+	# 用 setsid 脱离当前会话再跑：用户点完「立即备份」就关页面 / 关 SSH 时，
+	# uhttpd 的 CGI 进程会退出，挂在它下面的子进程会收到 SIGHUP 被打断，
+	# 备份就半途死掉（表现为「进度停在打包中，之后没了」）。
+	# setsid 让 worker 自成一个会话，父进程退出不再影响它。
+	# 没有 setsid（精简 busybox）时退回普通后台启动：至少不比原来差。
+	if command -v setsid >/dev/null 2>&1; then
+		( setsid backup_bg_worker "$ws" ) >/dev/null 2>&1 </dev/null &
+	else
+		( backup_bg_worker "$ws" ) >/dev/null 2>&1 </dev/null &
+	fi
 	printf '%s\n' "$!" >"$CLOUD_BK_PID" 2>/dev/null || true
 	printf '{"ok":true,"started":true}\n'
 }

@@ -728,44 +728,46 @@ function api_apply()
 	out({ ok = run_rc(MODELS .. " apply " .. q(p) .. " - " .. q(mdl) .. " " .. q(base)) })
 end
 
--- api_run is deliberately a small, complete argv allowlist.  Do not add a
--- top-level command here merely because q() quotes it: several OpenClaw
--- commands execute actions (agent, message, system, update, etc.).
-local RUN_TOP = {
-	status = true, version = true, health = true, doctor = true,
-	providers = true, tools = true, secrets = true, tasks = true,
-	nodes = true, qr = true, hooks = true, webhooks = true
+-- api_run 的安全边界用「黑名单 + 结构约束」，不再用窄白名单。
+--
+-- 为什么放开：这是内网环境，用户需要在浏览器里重新认证、排障、看状态，
+-- 白名单漏一条就等于功能不可用（实测 `gateway auth-token --show` 被拒，
+-- 内网无法取回 token 就无法打开控制台）。功能可用优先。
+--
+-- 仍然守住的三条线：
+--   1. 不做 shell 解析：argv 逐 token 单引号转义后才交给 cli.sh，
+--      cli.sh 再拒绝 $ ` ; | & < > ( ) { } ! \ 这些能变成命令的字符；
+--   2. 不可逆 / 会挂死 / 能绕过的子命令直接拒绝（见 RUN_DENY）；
+--   3. 允许照官方文档粘 `openclaw xxx`，前缀去掉后按同一套规则判。
+local RUN_DENY = {
+	-- 不可逆：删数据、卸载、迁移
+	reset = true, uninstall = true, migrate = true,
+	-- 非交互环境会挂住（等 TTY / 等输入）
+	tui = true, chat = true, browser = true,
+	-- 能绕过这条防线（自己执行任意策略 / 任意脚本）
+	["exec-policy"] = true, node = true,
 }
-local RUN_SUB = {
-	mcp = { list = true, status = true },
-	devices = { list = true, status = true },
-	pairing = { list = true, status = true },
-	backup = { list = true },
-}
-local RUN_BACKUP_FILE = "^[A-Za-z0-9][A-Za-z0-9._-]*%.tar%.gz$"
+-- 这些顶层命令一旦带子命令就等于「改运行态」，但不至于让系统紊乱，
+-- 允许执行；需要用户自己知道在做什么。
 
 local function run_argv_allowed(argv)
 	if #argv == 0 then return false end
-	local sub = argv[1]
-	if RUN_TOP[sub] then return #argv == 1 end
-	if sub == "backup" and argv[2] == "verify" then
-		return #argv == 3 and argv[3]:match(RUN_BACKUP_FILE) ~= nil
+	-- 允许照官方文档写全名：剥掉一层前缀（cli.sh 侧也会再剥一次）
+	if argv[1] == "openclaw" or argv[1] == "/usr/bin/openclaw" then
+		table.remove(argv, 1)
 	end
-	return RUN_SUB[sub] ~= nil and #argv == 2 and RUN_SUB[sub][argv[2]] == true
+	if #argv == 0 then return false end
+	local first = argv[1]
+	if first:match("^%-%-") then return true end   -- --version / --help
+	return RUN_DENY[first] ~= true
 end
 
 function api_run()
 	local cmd = tostring(http.formvalue("cmd") or "status")
 	local argv = {}
 	for tok in cmd:gmatch("%S+") do argv[#argv + 1] = tok end
-	-- The UI accepts CLI syntax, but never accepts an executable prefix or
-	-- silently strips a token: the whole submitted argv must match a shape.
-	if argv[1] == "openclaw" or argv[1] == "/usr/bin/openclaw" then
-		out({ ok = false, output = "不支持的命令：请只提交子命令及其只读参数" })
-		return
-	end
 	if not run_argv_allowed(argv) then
-		out({ ok = false, output = "不支持的只读命令或参数" })
+		out({ ok = false, output = "该命令被安全策略拒绝（不可逆或可能挂住）：" .. cmd })
 		return
 	end
 	local args = ""
