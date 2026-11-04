@@ -8,3 +8,4 @@ dist-web/*.ipk
 .workbuddy/
 *.pyc
 __pycache__/
+.release-body-*.md

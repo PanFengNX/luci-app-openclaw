@@ -307,6 +307,19 @@ preflight() {
 	fi
 	rm -f "$probe"
 
+	# 升级前先清掉 OpenClaw 自己留下的 SQLite 只读快照。
+	#
+	# 这些快照是 OpenClaw 每次以只读方式打开数据库时复制出来的**整库副本**
+	# （~/.cache/openclaw/openclaw-sqlite-readonly-v2-*），只在进程正常退出时
+	# 才删；被 kill / 崩溃 / 磁盘满打断就永久残留。实测一台设备积了 63GB，
+	# 磁盘满之后 doctor 建不出新快照 → schema 迁移中断 → 网关起不来
+	# （页面显示"运行中（端口未应答）"）。每升一次级就多漏一个，所以表现成
+	# "升级后经常出问题"。这里在升级前清一次（保留最新的 1 个、只删 10 分钟
+	# 以前的，避免动到正在用的），升级后再清一次收尾。
+	_cleaned="$(oc_clean_sqlite_snapshots 1 600)"
+	case "$_cleaned" in ''|*[!0-9]*) _cleaned=0 ;; esac
+	[ "$_cleaned" -gt 0 ] && ilog "清理 OpenClaw 只读快照：$_cleaned 个（每个都是整库副本，磁盘满的常见原因）"
+
 	local free
 	free="$(oc_free_mb "$BASE_DIR")"
 	[ -n "$free" ] || free=0
@@ -1033,6 +1046,13 @@ finish() {
 	oc_pin_system_tmp_root
 	oc_sweep_stale_tmp
 
+	# 收尾再清一次 SQLite 只读快照：本次升级的 doctor / 迁移过程本身也会
+	# 产生若干个（每个是整库副本）。不留在磁盘上，下次升级就不会因为空间
+	# 不足而失败。这里连"最新 1 个"也不保留 —— 安装结束时没有读者在用它们。
+	_cleaned2="$(oc_clean_sqlite_snapshots 0 60)"
+	case "$_cleaned2" in ''|*[!0-9]*) _cleaned2=0 ;; esac
+	[ "$_cleaned2" -gt 0 ] && ilog "收尾清理只读快照：$_cleaned2 个"
+
 	# 以**服务用户身份**验证核心路径可访问。这是唯一可信的判据 ——
 	# root 视角看不出服务用户能否读写。失败即判安装失败：
 	# 与其"装完了但网关 EACCES 起不来"，不如装不上并说清原因。
@@ -1069,7 +1089,11 @@ run_doctor_after_upgrade() {
 	# openclaw-0，而 oc_fix_perms 的 chown -R 又把它改成 998，
 	# 下次 root 再跑就报 "has owner uid 998, expected uid 0" 并拒绝一切
 	# 需要状态的操作。以 998 跑，uid 自始至终一致。
-	out="$(oc_as_user env HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+	# TMPDIR 也必须显式给：不指定时 OpenClaw 会回退到共享 /tmp 下的目录，
+	# 属主不符会被它自己的安全校验拒绝（实测报 "Unsafe fallback OpenClaw
+	# temp dir ... do not chmod a shared temp directory to 0700"）。
+	out="$(oc_as_user env HOME="$HOME_DIR" TMPDIR="$BASE_DIR/tmp" \
+		PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
 		"$oc" doctor --fix 2>&1)"
 	rc=$?
 	if [ "$rc" -eq 0 ]; then

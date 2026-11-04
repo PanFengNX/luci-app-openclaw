@@ -706,6 +706,58 @@ start_service() {
 	# 身份一眼可查：排查时不用再猜"这次是谁在跑"
 	logger -t openclaw "启动：user=$OC_USER(uid=$(id -u "$OC_USER" 2>/dev/null)) base=$base state=$state tmp_root=$(stat -c '%U:%a' /tmp/openclaw 2>/dev/null)"
 
+	# ---------------------------------------------------------------- 磁盘自愈
+	# OpenClaw 每次以**只读**方式打开 SQLite（网关启动、doctor、会话读取都会
+	# 走到）都会把整个数据库复制一份到 ~/.cache/openclaw/，目录名
+	# openclaw-sqlite-readonly-v2-*；清理只注册在进程正常退出时。被 kill /
+	# 崩溃打断就永久残留，每个都是整库大小（实测 1.2GB）。
+	#
+	# 而 procd 的 respawn 是"永不放弃"：启动失败 → 60~90 秒后重试 → 又漏一个
+	# 整库副本。实测 20 个 startup_failed 崩溃包对应 51 个残留快照、63GB，
+	# 把 98GB 的盘写到 100%，然后 doctor 再也建不出快照、迁移失败、网关起不来
+	# —— 页面显示"运行中（端口未应答）"。这就是"升级后经常出问题"的完整链路。
+	#
+	# 三件事，缺一不可：
+	#   1) 每次启动前清掉残留快照（正常情况下是 0 个，开销可忽略）
+	#   2) 空间不足时拒绝启动 —— 满盘状态下重启只会无限复制、无限失败
+	#   3) 上次失败若是 schema 不匹配，后台跑一次 doctor --fix 让它自愈
+	_oc_snap="$(oc_clean_sqlite_snapshots 0 300 2>/dev/null)"
+	case "$_oc_snap" in ''|*[!0-9]*) _oc_snap=0 ;; esac
+	[ "$_oc_snap" -gt 0 ] && logger -t openclaw "启动前清理 OpenClaw 只读快照：$_oc_snap 个（每个是整库副本）"
+
+	_oc_free="$(oc_free_mb "$base" 2>/dev/null)"
+	case "$_oc_free" in ''|*[!0-9]*) _oc_free=0 ;; esac
+	if [ "$_oc_free" -lt 200 ]; then
+		logger -t openclaw "拒绝启动：可用空间仅 ${_oc_free} MB。每次启动都会复制整库，满盘时只会无限失败；请清理空间或点「一键修复」"
+		return 1
+	fi
+
+	# schema 不匹配 = 升级后数据库需要迁移。doctor --fix 是官方迁移入口，
+	# 但必须在服务用户身份 + 正确的 HOME/TMPDIR 下跑（否则会撞上
+	# "Unsafe fallback OpenClaw temp dir" 直接拒绝）。放后台：迁移可能跑几十秒，
+	# 不能卡住 procd 的 start；下一次 respawn 会自然成功。
+	_oc_fail="$(ls -t "$state_dir"/logs/stability/*gateway.startup_failed.json 2>/dev/null | head -n1)"
+	if [ -n "$_oc_fail" ] && grep -q "SqliteSchemaMismatchError" "$_oc_fail" 2>/dev/null; then
+		_oc_mark="${OC_RUNDIR:-/tmp/.openclaw}/selfheal-schema"
+		_oc_now="$(date +%s 2>/dev/null)"
+		case "$_oc_now" in ''|*[!0-9]*) _oc_now=0 ;; esac
+		_oc_last=0
+		[ -f "$_oc_mark" ] && _oc_last="$(cat "$_oc_mark" 2>/dev/null)"
+		case "$_oc_last" in ''|*[!0-9]*) _oc_last=0 ;; esac
+		# 10 分钟内最多自愈一次，避免把 start 变成循环调用 doctor
+		if [ "$_oc_now" -gt 0 ] && [ $((_oc_now - _oc_last)) -gt 600 ]; then
+			printf '%s\n' "$_oc_now" >"$_oc_mark" 2>/dev/null || true
+			logger -t openclaw "检测到数据库 schema 需要迁移，后台执行 doctor --fix 自愈"
+			if command -v setsid >/dev/null 2>&1; then
+				setsid sh -c 'exec "$1" "$2" doctor --fix' sh "$OC_USER" "$globaldir/bin/openclaw" \
+					</dev/null >>"$base/logs/selfheal-doctor.log" 2>&1 &
+			else
+				( oc_as_user "$globaldir/bin/openclaw" doctor --fix ) \
+					</dev/null >>"$base/logs/selfheal-doctor.log" 2>&1 &
+			fi
+		fi
+	fi
+
 	procd_open_instance "gateway"
 	# token 不作为 --token 传：任何本地用户都能读 /proc/<pid>/cmdline，
 	# 那样凭据在网关运行期间一直世界可读。OPENCLAW_GATEWAY_TOKEN 是官方

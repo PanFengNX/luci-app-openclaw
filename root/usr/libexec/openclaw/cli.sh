@@ -776,8 +776,22 @@ cmd_repair() {	# one click repair
 
 oc_env_doctor() {
 	# run openclaw doctor if available
+	#
+	# **必须以网关用户身份执行**（实测「体检」按钮报错的根因）：
+	# OpenClaw 会校验它的临时目录 <cache>/openclaw-<uid> 属主是否等于当前进程
+	# uid。root 跑会创建 openclaw-0，而 oc_fix_perms 的 chown -R 之后又把它
+	# 改成网关用户（任意 uid，不一定是 998），于是下一次 root 再跑就报
+	#   Unsafe fallback OpenClaw temp dir ".../openclaw-0"; has owner uid N,
+	#   expected uid 0
+	# 并拒绝一切需要状态的操作，页面只显示"共享状态数据库不可读"。
+	# 以网关用户跑，uid 自始至终一致，这个冲突从根上不存在 ——
+	# 且与 install.sh 里的 doctor 调用口径统一。
+	#
+	# TMPDIR 显式指到 $base/tmp：该目录由本插件创建、属主是网关用户、0700、
+	# 落在大容量盘上。不指定时会回退到共享 /tmp 下的目录，属主不符会被拒。
 	if installed; then
-		HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+		oc_as_user env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+			PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
 			oc_timeout 120 "$(oc_oc_bin)" doctor 2>&1 | tail -n 60
 	else
 		printf 'OpenClaw 未安装\n'
@@ -799,7 +813,8 @@ cmd_doctor() {
 			# 先取输出再截尾：管道给 tail 时 $? 恒为 0，
 			# diag 会永远报「完成（退出码 0）」，哪怕 doctor --fix 失败。
 			local _o
-			_o="$(HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+			_o="$(oc_as_user env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+				PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
 				oc_timeout 300 "$(oc_oc_bin)" doctor --fix 2>&1)"
 			printf '%s\n' "$_o" | tail -n 60
 			[ -z "$_o" ] || printf '\n'

@@ -807,12 +807,19 @@ function fillModels(upstream, includePreset){
     MODEL_AUTO_PICKED = '';
     return '';
   }
-  // 用户手动选过的项只要还在清单里就保留；否则优先 Provider 默认模型，
-  // 再否则选第一个可用项。自动选择的结果记在 MODEL_AUTO_PICKED 里，
-  // 供 autoPickText() 判断是否展示「已自动选择」。
+  // 用户手动选过的项只要还在清单里就保留；否则按下面的优先级自动选：
+  //   1. 实时清单的第一项 —— 后端已按版本倒序排好，第一项就是**最新**的。
+  //      以前这里优先选 p.defaultModel（随包预设里写死的旧 id），于是用户
+  //      明明拿到了最新清单，默认项却还停在旧模型上。
+  //   2. 没有实时清单时才退到 Provider 默认模型，再否则第一个可用项。
+  // 自动选择的结果记在 MODEL_AUTO_PICKED 里，供 autoPickText() 判断是否展示
+  // 「已自动选择」。
   var auto = '';
+  var hasLive = !!(upstream && upstream.length);
   if (keep && hasKey(seen, keep)){
     sel.value = keep;
+  } else if (!MODEL_USER_PICKED && hasLive && hasKey(seen, upstream[0])){
+    sel.value = upstream[0]; auto = upstream[0];
   } else if (!MODEL_USER_PICKED && def && hasKey(seen, def)){
     sel.value = def; auto = def;
   } else if (!MODEL_USER_PICKED){

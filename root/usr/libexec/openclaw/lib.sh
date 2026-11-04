@@ -1847,6 +1847,48 @@ oc_clear_stale_state_lock() {
 	return 0
 }
 
+oc_heal_openclaw_cache_dirs() {
+	# oc_heal_openclaw_cache_dirs <target-uid> -> 清掉属主与目标 uid 不符的
+	# <cache>/openclaw-<uid> 临时目录，返回删除数。
+	#
+	# OpenClaw 会校验自己的临时目录 `<cache>/openclaw-<uid>` 的属主必须等于
+	# **当前进程 uid**，否则拒绝一切需要状态的操作（体检、doctor --fix、
+	# 模型清单），报错形如：
+	#   Unsafe fallback OpenClaw temp dir ".../openclaw-0";
+	#   has owner uid 998, expected uid 0
+	#
+	# 这个目录是历史遗留的坑：以前插件用 root 跑过 CLI（生成 openclaw-0），
+	# 随后 oc_fix_perms 的 `chown -R` 把整个数据目录交给网关用户（把 openclaw-0
+	# 也翻成 998）。之后无论用哪个身份跑，总有一方被拒 —— 而且**与具体 uid
+	# 无关**，换一台设备是 1000/1001 也一样。所以判据是"属主是否等于目标
+	# uid"，而不是写死某个数字。
+	#
+	# 这些都是纯缓存目录（可随时重建），删除是安全的；符号链接一律跳过。
+	local want="${1:-}" home d dir owner n=0
+	[ -n "$want" ] || return 0
+	case "$want" in ''|*[!0-9]*) return 0 ;; esac
+	for home in "$(oc_home_dir)" "${XDG_CACHE_HOME:-}" "$HOME"; do
+		[ -n "$home" ] || continue
+		for dir in "$home/.cache"; do
+			[ -d "$dir" ] || continue
+			[ -L "$dir" ] && continue
+			for d in "$dir"/openclaw-*; do
+				[ -d "$d" ] || continue
+				[ -L "$d" ] && continue
+				case "${d##*/}" in
+					openclaw-[0-9]*) ;;
+					*) continue ;;
+				esac
+				owner="$(stat -c '%u' "$d" 2>/dev/null)"
+				case "$owner" in ''|*[!0-9]*) continue ;; esac
+				[ "$owner" = "$want" ] && continue
+				rm -rf "$d" 2>/dev/null && n=$((n + 1))
+			done
+		done
+	done
+	printf '%s' "$n"
+}
+
 oc_as_user() {
 	# oc_as_user <cmd> [args...] —— 以网关用户身份执行命令
 	#
@@ -1865,6 +1907,14 @@ oc_as_user() {
 	[ "$(id -u 2>/dev/null)" = "$(id -u "$u" 2>/dev/null)" ] && { "$@"; return $?; }
 	grep -q "^${u}:" /etc/passwd 2>/dev/null || { "$@"; return $?; }
 
+	# 降权之前先把"属主与目标用户不符"的缓存临时目录清掉。
+	# 不清的后果见 oc_heal_openclaw_cache_dirs() 的注释：OpenClaw 会以
+	# "临时目录属主不对"为由拒绝执行任何需要状态的操作，而页面只会显示
+	# "共享状态数据库不可读"，完全指不到真正原因。这一步是幂等的，
+	# 正常情况下一个目录都不会删。
+	_oc_heal_n="$(oc_heal_openclaw_cache_dirs "$(id -u "$u" 2>/dev/null)" 2>/dev/null)"
+	case "$_oc_heal_n" in ''|0|*[!0-9]*) : ;; *) oc_warn "已清理属主不符的 OpenClaw 缓存目录 ${_oc_heal_n} 个" ;; esac
+
 	# 不传 TMPDIR：root 的上下文里 TMPDIR 绝不能指向 VAR 域，否则
 	# 它的 fallback 临时根会生在 VAR 里，被后来的 chown -R 翻成服务用户，
 	# 从此 root 永久被拒（现场故障的完整成因）。
@@ -1880,6 +1930,71 @@ oc_as_user() {
 	quoted="cd $(printf '%s' "${OC_HOME_FOR_USER:-$HOME}" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/") 2>/dev/null || cd /tmp; $quoted"
 	# shellcheck disable=SC2086
 	su -s /bin/sh "$u" -c "$quoted" 2>/dev/null
+}
+
+oc_clean_sqlite_snapshots() {
+	# oc_clean_sqlite_snapshots [keep_newest] [min_age_sec] -> 打印删除的目录数
+	#
+	# 背景（2026-11-04 真机实测，这是"升级后经常出问题"的根因）：
+	#
+	# OpenClaw 每次以**只读**方式打开 SQLite（doctor、网关启动、会话读取都会
+	# 走到），都会在 `$XDG_CACHE_HOME/openclaw/`（默认 ~/.cache/openclaw）下
+	# 用 copy_file_range **复制一份完整数据库**做私有快照，目录名形如
+	#   openclaw-sqlite-readonly-v2-<6位随机>
+	# 旧版本是 openclaw-sqlite-readonly-<pid>-<随机>。
+	#
+	# 清理只注册在 @openclaw/fs-safe 的 `process.once("exit")` —— 也就是
+	# **只有正常退出才删**。被 SIGKILL / procd 重启 / 崩溃 / 磁盘写满打断时，
+	# 快照永久残留，而且每个都是整库大小。
+	#
+	# 实测后果：一台设备积了 51 个快照 × 约 1.2GB ≈ 63GB，/SSD 用到 100%。
+	# 磁盘满之后，下一次升级时 doctor 无法创建新快照 →
+	# `SQLite read-only worker failed ... No space left on device` →
+	# schema 迁移中断 → 网关启动失败（页面显示"运行中（端口未应答）"）。
+	# 每次升级都会再漏一个，所以表现为"升级后经常出问题"。
+	#
+	# 安全边界：
+	#   * 只匹配这两种**确切**目录名，不做任何递归扫描；
+	#   * 跳过 mtime 在 min_age_sec 以内的（默认 600 秒）—— 可能正被使用；
+	#   * 符号链接不跟随（先判 -d 再判 -L，链接一律跳过）；
+	#   * 只删这些目录本身，不碰同级的其它内容。
+	#
+	# 返回：删除的目录数（整数，写 stdout）。调用方据此决定是否重试。
+	local keep="${1:-0}" min_age="${2:-600}" home dir now n=0 d mt age
+	now="$(date +%s 2>/dev/null)"
+	case "$now" in ''|*[!0-9]*) now=0 ;; esac
+	case "$keep" in ''|*[!0-9]*) keep=0 ;; esac
+	case "$min_age" in ''|*[!0-9]*) min_age=600 ;; esac
+
+	for home in "$(oc_home_dir)" "${XDG_CACHE_HOME:-}" "$HOME"; do
+		[ -n "$home" ] || continue
+		for dir in "$home/.cache/openclaw" "$home/openclaw"; do
+			[ -d "$dir" ] || continue
+			[ -L "$dir" ] && continue
+			# 按 mtime 从新到旧排，前 keep 个保留
+			while IFS= read -r d; do
+				[ -n "$d" ] || continue
+				[ -d "$d" ] || continue
+				[ -L "$d" ] && continue
+				case "${d##*/}" in
+					openclaw-sqlite-readonly-v2-*) ;;
+					openclaw-sqlite-readonly-[0-9]*-*) ;;
+					*) continue ;;
+				esac
+				mt="$(oc_mtime "$d" 2>/dev/null)"
+				case "$mt" in ''|*[!0-9]*) mt=0 ;; esac
+				# mt=0（取不到时间）时按"足够旧"处理：这类残留本来就该清
+				if [ "$mt" -gt 0 ] && [ "$now" -gt 0 ]; then
+					age=$((now - mt))
+					[ "$age" -lt "$min_age" ] && continue
+				fi
+				rm -rf "$d" 2>/dev/null && n=$((n + 1))
+			done <<EOF
+$(ls -dt "$dir"/openclaw-sqlite-readonly-* 2>/dev/null | tail -n +$((keep + 1)))
+EOF
+		done
+	done
+	printf '%s' "$n"
 }
 
 oc_harden_root_paths() {

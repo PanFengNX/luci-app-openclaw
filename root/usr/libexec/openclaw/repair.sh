@@ -113,6 +113,29 @@ NODE_DIR="$(oc_node_dir)"
 OC_DIR="$(oc_oc_dir)"
 CONF="$DATA/openclaw.json"
 
+# 0 ------------------------------------------------- OpenClaw 只读快照残留
+# 每次以只读方式打开 SQLite（doctor / 网关启动 / 会话读取）都会复制一份
+# **整库** 到 ~/.cache/openclaw/openclaw-sqlite-readonly-v2-*，只在进程正常
+# 退出时才删。被 kill / 崩溃 / 磁盘满打断就永久残留 —— 实测一台设备积了
+# 63GB，磁盘满之后升级时 doctor 建不出新快照 → schema 迁移失败 → 网关起不来
+# （状态页显示"运行中（端口未应答）"）。所以修复第一步就是清它。
+_free_before="$(oc_free_mb "$BASE" 2>/dev/null)"
+case "$_free_before" in ''|*[!0-9]*) _free_before=0 ;; esac
+_snap_removed="$(oc_clean_sqlite_snapshots 0 60)"
+case "$_snap_removed" in ''|*[!0-9]*) _snap_removed=0 ;; esac
+_free_after="$(oc_free_mb "$BASE" 2>/dev/null)"
+case "$_free_after" in ''|*[!0-9]*) _free_after=0 ;; esac
+if [ "$_snap_removed" -gt 0 ]; then
+	_gained=$((_free_after - _free_before))
+	[ "$_gained" -lt 0 ] && _gained=0
+	say FIX "清理 OpenClaw 只读快照 ${_snap_removed} 个，回收约 ${_gained} MB"
+else
+	say OK "没有残留的 OpenClaw 只读快照"
+fi
+if [ "$_free_after" -lt 900 ]; then
+	say WARN "可用空间仍然偏低（${_free_after} MB）：升级/迁移可能因空间不足失败"
+fi
+
 # 1 ------------------------------------------------------------- base dir
 if [ ! -d "$BASE" ]; then
 	mkdir -p "$BASE" 2>/dev/null && say FIX "已重建安装目录 $BASE" \

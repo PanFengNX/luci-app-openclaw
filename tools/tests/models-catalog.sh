@@ -119,6 +119,48 @@ check("MODEL_SOURCE_TEXT[r.source]" in view or 'hasKey(MODEL_SOURCE_TEXT, r.sour
       '文案按服务端返回的 source 查表，而不是硬编码分支')
 
 
+
+# ---------------------------------------------------------------- 清单过滤与排序
+# 真机反馈：「有些模型可以，有些模型不行」—— 公开目录里带平台专属后缀
+# （:batch/:free/:extended/-legal）和非对话模型（embedding/tts/图像）在服务商
+# 自己的 API 上根本不存在或不能对话。「默认可选择变为最新」—— 列表要按版本
+# 倒序，前端默认选第一项。
+rank_script = work / 'rank.sh'
+rank_script.write_text(NL.join(['#!/bin/sh', func('models_rank_filter'), 'models_rank_filter', '']),
+                       encoding='utf-8', newline=NL)
+
+SAMPLE = NL.join([
+    'claude-opus-4.8', 'claude-opus-5.5', 'claude-opus-5', 'claude-haiku-4.5',
+    'claude-sonnet-5.5', 'anthropic/claude-opus-5.5:batch', 'qwen3.8-max-prime',
+    'qwen3-max', 'qwen3.5-max', 'text-embedding-3-large', 'gpt-4o-audio-preview',
+    'dall-e-3', 'gemini-3-pro-image', 'glm-5.3-flashx-legal', 'kimi-k3',
+    'kimi-k2.7-code', 'MiniMax-M3', ''])
+
+
+def rank(text):
+    r = subprocess.run(['sh', P(rank_script)], input=text,
+                       capture_output=True, text=True)
+    return [l for l in r.stdout.strip().splitlines() if l]
+
+
+out = rank(SAMPLE)
+check('qwen3.8-max-prime' in out, '正常的对话模型保留')
+check('claude-opus-5.5' in out, 'Anthropic 模型保留')
+check('MiniMax-M3' in out, '大小写混合的 id 保留')
+check('text-embedding-3-large' not in out, 'embedding 模型被剔除')
+check('gpt-4o-audio-preview' not in out, 'audio 模型被剔除')
+check('dall-e-3' not in out, '图像生成模型被剔除')
+check('gemini-3-pro-image' not in out, 'image 变体被剔除')
+check('glm-5.3-flashx-legal' not in out, 'OpenRouter 专属 -legal 变体被剔除')
+check(all(':batch' not in x for x in out), '平台专属 :batch 变体被剔除')
+check(out[0] == 'qwen3.8-max-prime', '最新版本排在第一（前端默认选它）', repr(out[:3]))
+check(out.index('qwen3.5-max') < out.index('qwen3-max'), '同族内 3.5 排在 3 之前')
+check(out.index('claude-opus-5.5') < out.index('claude-opus-4.8'), '同族内 5.5 排在 4.8 之前')
+
+# 前端：有实时清单时默认选第一项（最新），而不是预设里写死的旧 defaultModel
+check('hasLive' in view and 'upstream[0]' in view,
+      '前端默认选中实时清单的第一项（最新）')
+
 # ---------------------------------------------------------------- setkey 回归
 # setkey 从本包第一个版本起就是「位置参数传 Key」的对外签名。apply 改成
 # 只认 --key-file / $OC_APPLY_KEY 之后，setkey 一度 100% 返回 2（功能直接
@@ -303,6 +345,7 @@ def build_url_harness():
         func('json_slice'),
         func('json_model_ids'),
         func('models_url_fail'),
+        func('models_rank_filter'),
         func('models_json'),
         func('models_url'),
         'models_url "$3"',
@@ -382,7 +425,8 @@ got, curled, raw = run_url(FAKE_CATALOG='ignored', FAKE_KEY='sk-test',
                            CURL_BODY='{"data":[{"id":"gw-model-a"},{"id":"gw-model-b"}]}')
 check(got is not None and got.get('ok') is True, '上游 200 时返回 ok:true', raw[:120])
 check(got and got.get('source') == 'upstream', '来源标为 upstream')
-check(got and got.get('models') == ['gw-model-a', 'gw-model-b'], '上游模型被解析出来')
+check(got and sorted(got.get('models') or []) == ['gw-model-a', 'gw-model-b'],
+      '上游模型被解析出来（顺序按版本倒序，这里只比对集合）')
 
 # 有 Key + 改过 Base URL，上游连不上 -> 退回目录，仍然可用
 got, curled, raw = run_url(FAKE_CATALOG='kimi-k2.5', FAKE_KEY='sk-test',

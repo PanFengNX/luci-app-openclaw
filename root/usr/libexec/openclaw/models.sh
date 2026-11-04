@@ -29,7 +29,18 @@ oc_run() {
 	# 会被下游当成"模型 id"（真机上出现过 /usr/libexec/openclaw/models.sh: 27:
 	# found 这种下拉项）。oc_timeout 缺失时会告警到 stderr 并直接执行。
 	local t="$1"; shift
-	HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+	# 以**网关用户**执行，不是 root：OpenClaw 会校验临时目录
+	# <cache>/openclaw-<uid> 的属主等于当前进程 uid。root 跑会创建
+	# openclaw-0，而 oc_fix_perms 的 chown -R 又把它改成网关用户（998），
+	# 下一次 root 再跑就报
+	#   Unsafe fallback OpenClaw temp dir ".../openclaw-0"; has owner uid 998,
+	#   expected uid 0
+	# 并拒绝一切需要状态的操作 —— 实测「体检」按钮就是这样失败的。
+	# 以网关用户跑，uid 自始至终一致，这个冲突不存在。
+	# TMPDIR 显式指到 $base/tmp（属主 998、0700、在大容量盘上），
+	# 否则会回退到共享 /tmp 下的目录并因属主不符被拒。
+	oc_as_user env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+		PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
 		oc_timeout "$t" "$(oc_oc_bin)" "$@" 2>&1
 }
 
@@ -37,7 +48,11 @@ oc_run_q() {
 	# oc_run_q <timeout> <args...> —— **丢弃 stderr**，只留 stdout。
 	# 凡是"解析输出"的地方都必须用它：CLI 的报错、本插件的 WARN 都不是数据。
 	local t="$1"; shift
-	HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+	# 同 oc_run：必须以网关用户执行并把 TMPDIR 指到 $base/tmp，
+	# 否则 root 身份会创建 openclaw-0 并被后续 chown 翻属主，
+	# 从此 root 调用永久被拒（见上方 oc_run 的说明）。
+	oc_as_user env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+		PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
 		oc_timeout "$t" "$(oc_oc_bin)" "$@" 2>/dev/null
 }
 
@@ -722,14 +737,59 @@ models_url_fail() {
 	printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "$1")"
 }
 
+models_rank_filter() {
+	# 过滤 + 排序（stdin: model ids -> stdout: 同样的 id，可聊天的、最新的在前）
+	#
+	# 两个真机反馈：
+	#   1) 「有些模型可以，有些模型不行」—— 公开目录（OpenRouter）里的 id 带
+	#      平台专属后缀（`:batch` 批量、`:free` 免费额度、`:extended` 长上下文、
+	#      `-legal` 合规版），这些在服务商自己的 API 上根本不存在；还有
+	#      embedding / tts / whisper / 图像模型，它们不是对话模型，选中必然失败。
+	#      把这些剔掉，只留下能真正用来对话的 id。
+	#   2) 「默认可选择变为最新」—— 列表按版本倒序，最新在最前面，前端默认选第一项。
+	#
+	# 排序做法：把 id 里的每段数字补零成 6 位再比较（qwen3.8 > qwen3，
+	# claude-opus-5.5 > claude-opus-4.8），按这个规范化键倒序，输出原始 id。
+	awk '
+		function norm(s,   out, num, i, c) {
+			out = ""; num = ""
+			for (i = 1; i <= length(s); i++) {
+				c = substr(s, i, 1)
+				if (c ~ /[0-9]/) { num = num c; continue }
+				if (num != "") { out = out sprintf("%06d", num); num = "" }
+				out = out c
+			}
+			if (num != "") out = out sprintf("%06d", num)
+			return out
+		}
+		{
+			sub(/\r$/, "", $0)
+			gsub(/^[ \t]+|[ \t]+$/, "", $0)
+			if ($0 == "") next
+			low = tolower($0)
+			# 平台专属变体：服务商自己的 API 上不存在
+			if (low ~ /:(batch|free|extended|nitro|floor|online)$/) next
+			if (low ~ /-legal$/) next
+			# 非对话模型
+			if (low ~ /embed|(^|-)tts($|-)|whisper|moderation|rerank/) next
+			if (low ~ /dall-e|stable-diffusion|(^|-)flux($|-)|sora|veo/) next
+			if (low ~ /(^|-)image($|-)/) next
+			if (low ~ /(^|-)audio($|-)/) next
+			print norm($0) "\t" $0
+		}
+	' | sort -r | awk -F'\t' '!seen[$2]++ { print $2 }'
+}
+
 models_json() {
 	# models_json <source> <base-url>  (stdin: model ids, one per line)
 	#
 	# 三处成功路径共用同一个 JSON 组装，避免各写一份 while 循环后不一致
 	# （漏转义 / 多一个逗号都会让前端 JSON.parse 失败，整页显示"读取失败"）。
+	# 组装前统一过 models_rank_filter：剔掉平台专属变体与非对话模型，
+	# 并按版本倒序排好（前端默认选第一项 = 最新）。
 	local src="$1" base="$2" first=1 m
 	printf '{"ok":true,"source":"%s","baseUrl":"%s","models":[' "$src" "$(oc_json_str "$base")"
-	while IFS= read -r m; do
+	models_rank_filter | while IFS= read -r m; do
 		[ -n "$m" ] || continue
 		if [ "$first" = "1" ]; then
 			printf '"%s"' "$(oc_json_str "$m")"
