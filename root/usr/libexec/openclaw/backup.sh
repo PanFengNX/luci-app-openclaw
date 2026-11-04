@@ -864,10 +864,14 @@ cmd_verify() {
 
 # ---------------------------------------------------------------- restore
 cmd_restore() {
-	local in="" safety=1
+	local in="" safety=1 dry=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--no-safety) safety=0; shift ;;
+			# 演练：完整走一遍"校验 + 解压 + 内容核对"，但**不动线上数据**。
+			# 用户真正关心的是"这份备份到底能不能恢复"，而不是"文件在不在"。
+			# 也是审计手段：没有这个开关，就只能拿线上数据去赌。
+			--dry-run) dry=1; shift ;;
 			*) [ -z "$in" ] && in="$1"; shift ;;
 		esac
 	done
@@ -886,7 +890,7 @@ cmd_restore() {
 
 	# 2) 安全快照：还原失败时还能回去
 	local safety_file=""
-	if [ "$safety" = "1" ]; then
+	if [ "$safety" = "1" ] && [ "$dry" = "0" ]; then
 		local before
 		before="$(cmd_create --name "pre-restore" 2>/dev/null)"
 		case "$before" in
@@ -897,8 +901,10 @@ cmd_restore() {
 		[ -n "$safety_file" ] || oc_warn "未能创建还原前快照，继续（--no-safety 可静默跳过）"
 	fi
 
-	# 3) 停网关（配置正在被替换）
-	[ -x /etc/init.d/openclaw ] && /etc/init.d/openclaw stop >/dev/null 2>&1
+	# 3) 停网关（配置正在被替换）—— 演练模式不停，线上完全无感
+	if [ "$dry" = "0" ]; then
+		[ -x /etc/init.d/openclaw ] && /etc/init.d/openclaw stop >/dev/null 2>&1
+	fi
 
 	# 4) 解压到暂存区（绝不直接解到目标树）
 	# home/data 必须在装 trap 之前就定义好：中断处理函数会用到它们。
@@ -1026,6 +1032,33 @@ cmd_restore() {
 		die_json "解压失败：$(head -n1 "$terr" 2>/dev/null)"
 	fi
 	rm -f "$terr"
+
+	# 4b) 演练模式：解压成功 + 内容核对通过就收工，不碰线上任何东西
+	if [ "$dry" = "1" ]; then
+		local _files _dirs _has_cfg _has_env _has_info _sess _ok=1
+		_files="$(find "$stage" -type f 2>/dev/null | wc -l | tr -d ' \r\n')"
+		_dirs="$(find "$stage" -type d 2>/dev/null | wc -l | tr -d ' \r\n')"
+		case "$_files" in ''|*[!0-9]*) _files=0 ;; esac
+		case "$_dirs" in ''|*[!0-9]*) _dirs=0 ;; esac
+		[ -f "$stage/BACKUP-INFO" ] && _has_info=1 || _has_info=0
+		[ -f "$stage/home/.openclaw/openclaw.json" ] && _has_cfg=1 || _has_cfg=0
+		[ -f "$stage/home/.openclaw/.env" ] && _has_env=1 || _has_env=0
+		_sess="$(find "$stage/home/.openclaw" -path '*sessions*' -type f 2>/dev/null | wc -l | tr -d ' \r\n')"
+		case "$_sess" in ''|*[!0-9]*) _sess=0 ;; esac
+		# 内容核对的判据：有清单、有主配置、文件数不为 0。
+		# 缺任何一项都说明归档是空的或结构不对 —— 那才是真正需要告诉用户的。
+		[ "$_has_info" = "1" ] && [ "$_has_cfg" = "1" ] && [ "$_files" -gt 0 ] || _ok=0
+		oc_rmtree "$stage"
+		trap - EXIT INT TERM HUP
+		if [ "$_ok" = "1" ]; then
+			printf '{"ok":true,"dryRun":true,"file":"%s","files":%s,"dirs":%s,"has_config":%s,"has_env":%s,"sessions":%s}\n' \
+				"$(basename "$p")" "$_files" "$_dirs" \
+				"$([ "$_has_cfg" = 1 ] && echo true || echo false)" \
+				"$([ "$_has_env" = 1 ] && echo true || echo false)" "$_sess"
+			return 0
+		fi
+		die_json "演练失败：归档解压成功但内容不完整（清单=$_has_info 主配置=$_has_cfg 文件数=$_files）"
+	fi
 
 	# 5) UCI 配置
 	# 不能整份覆盖：备份来自另一台机器 / 另一个安装目录时，base_dir、

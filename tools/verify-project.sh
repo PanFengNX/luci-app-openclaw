@@ -477,6 +477,19 @@ else
 	skip "缺少 tools/tests/archive-size.sh"
 fi
 
+# 恢复演练：verify 只查结构，演练才证明"真的恢复得出来"。
+if [ -f tools/tests/restore-dryrun.sh ]; then
+	if out="$(PY="${PY:-python3}" sh tools/tests/restore-dryrun.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "restore-dryrun.sh 全部断言通过"
+	else
+		bad "restore-dryrun.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/restore-dryrun.sh"
+fi
+
 if [ -f tools/tests/provider-install-behavior.sh ]; then
 	if out="$(sh tools/tests/provider-install-behavior.sh 2>&1)"; then
 		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'

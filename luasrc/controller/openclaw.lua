@@ -161,6 +161,7 @@ function index()
 	entry({"admin", "services", "openclaw", "api", "backup_upload"}, call("api_backup_upload")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "backup_download"}, call("api_backup_download")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "restore"}, call("api_restore")).leaf = true
+	entry({"admin", "services", "openclaw", "api", "backup_dryrun"}, call("api_backup_dryrun")).leaf = true
 	-- 百度网盘云备份：业务全部在 cloud.sh 里，这里只做参数校验与透传
 	entry({"admin", "services", "openclaw", "api", "cloud_status"},  call("api_cloud_status")).leaf = true
 	entry({"admin", "services", "openclaw", "api", "cloud_overview"}, call("api_cloud_overview")).leaf = true
@@ -1157,6 +1158,18 @@ function api_backup_verify()
 		return
 	end
 	local r = sh(SH .. " backup-verify " .. q(f))
+	out({ ok = r:find('"ok":true') ~= nil, data = r })
+end
+
+function api_backup_dryrun()
+	-- 恢复演练：verify 只查结构，这里真的解压一遍再核对内容，
+	-- 但不停服务、不写数据、不产生快照。用户点一次就知道这份备份能不能用。
+	local f = http.formvalue("file") or ""
+	if not f:match(SAFE_NAME) then
+		out({ ok = false, error = "非法的备份文件名" })
+		return
+	end
+	local r = sh(SH .. " backup-dryrun " .. q(f))
 	out({ ok = r:find('"ok":true') ~= nil, data = r })
 end
 

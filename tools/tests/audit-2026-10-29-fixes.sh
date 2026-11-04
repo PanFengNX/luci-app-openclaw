@@ -58,7 +58,13 @@ def at(pat):
     return [i + 1 for i, l in enumerate(lines) if re.search(pat, l)]
 
 # 正常路径的回收：oc_rmtree "$stage"（不带 ; die_json 那种失败分支写法）
-recycle = at(r'^\s*oc_rmtree "\$stage"\s*$')
+#
+# 只统计「# 5) UCI 配置」之后的出现 —— 1.8.76 新增的恢复演练分支
+# （--dry-run）在更早处就 return 了，它自己那次清理不属于"正常恢复路径"。
+# 不排除它的话，这条不变量会把一个合法的新分支误判成"重复回收"。
+_uci = next((i for i, l in enumerate(lines) if l.strip().startswith('# 5) UCI')), -1)
+recycle = [i + 1 for i, l in enumerate(lines)
+           if i > _uci and re.search(r'^\s*oc_rmtree "\$stage"\s*$', l)]
 crontab = at(r'if \[ -s "\$stage/crontab\.txt" \]')
 plugins = at(r'if \[ -s "\$stage/plugins\.txt" \]')
 

@@ -1500,6 +1500,14 @@ cmd_backup_verify() {
 	sh "$OC_BACKUP" verify "$@"
 }
 
+cmd_backup_dryrun() {
+	# 恢复演练：完整走"校验 + 解压 + 内容核对"，但不动线上数据。
+	# 与 verify 的区别：verify 只看结构；演练真的把 3GB 解开一遍，
+	# 能证明"这份备份确实恢复得出来"。
+	shift
+	sh "$OC_BACKUP" restore "$@" --dry-run
+}
+
 cmd_backup_delete() {
 	shift
 	require_safe
@@ -2252,6 +2260,7 @@ case "${1:-}" in
 	backup)        cmd_backup "$@" ;;
 	backups)       cmd_backups ;;
 	backup-verify) cmd_backup_verify "$@" ;;
+	backup-dryrun) cmd_backup_dryrun "$@" ;;
 	backup-delete) cmd_backup_delete "$@" ;;
 	backup-log)    cmd_backup_log "$@" ;;
 	delpass-status) cmd_delpass_status ;;
@@ -2310,6 +2319,7 @@ Usage: openclaw.sh <command> [options]
   backup [--name <n>] [--no-workspace]   create a backup of config + data
   backups                   JSON array of existing backups
   backup-verify <file>      validate an archive WITHOUT restoring it
+  backup-dryrun <file>      rehearse a restore (extract + check, touch nothing)
   backup-delete <file>      delete one backup
   delpass-status            whether a delete password is set
   delpass-set               set the delete password (reads stdin)
