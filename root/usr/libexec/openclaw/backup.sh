@@ -34,7 +34,17 @@ BACKUP_FORMAT=2
 BACKUP_DIR_NAME="backups"
 
 # 还原时允许的最大解压体积（防 zip bomb / 塞满磁盘）
-MAX_RESTORE_MB=512
+# 解压体积上限：**不能写死**。真机事故：数据目录 3.3GB（agents 2.6GB +
+# workspace 680MB），而这里写死 512MB —— 于是插件自己产出的备份，
+# 自己的 verify/restore 全部拒绝（"归档解压体积超过 512MB 上限"）。
+# 用户以为有备份，实际一个都恢复不了。
+#
+# 现在改成两条动态判据，保留"防 zip bomb / 防撑爆磁盘"的初衷：
+#   1. 压缩比：解压体积 <= 归档大小 × RESTORE_RATIO_MAX（正常 tar.gz 约 2~6 倍）
+#   2. 可用空间：解压体积 <= 目标盘可用空间的 80%
+# 两者取较小值；RESTORE_MIN_MB 是压缩比判据的下限，避免小归档被过度限制。
+RESTORE_RATIO_MAX=40
+RESTORE_MIN_MB=1024
 
 backup_dir() { printf '%s/%s' "$(oc_base_dir)" "$BACKUP_DIR_NAME"; }
 
@@ -213,12 +223,71 @@ oc_archive_inspect() {
 	if [ -n "$bad" ]; then
 		rm -f "$tmp" "$names" 2>/dev/null
 		oc_err "归档校验失败：$bad"
+		OC_ARC_BAD="$bad"     # 供上层 die_json 显示具体原因
 		return 1
 	fi
-	bad="$(awk '{ type=substr($0,1,1); if (type != "-" && type != "d") { print "非普通文件/目录条目（" type "）"; exit } }' "$tmp")"
+	# 类型检查：普通文件 / 目录 / **相对且不逃逸的符号链接** 放行，其余拒绝。
+	#
+	# 真机事故：数据目录里有 OpenClaw 自带的便携 git（158 个相对符号链接，
+	# 如 ./home/.openclaw/bin/git-2.50.1/usr/bin/git -> ../lib/git-core/git）。
+	# 原来"见 l 就拒绝"导致插件自己产出的备份**自己恢复不了** —— 与 512MB
+	# 上限是同一类错误：校验比生成更严格，等于没有备份。
+	#
+	# 安全边界没有放松：
+	#   * 绝对路径目标（/etc/passwd）一律拒绝；
+	#   * 相对目标按层数推演，任何一步逃出解压根（depth < 0）就拒绝；
+	#   * 硬链接 / 设备 / FIFO 仍然一律拒绝（硬链接可以跨路径共享 inode，
+	#     判断"是否逃逸"的成本与风险都不值得）。
+	bad="$(awk -v BASE="$(oc_base_dir 2>/dev/null)" '
+		function depth_of(p,   n, parts, i, d) {
+			d = 0
+			n = split(p, parts, "/")
+			for (i = 1; i <= n; i++) {
+				if (parts[i] == "" || parts[i] == ".") continue
+				if (parts[i] == "..") { d--; if (d < 0) return -1 }
+				else d++
+			}
+			return d
+		}
+		# 取最后一个 " -> " 的位置（文件名本身可能含 " -> "）
+		function lastsep(s,   i, j, k) {
+			k = 0; i = 1
+			while ((j = index(substr(s, i), " -> ")) > 0) { k = i + j - 1; i = k + 4 }
+			return k
+		}
+		NR == FNR { nm[FNR] = $0; next }
+		{
+			type = substr($0, 1, 1)
+			if (type == "-" || type == "d") next
+			if (type != "l") { print "非普通文件/目录/符号链接条目（" type "）"; exit }
+			k = lastsep($0)
+			if (k == 0) { print "符号链接条目无法解析目标：" nm[FNR]; exit }
+			target = substr($0, k + 4)
+			name = nm[FNR]
+			# 绝对目标：只允许落在本安装目录内。
+			# OpenClaw 自己会建这类链接（plugin-skills/canvas -> <base>/global/...），
+			# 一律拒绝会让插件自己的备份恢复不了；而 /etc/passwd 这种系统路径
+			# 仍然必须拒绝。
+			if (target ~ /^\//) {
+				if (BASE == "" || index(target, BASE "/") != 1) {
+					print "符号链接指向安装目录之外的绝对路径：" name " -> " target
+					exit
+				}
+				next
+			}
+			d = depth_of(name) - 1
+			n = split(target, tp, "/")
+			for (i = 1; i <= n; i++) {
+				if (tp[i] == "" || tp[i] == ".") continue
+				if (tp[i] == "..") { d--; if (d < 0) { print "符号链接逃出解压根：" name " -> " target; exit } }
+				else d++
+			}
+		}
+	' "$names" "$tmp")"
 	if [ -n "$bad" ]; then
 		rm -f "$tmp" "$names" 2>/dev/null
 		oc_err "归档校验失败：$bad"
+		OC_ARC_BAD="$bad"     # 供上层 die_json 显示具体原因
 		return 1
 	fi
 	if ! grep -q '^\./BACKUP-INFO$' "$names"; then
@@ -289,11 +358,48 @@ oc_archive_summary() {
 }
 
 oc_archive_ok_size() {
-	# 体积上限检查：解压后不得超过 MAX_RESTORE_MB（防 zip bomb / 塞满磁盘）
-	local f="$1" bytes
+	# 体积上限检查：解压后不得撑爆磁盘，也不接受 zip bomb。
+	# 判据见文件头的 RESTORE_RATIO_MAX / RESTORE_MIN_MB 注释。
+	#
+	# 返回：0 可以；1 超限。OC_ARC_LIMIT_MSG 带回具体原因（供调用方报错），
+	# 因为只说"超过上限"用户不知道该清空间还是该怀疑归档。
+	local f="$1" bytes arch ratio_mb free_mb space_mb allowed
+	OC_ARC_LIMIT_MSG=""
 	bytes="$(tar -tzvf "$f" 2>/dev/null | awk '{ s=$3; if (s ~ /^[0-9]+$/) t += s } END { printf "%d", t }')"
 	case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
-	[ "$bytes" -le $((MAX_RESTORE_MB * 1048576)) ] || return 1
+	# 取不到大小就不在这里拦：解压阶段还有可用空间检查兜底，
+	# 而误拦一个正常归档（导致备份不可恢复）的代价远大于放过。
+	[ "$bytes" -gt 0 ] || return 0
+
+	arch="$(stat -c %s "$f" 2>/dev/null)"
+	case "$arch" in ''|*[!0-9]*) arch=0 ;; esac
+	ratio_mb=$RESTORE_MIN_MB
+	if [ "$arch" -gt 0 ]; then
+		ratio_mb=$(( arch / 1048576 * RESTORE_RATIO_MAX ))
+		[ "$ratio_mb" -ge "$RESTORE_MIN_MB" ] || ratio_mb=$RESTORE_MIN_MB
+	fi
+
+	free_mb="$(oc_free_mb "$(oc_base_dir)" 2>/dev/null)"
+	case "$free_mb" in ''|*[!0-9]*) free_mb=0 ;; esac
+	if [ "$free_mb" -gt 0 ]; then
+		space_mb=$(( free_mb * 8 / 10 ))
+	else
+		# 读不到可用空间时退回压缩比判据，不要因此拒绝一切归档
+		space_mb=$ratio_mb
+	fi
+
+	allowed=$ratio_mb
+	[ "$space_mb" -lt "$allowed" ] && allowed=$space_mb
+	[ "$allowed" -gt 0 ] || allowed=$RESTORE_MIN_MB
+
+	if [ "$bytes" -gt $(( allowed * 1048576 )) ]; then
+		if [ "$space_mb" -lt "$ratio_mb" ]; then
+			OC_ARC_LIMIT_MSG="归档解压需要 $(( bytes / 1048576 ))MB，超过当前可用空间的 80%（可用 ${free_mb}MB）。请先清理空间或把数据目录换到大容量盘"
+		else
+			OC_ARC_LIMIT_MSG="归档解压需要 $(( bytes / 1048576 ))MB，超过压缩比上限（${RESTORE_RATIO_MAX} 倍）。该归档可疑或已损坏，已拒绝"
+		fi
+		return 1
+	fi
 	return 0
 }
 
@@ -741,10 +847,10 @@ cmd_verify() {
 	[ -f "$p" ] || die_json "备份不存在：$in"
 
 	if ! oc_archive_ok_size "$p"; then
-		die_json "归档解压体积超过 ${MAX_RESTORE_MB}MB 上限，已拒绝"
+		die_json "${OC_ARC_LIMIT_MSG:-归档解压体积超过上限，已拒绝}"
 	fi
 	if ! oc_archive_inspect "$p" >/dev/null; then
-		die_json "归档未通过安全校验（路径越界 / 链接 / 设备文件 / 缺少清单）"
+		die_json "归档未通过安全校验（${OC_ARC_BAD:-路径越界 / 链接 / 设备文件 / 缺少清单}）"
 	fi
 	local vsize
 	vsize="$(wc -c <"$p" 2>/dev/null | tr -d ' ')"
@@ -774,7 +880,7 @@ cmd_restore() {
 
 	# 1) 先校验，再动任何东西
 	if ! oc_archive_ok_size "$p"; then
-		die_json "归档解压体积超过 ${MAX_RESTORE_MB}MB 上限，已拒绝"
+		die_json "${OC_ARC_LIMIT_MSG:-归档解压体积超过上限，已拒绝}"
 	fi
 	oc_archive_inspect "$p" >/dev/null || die_json "归档未通过安全校验，已拒绝还原"
 

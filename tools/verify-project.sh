@@ -463,6 +463,20 @@ else
 	skip "缺少 tools/tests/undefined-funcs.sh"
 fi
 
+# 解压体积上限必须是动态的：1.8.74 之前写死 512MB，而实际数据 3.3GB，
+# 导致插件自己产出的备份全部无法 verify/restore（有备份却恢复不了）。
+if [ -f tools/tests/archive-size.sh ]; then
+	if out="$(PY="${PY:-python3}" sh tools/tests/archive-size.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "archive-size.sh 全部断言通过"
+	else
+		bad "archive-size.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/archive-size.sh"
+fi
+
 if [ -f tools/tests/provider-install-behavior.sh ]; then
 	if out="$(sh tools/tests/provider-install-behavior.sh 2>&1)"; then
 		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'

@@ -118,6 +118,13 @@ build("no-manifest.tar.gz", GOOD, manifest=False)
 build("abs-path.tar.gz", GOOD + [("/etc/passwd", "root:x:0:0\n")])
 build("dotdot.tar.gz", GOOD + [("./home/../../etc/passwd", "x\n")])
 build("symlink.tar.gz", GOOD + [("./home/.openclaw/evil", "SYMLINK:/etc")])
+# 合法相对符号链接：真机数据里有 OpenClaw 自带的便携 git（158 个这种链接），
+# 原来"见 l 就拒绝"导致插件自己的备份自己恢复不了。
+build("symlink-ok.tar.gz",
+      GOOD + [("./home/.openclaw/bin/git-2.50.1/usr/bin/git", "SYMLINK:../lib/git-core/git")])
+# 逃逸的相对链接：从 usr/bin 往上跳 4 层再进 etc
+build("symlink-escape.tar.gz",
+      GOOD + [("./home/.openclaw/x", "SYMLINK:../../../../etc/passwd")])
 build("hardlink.tar.gz", GOOD + [("./home/.openclaw/hard", "HARDLINK:./etc/config/openclaw")])
 build("chrdev.tar.gz", GOOD + [("./home/.openclaw/null", "CHRDEV")])
 build("fifo.tar.gz", GOOD + [("./home/.openclaw/pipe", "FIFO")])
@@ -163,7 +170,9 @@ expect good-with-dirs.tar.gz  PASS   "正常归档（含目录条目）"
 expect no-manifest.tar.gz     REJECT "缺少 BACKUP-INFO"
 expect abs-path.tar.gz        REJECT "含绝对路径条目 /etc/passwd"
 expect dotdot.tar.gz          REJECT "含 .. 的条目"
-expect symlink.tar.gz         REJECT "含符号链接条目（可指向 /etc）"
+expect symlink.tar.gz         REJECT "符号链接指向绝对路径（/etc）"
+expect symlink-ok.tar.gz      PASS   "包内的相对符号链接放行（便携 git 那种）"
+expect symlink-escape.tar.gz  REJECT "相对符号链接逃出解压根"
 expect hardlink.tar.gz        REJECT "含硬链接条目"
 expect chrdev.tar.gz          REJECT "含字符设备条目"
 expect fifo.tar.gz            REJECT "含 FIFO 条目"
