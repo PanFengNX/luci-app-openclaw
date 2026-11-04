@@ -161,6 +161,18 @@ check(out.index('claude-opus-5.5') < out.index('claude-opus-4.8'), '同族内 5.
 check('hasLive' in view and 'upstream[0]' in view,
       '前端默认选中实时清单的第一项（最新）')
 
+
+# ---------------------------------------------------------------- 清单缓存
+# 用户要求：「记住上一次刷新出来的结果，而不是你给的几个兜底」。
+# 成功一次就落盘；之后网络不通时用它，而不是退回随包预设。
+check('models_cache_write' in code_of('models_json'),
+      '成功路径会把清单写进缓存')
+check('models_cache_read' in code_of('models_url'),
+      'models_url 在全部来源失败后会读缓存')
+check('models_cache_read' in code_of('models_url')
+      and code_of('models_url').index('models_cache_read') < code_of('models_url').rindex('models_url_fail'),
+      '缓存回退发生在报错之前')
+
 # ---------------------------------------------------------------- setkey 回归
 # setkey 从本包第一个版本起就是「位置参数传 Key」的对外签名。apply 改成
 # 只认 --key-file / $OC_APPLY_KEY 之后，setkey 一度 100% 返回 2（功能直接
@@ -341,10 +353,15 @@ def build_url_harness():
         '  exit 0',
         '}',
         'oc_timeout() { shift; "$@"; }',
+        # 缓存目录用测试自己的 base（不碰真实设备目录）
+        'oc_base_dir() { printf "%s" "${FAKE_BASE:-$OC_RUNDIR}"; }',
         # 真实的 JSON 解析器（纯 awk，不依赖 jsonfilter），一起参与验证
         func('json_slice'),
         func('json_model_ids'),
         func('models_url_fail'),
+        func('models_cache_dir'),
+        func('models_cache_write'),
+        func('models_cache_read'),
         func('models_rank_filter'),
         func('models_json'),
         func('models_url'),
@@ -353,15 +370,27 @@ def build_url_harness():
     ])
 
 
-def run_url(model='moonshot', **env_extra):
+def run_url(model='moonshot', keep_cache=False, **env_extra):
+    # 默认**每次清空缓存**：缓存回退会让"所有来源都失败"变成"返回上次的清单"，
+    # 不隔离的话这些断言测的就不是它们本来的目标了。
+    # 只有专门测缓存的那两条显式传 keep_cache=True。
     rundir = work / 'rundir'
     rundir.mkdir(exist_ok=True)
+    base = work / 'base'
+    base.mkdir(exist_ok=True)
+    if not keep_cache:
+        cdir = base / 'cache' / 'models'
+        if cdir.is_dir():
+            for f in cdir.iterdir():
+                f.unlink()
     called = work / 'curl-called'
     if called.exists():
         called.unlink()
     hp = work / 'url.sh'
     hp.write_text(build_url_harness(), encoding='utf-8', newline=NL)
-    env = dict(os.environ, CURL_CALLED=P(called))
+    base = work / 'base'
+    base.mkdir(exist_ok=True)
+    env = dict(os.environ, CURL_CALLED=P(called), FAKE_BASE=P(base))
     env.update({k: str(v) for k, v in env_extra.items()})
     r = subprocess.run(['sh', P(hp), P(rundir), P(called), model],
                        capture_output=True, text=True, env=env)
@@ -371,6 +400,38 @@ def run_url(model='moonshot', **env_extra):
     except Exception:
         return None, called.exists(), out
 
+
+# 行为级：先成功一次（写缓存），再让所有来源失败，应回退到缓存
+got, curled, raw = run_url(FAKE_CATALOG='kimi-k2.5', CURL_CODE='000', keep_cache=True)
+check(got is not None and got.get('ok') is True and got.get('source') == 'catalog',
+      '首次成功：source=catalog', raw[:110])
+
+cache_file = work / 'base' / 'cache' / 'models' / 'moonshot.list'
+check(cache_file.is_file(), '缓存文件已生成（<base>/cache/models/<provider>.list）')
+if cache_file.is_file():
+    body = cache_file.read_text(encoding='utf-8')
+    check(body.startswith('# source=catalog'), '缓存首行记录来源与时间', body.splitlines()[0][:60])
+    check('kimi-k2.5' in body, '缓存里含本次拿到的模型')
+
+# 现在模拟：目录失败、无 Key、公开目录失败 -> 只能用缓存
+got, curled, raw = run_url(FAKE_CATALOG='', FAKE_CATALOG_MSG='openclaw models list 退出码 1',
+                           FAKE_KEY='', FAKE_PUBLIC='0', CURL_CODE='000', keep_cache=True)
+check(got is not None and got.get('ok') is True and got.get('source') == 'cache',
+      '全部来源失败时回退到上次缓存的清单', raw[:130])
+check(got is not None and 'kimi-k2.5' in (got.get('models') or []),
+      '回退的清单就是上次刷出来的那些模型')
+
+# 没有缓存时必须老实报错，不能编造
+for f in (work / 'base' / 'cache' / 'models').glob('*.list'):
+    f.unlink()
+got, curled, raw = run_url(FAKE_CATALOG='', FAKE_CATALOG_MSG='openclaw models list 退出码 1',
+                           FAKE_KEY='', FAKE_PUBLIC='0', CURL_CODE='000')
+check(got is not None and got.get('ok') is False,
+      '没有缓存时仍然报错（不编造清单）', raw[:110])
+
+# 前端要能显示 cache 来源
+check("cache:" in view.split('MODEL_SOURCE_TEXT')[1][:500],
+      'MODEL_SOURCE_TEXT 里有 cache 键（页面能说明这是上次的结果）')
 
 # harness 的 catalog_models 是打桩函数：把 OC_CM_MSG 的典型文本设进去
 # （真实实现里由 models.sh 自己赋值）。这里模拟"目录查询失败"的形状。

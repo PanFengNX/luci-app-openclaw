@@ -599,8 +599,49 @@ cmd_create() {
 		--exclude='node_modules'
 	[ "$ws" = "1" ] || set -- "$@" --exclude="${_data_rel}/workspace"
 
+	# 打包前暂停网关（默认开启，main.backup_stop_service=0 可关）。
+	#
+	# 真机事故：agent 数据库 1.2GB，网关持续写入，tar 读到一半必然报
+	#   "file changed as we read it" / "File shrank by ..."
+	# 重试 3 次也只是碰运气 —— 11-01、11-02、11-04 的定时备份全部失败，
+	# 备份日志里连续三条 CREATE FAIL。备份是安全网，不能靠运气。
+	#
+	# 停服务 → 打包 → 一定恢复（trap EXIT，任何退出路径都会拉起来）。
+	# 凌晨备份停机几十秒，换取"归档一定是完整一致"的，是值得的。
+	# 想避免停机可以把 main.backup_stop_service 设为 0（回到旧行为）。
+	_oc_bk_resume() {
+		[ "${_oc_bk_stopped:-0}" = "1" ] || return 0
+		_oc_bk_stopped=0
+		[ -x /etc/init.d/openclaw ] || return 0
+		/etc/init.d/openclaw start >/dev/null 2>&1 || \
+			oc_warn "备份完成但服务未能自动恢复，请手动执行：/etc/init.d/openclaw start"
+	}
+	_oc_bk_stopped=0
+	_oc_bk_stop_svc="$(uci_get main.backup_stop_service '1' 2>/dev/null)"
+	[ -n "$_oc_bk_stop_svc" ] || _oc_bk_stop_svc=1
+	if [ "$_oc_bk_stop_svc" != "0" ] && [ -x /etc/init.d/openclaw ]; then
+		if [ -n "$(oc_gateway_pids 2>/dev/null)" ]; then
+			blog "备份前暂停网关（避免打包到一半数据库被改写）"
+			trap '_oc_bk_resume' EXIT INT TERM HUP
+			/etc/init.d/openclaw stop >/dev/null 2>&1 || true
+			_oc_bk_stopped=1
+			# 等进程真正退出（最多 30 秒）。停不掉也不要硬来：
+			# 继续打包，让 oc_tar_create_retry 的重试逻辑去处理。
+			_oc_bk_w=0
+			while [ "$_oc_bk_w" -lt 30 ] && [ -n "$(oc_gateway_pids 2>/dev/null)" ]; do
+				sleep 1
+				_oc_bk_w=$((_oc_bk_w + 1))
+			done
+			if [ -n "$(oc_gateway_pids 2>/dev/null)" ]; then
+				oc_warn "网关在 30 秒内未完全退出，继续打包（可能仍会触发文件变化重试）"
+			fi
+		fi
+	fi
+
 	oc_tar_create_retry "$out" "$stage" "$@"
 	_tar_rc=$?
+	# 打包结束：立刻恢复服务，别让用户多等
+	_oc_bk_resume
 	if [ "$_tar_rc" -ne 0 ]; then
 		_oc_stage_cleanup_rc=0
 		oc_rmtree "$stage" || _oc_stage_cleanup_rc=1
@@ -609,7 +650,7 @@ cmd_create() {
 		rm -f "$out" 2>/dev/null || _oc_out_cleanup_rc=1
 		[ ! -e "$out" ] && [ ! -L "$out" ] || _oc_out_cleanup_rc=1
 		if [ "$_oc_stage_cleanup_rc" -ne 0 ] || [ "$_oc_out_cleanup_rc" -ne 0 ]; then
-			die_json "清理失败：无法删除不完整的备份暂存目录或输出文件，已中止（请检查备份目录权限与文件系统）"
+			die_json "清理失败：无法删除不完整的备份暂存目录或输出文件，已中止（请检查备份目录权限与文件系统）；打包本身的错误：$(head -n1 "$OC_RUNDIR/bk-tar.err" 2>/dev/null)"
 		fi
 		if [ "$_tar_rc" -eq 73 ]; then
 			die_json "备份期间文件持续变化，已重试 3 次仍无法生成一致归档，建议暂停高频会话写入后重试"

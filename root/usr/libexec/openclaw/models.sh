@@ -737,6 +737,54 @@ models_url_fail() {
 	printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "$1")"
 }
 
+models_cache_dir() {
+	# 模型清单缓存目录：<base>/cache/models
+	#
+	# 为什么放磁盘（不是 /tmp）：/tmp 是 tmpfs，重启即空。用户要的是"记住上次
+	# 刷新出来的结果"，重启后依然应该记得 —— 否则等于没记。
+	# 属主交给网关用户（与其它缓存目录一致），但这里由 root 写、root 读，
+	# 权限 0700 即可（清单里只有模型名，不含凭据）。
+	printf '%s' "$(oc_base_dir)/cache/models"
+}
+
+models_cache_write() {
+	# models_cache_write <provider> <source>  (stdin: model ids, one per line)
+	#
+	# 把这次成功刷新的结果落盘，供下次网络不可用时使用。
+	# **失败一律静默**：缓存是"锦上添花"，绝不能因为写不了缓存就让用户
+	# 看不到模型列表。
+	local p="$1" src="$2" d tmp
+	d="$(models_cache_dir)"
+	[ -n "$p" ] || return 0
+	case "$p" in *[!A-Za-z0-9_.-]*) return 0 ;; esac
+	mkdir -p "$d" 2>/dev/null || return 0
+	chmod 700 "$d" 2>/dev/null || true
+	tmp="$d/.$p.$$.tmp"
+	{
+		printf '# source=%s time=%s\n' "$src" "$(date +%s 2>/dev/null)"
+		cat
+	} >"$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+	# 原子替换：读的一方永远看不到写了一半的清单
+	mv -f "$tmp" "$d/$p.list" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+	return 0
+}
+
+models_cache_read() {
+	# models_cache_read <provider> -> 输出缓存的模型 id（一行一个）
+	# OC_CACHE_META 带回 "source=... time=..." 供页面显示"上次刷新于何时"。
+	# 返回：0 有缓存 / 1 没有
+	local p="$1" f
+	OC_CACHE_META=""
+	[ -n "$p" ] || return 1
+	case "$p" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+	f="$(models_cache_dir)/$p.list"
+	[ -f "$f" ] || return 1
+	OC_CACHE_META="$(head -n1 "$f" 2>/dev/null | sed 's/^# *//')"
+	# 跳过注释行与空行；形状校验与 catalog 路径保持一致
+	grep -v '^#' "$f" 2>/dev/null | grep -v '^[[:space:]]*$'
+	return 0
+}
+
 models_rank_filter() {
 	# 过滤 + 排序（stdin: model ids -> stdout: 同样的 id，可聊天的、最新的在前）
 	#
@@ -781,15 +829,24 @@ models_rank_filter() {
 }
 
 models_json() {
-	# models_json <source> <base-url>  (stdin: model ids, one per line)
+	# models_json <source> <base-url> [provider]  (stdin: model ids, one per line)
 	#
 	# 三处成功路径共用同一个 JSON 组装，避免各写一份 while 循环后不一致
 	# （漏转义 / 多一个逗号都会让前端 JSON.parse 失败，整页显示"读取失败"）。
 	# 组装前统一过 models_rank_filter：剔掉平台专属变体与非对话模型，
 	# 并按版本倒序排好（前端默认选第一项 = 最新）。
-	local src="$1" base="$2" first=1 m
+	#
+	# **成功即落盘**：把这次结果写进 <base>/cache/models/<provider>.list，
+	# 下次网络不通时用它，而不是退回随包预设（用户明确要求"记住上次刷新
+	# 出来的结果，而不是你给的几个兜底"）。source=cache 时不再回写，
+	# 免得用旧值覆盖更新的缓存。
+	local src="$1" base="$2" prov="${3:-}" ids m first=1
+	ids="$(models_rank_filter)"
+	if [ -n "$prov" ] && [ "$src" != "cache" ] && [ -n "$ids" ]; then
+		printf '%s\n' "$ids" | models_cache_write "$prov" "$src"
+	fi
 	printf '{"ok":true,"source":"%s","baseUrl":"%s","models":[' "$src" "$(oc_json_str "$base")"
-	models_rank_filter | while IFS= read -r m; do
+	while IFS= read -r m; do
 		[ -n "$m" ] || continue
 		if [ "$first" = "1" ]; then
 			printf '"%s"' "$(oc_json_str "$m")"
@@ -797,7 +854,9 @@ models_json() {
 		else
 			printf ',"%s"' "$(oc_json_str "$m")"
 		fi
-	done
+	done <<EOF
+$ids
+EOF
 	printf ']}\n'
 }
 
@@ -903,7 +962,7 @@ models_public() {
 		return 1
 	fi
 
-	printf '%s\n' "$ids" | models_json public "$base"
+	printf '%s\n' "$ids" | models_json public "$base" "$p"
 	return 0
 }
 
@@ -931,7 +990,7 @@ env_key() {
 
 models_url() {
 	# models_url <provider-id> -> {"ok":true,"source":"...","baseUrl":"...","models":[...]}
-	local p="${1:-}" base url envname key esc code rc body errf ids first m msg url_host url_port url_ip live
+	local p="${1:-}" base url envname key esc code rc body errf ids first m msg url_host url_port url_ip live _cached
 	OC_MU_MSG=""
 	case "$p" in
 		''|*[!A-Za-z0-9_.-]*|-*) models_url_fail "Provider 名称无效"; return 1 ;;
@@ -1016,7 +1075,7 @@ models_url() {
 	OC_CM_MSG=""
 	if [ "$live" = "1" ] && [ -x "$(oc_oc_bin)" ]; then
 		if catalog_models "$p"; then
-			printf '%s\n' "$OC_CM_OUT" | models_json catalog "$base"
+			printf '%s\n' "$OC_CM_OUT" | models_json catalog "$base" "$p"
 			return 0
 		fi
 	fi
@@ -1062,7 +1121,7 @@ models_url() {
 						rm -f "$body" "$errf"
 						ids="$(printf '%s\n' "$ids" | grep -v '^[[:space:]]*$' | sort -u)"
 						if [ -n "$ids" ]; then
-							printf '%s\n' "$ids" | models_json upstream "$base"
+							printf '%s\n' "$ids" | models_json upstream "$base" "$p"
 							return 0
 						fi
 						OC_MU_MSG="上游返回的内容中没有可识别的模型列表（HTTP 200）"
@@ -1098,9 +1157,21 @@ models_url() {
 	# 目录清单至少能让用户选到一个真实可用的模型，而不是对着过时的预设猜。
 	if [ "$live" = "0" ] && [ -x "$(oc_oc_bin)" ]; then
 		if catalog_models "$p"; then
-			printf '%s\n' "$OC_CM_OUT" | models_json catalog "$base"
+			printf '%s\n' "$OC_CM_OUT" | models_json catalog "$base" "$p"
 			return 0
 		fi
+	fi
+
+	# ---------- 3.5) 用上一次成功刷新的结果 ----------
+	# 用户明确要求：「记住上一次刷新出来的结果，而不是你给的几个兜底」。
+	# 到这里说明目录、上游、公开目录都没给出结果（断网 / 代理抖动 / 上游
+	# 临时故障）。磁盘上的缓存是**上次真实拿到的清单**，比随包预设可信得多：
+	# 预设是写死的几个 id，缓存是这台设备上这个 provider 实际返回过的。
+	# 只在确实有缓存时使用；没有缓存才继续往下报错（前端再退回预设）。
+	_cached="$(models_cache_read "$p")"
+	if [ -n "$_cached" ]; then
+		printf '%s\n' "$_cached" | models_json cache "$base" "$p"
+		return 0
 	fi
 
 	# ---------- 4) 全都拿不到：回最具体的原因 ----------

@@ -710,7 +710,8 @@ function setModelHint(text){ $('m-model-hint').textContent = text || ''; }
 var MODEL_SOURCE_TEXT = {
   upstream: '模型列表来自上游接口（实时）',
   public:   '模型列表来自公开目录（实时）',
-  catalog:  '模型列表来自 OpenClaw 已发布目录（离线读取，不需要 API Key）'
+  catalog:  '模型列表来自 OpenClaw 已发布目录（离线读取，不需要 API Key）',
+  cache:    '网络暂时不可用，显示的是上次刷新成功的清单（可点「获取模型」重试）'
 };
 function setModelSource(src, fallback){
   var el = $('m-model-source');
