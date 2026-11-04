@@ -1,8 +1,21 @@
-<!-- version: 1.8.70 -->
+<!-- version: 1.8.71 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.71
+
+修掉备份日志里长期存在的一行报错。
+
+- **`backup.sh: export_note: not found`**：`export_note()` 定义在 cli.sh 里，
+  而 backup.sh 只 source 了 lib.sh —— 函数存在，但这个脚本看不见它。
+  结果是每次备份都往日志写一行 `not found`：备份其实成功了，但用户会以为失败。
+  改为本文件自己的 `blog()`（写 stderr，保证 stdout 只有 JSON）。
+- 新增 `tools/tests/undefined-funcs.sh` 并接入全量回归。它按**每个脚本各自的
+  source 关系**计算函数可见性（不是"全局有没有定义"），专门抓这类跨文件误用。
+  判据收窄到「语句位置上含下划线的小写函数名 + 引号参数」，并对
+  `command -v <fn>` 保护的可选依赖放行（credential.sh 就是这种设计）。
 
 ## 1.8.70
 

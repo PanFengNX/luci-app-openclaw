@@ -443,8 +443,24 @@ if [ -f tools/tests/init-guard.sh ]; then
 		bad "init-guard.sh 有失败断言"
 		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
 	fi
+
 else
 	skip "缺少 tools/tests/init-guard.sh"
+fi
+
+# 函数可见性：1.8.70 之前 backup.sh 调了 cli.sh 里的 export_note()，
+# 运行时每备份一次就报一行 "export_note: not found"。这条测试按每个脚本
+# 自己的 source 关系判断可见性（不是"全局有没有定义"）。
+if [ -f tools/tests/undefined-funcs.sh ]; then
+	if out="$(PY="${PY:-python3}" sh tools/tests/undefined-funcs.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "undefined-funcs.sh 全部断言通过"
+	else
+		bad "undefined-funcs.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/undefined-funcs.sh"
 fi
 
 if [ -f tools/tests/provider-install-behavior.sh ]; then

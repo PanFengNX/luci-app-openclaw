@@ -527,7 +527,12 @@ cmd_create() {
 	# **不在数据目录里** —— 重装 OpenClaw 会全部丢失，恢复数据也带不回来。
 	# 插件动辄几十 MB，不适合整份进归档；这里只记清单，
 	# 还原时由 UI 提示"这些插件需要重新安装"，并按清单尽量自动重装。
-	export_note "记录插件清单"
+	# 进度说明走 blog()（写 stderr）。这里原本调用了一个从未定义的
+	# export_note()，"记录插件清单" 这行因此在每次备份时都以
+	#   backup.sh: line 530: export_note: not found
+	# 出现在日志里 —— 备份本身能完成，但那行报错会让人以为备份失败了。
+	# 本文件约定：stdout 只放 JSON（LuCI 解析），所有说明一律 stderr。
+	blog "记录插件清单"
 	{
 		printf '# 程序目录下已安装的插件（一行一个包名）\n'
 		for _nm in "$(oc_oc_dir)"/*/node_modules/* "$(oc_oc_dir)"/lib/node_modules/* \
