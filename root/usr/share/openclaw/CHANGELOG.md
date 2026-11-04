@@ -1,8 +1,21 @@
-<!-- version: 1.8.71 -->
+<!-- version: 1.8.72 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.72
+
+修掉 1.8.71 真机暴露的一个问题：**部分服务商（longai、deepseek）的模型清单变空**。
+
+- 根因：1.8.69 引入的 `timeout-wrap.sh` 里 `source` 了 lib.sh。lib.sh 载入时会
+  `export OPENCLAW_STATE_DIR` / `OPENCLAW_CONFIG_PATH` —— 这两个是**官方 CLI
+  认的环境变量**。root shell 里 uci 可用、值是对的；但包装脚本在 `su` 之后以
+  网关用户跑，PATH 不含 /sbin 时拿不到 uci，lib.sh 回退默认值
+  `/mnt/data/OpenClaw/...`，官方 CLI 跟着去读一个不存在的 state 目录，
+  只输出一行 `Gateway is not running...`，模型列表直接为空（实测 22 行 → 0 行）。
+- 修法：包装脚本改为**完全自包含**（超时逻辑内联，绝不 source lib.sh）。
+- 真机验证：longai 8 个模型、deepseek 3 个模型，均按版本倒序、最新在前。
 
 ## 1.8.71
 

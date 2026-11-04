@@ -1912,14 +1912,44 @@ oc_as_user_timeout() {
 	case "$wrap" in
 		/tmp/*|'') wrap="${OC_RUNDIR:-/tmp/.openclaw}/timeout-wrap.sh" ;;
 	esac
-	if [ ! -f "$wrap" ] || [ ! -s "$wrap" ]; then
+	# **内容自包含，绝不 source lib.sh**（真机实测，1.8.71 的模型清单就是
+	# 被它弄空的）：lib.sh 载入时会 export OPENCLAW_STATE_DIR /
+	# OPENCLAW_CONFIG_PATH —— 这两个是**官方 CLI 认的环境变量**。root
+	# shell 里 uci 可用、值是对的；但包装脚本在 su 之后以网关用户跑，
+	# PATH 一旦不含 /sbin 就拿不到 uci，lib.sh 回退默认值
+	# `/mnt/data/OpenClaw/...`，官方 CLI 跟着去读一个不存在的 state 目录，
+	# 只输出一行 "Gateway is not running..."，模型列表直接为空
+	# （实测 22 行 -> 0 行）。超时逻辑内联进来，不依赖任何函数库。
+	if [ ! -s "$wrap" ]; then
 		: >"$wrap" 2>/dev/null || return 127
 		chmod 755 "$wrap" 2>/dev/null || true
 		printf '%s\n' \
 			'#!/bin/sh' \
-			'. /usr/libexec/openclaw/lib.sh 2>/dev/null || exit 127' \
+			'# 自包含超时包装：刻意不 source lib.sh（它会 export' \
+			'# OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH，su 之后的用户' \
+			'# shell 里可能变成默认值，官方 CLI 会跟着读错 state 目录）' \
 			'_t="$1"; shift' \
-			'oc_timeout "$_t" "$@"' >"$wrap"
+			'if command -v timeout >/dev/null 2>&1; then' \
+			'	exec timeout "$_t" "$@"' \
+			'fi' \
+			'"$@" &' \
+			'_pid=$!' \
+			'( _i=0' \
+			'  while [ "$_i" -lt "$_t" ]; do' \
+			'	sleep 1' \
+			'	kill -0 "$_pid" 2>/dev/null || exit 0' \
+			'	_i=$((_i + 1))' \
+			'  done' \
+			'  printf "%s\n" "命令超过 ${_t} 秒，已终止" >&2' \
+			'  kill -TERM "$_pid" 2>/dev/null' \
+			'  sleep 1' \
+			'  kill -KILL "$_pid" 2>/dev/null' \
+			') >/dev/null 2>&1 &' \
+			'_wd=$!' \
+			'wait "$_pid" 2>/dev/null' \
+			'_rc=$?' \
+			'kill "$_wd" 2>/dev/null' \
+			'exit "$_rc"' >"$wrap"
 	fi
 	oc_as_user "$wrap" "$secs" "$@"
 }
