@@ -1889,6 +1889,41 @@ oc_heal_openclaw_cache_dirs() {
 	printf '%s' "$n"
 }
 
+oc_as_user_timeout() {
+	# oc_as_user_timeout <secs> <cmd> [args...] —— 以网关用户执行，并套超时
+	#
+	# **不能**写成 `oc_as_user oc_timeout 120 cmd ...`：oc_timeout 是 shell
+	# 函数，su 过去是一个全新的 shell，函数根本不存在，于是命令变成
+	# `oc_timeout: not found`；而 oc_as_user 把 stderr 丢掉了，上层看到的
+	# 是"命令成功但没有任何输出"——实测「体检」按钮就是这样变成一片空白的。
+	#
+	# 也**不能**写成 `oc_as_user sh -c '...oc_timeout "$@"...' sh 120 cmd`：
+	# oc_as_user 会对每个参数做单引号 quote，内联脚本里的 `$@` 和双引号会被
+	# su 外层的 shell 再次展开，脚本被破坏，实测直接 rc=127 且无输出。
+	# 所以用一张固定内容的包装脚本转发：oc_as_user 只对它做普通参数 quote，
+	# 不存在嵌套引号被二次展开的问题。
+	local secs="$1"; shift
+	# 包装脚本必须放在**网关用户可读可执行**的目录里：OC_RUNDIR 是 root 0700，
+	# 降权后连目录都进不去。$base/tmp 由本插件创建、属主是网关用户、0700、
+	# 在大容量盘上，正合适；拿不到时退回 /tmp（世界可写，但内容固定且每次
+	# 都重写，属主是 root）。
+	local wrap
+	wrap="$(oc_base_dir 2>/dev/null)/tmp/timeout-wrap.sh"
+	case "$wrap" in
+		/tmp/*|'') wrap="${OC_RUNDIR:-/tmp/.openclaw}/timeout-wrap.sh" ;;
+	esac
+	if [ ! -f "$wrap" ] || [ ! -s "$wrap" ]; then
+		: >"$wrap" 2>/dev/null || return 127
+		chmod 755 "$wrap" 2>/dev/null || true
+		printf '%s\n' \
+			'#!/bin/sh' \
+			'. /usr/libexec/openclaw/lib.sh 2>/dev/null || exit 127' \
+			'_t="$1"; shift' \
+			'oc_timeout "$_t" "$@"' >"$wrap"
+	fi
+	oc_as_user "$wrap" "$secs" "$@"
+}
+
 oc_as_user() {
 	# oc_as_user <cmd> [args...] —— 以网关用户身份执行命令
 	#

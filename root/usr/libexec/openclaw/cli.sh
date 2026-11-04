@@ -790,9 +790,9 @@ oc_env_doctor() {
 	# TMPDIR 显式指到 $base/tmp：该目录由本插件创建、属主是网关用户、0700、
 	# 落在大容量盘上。不指定时会回退到共享 /tmp 下的目录，属主不符会被拒。
 	if installed; then
-		oc_as_user env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+		oc_as_user_timeout 120 env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
 			PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-			oc_timeout 120 "$(oc_oc_bin)" doctor 2>&1 | tail -n 60
+			"$(oc_oc_bin)" doctor
 	else
 		printf 'OpenClaw 未安装\n'
 	fi
@@ -813,9 +813,9 @@ cmd_doctor() {
 			# 先取输出再截尾：管道给 tail 时 $? 恒为 0，
 			# diag 会永远报「完成（退出码 0）」，哪怕 doctor --fix 失败。
 			local _o
-			_o="$(oc_as_user env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+			_o="$(oc_as_user_timeout 300 env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
 				PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-				oc_timeout 300 "$(oc_oc_bin)" doctor --fix 2>&1)"
+				"$(oc_oc_bin)" doctor --fix 2>&1)"
 			printf '%s\n' "$_o" | tail -n 60
 			[ -z "$_o" ] || printf '\n'
 		fi

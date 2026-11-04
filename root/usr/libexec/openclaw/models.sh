@@ -39,9 +39,9 @@ oc_run() {
 	# 以网关用户跑，uid 自始至终一致，这个冲突不存在。
 	# TMPDIR 显式指到 $base/tmp（属主 998、0700、在大容量盘上），
 	# 否则会回退到共享 /tmp 下的目录并因属主不符被拒。
-	oc_as_user env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+	oc_as_user_timeout "$t" env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
 		PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-		oc_timeout "$t" "$(oc_oc_bin)" "$@" 2>&1
+		"$(oc_oc_bin)" "$@" 2>&1
 }
 
 oc_run_q() {
@@ -51,9 +51,9 @@ oc_run_q() {
 	# 同 oc_run：必须以网关用户执行并把 TMPDIR 指到 $base/tmp，
 	# 否则 root 身份会创建 openclaw-0 并被后续 chown 翻属主，
 	# 从此 root 调用永久被拒（见上方 oc_run 的说明）。
-	oc_as_user env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+	oc_as_user_timeout "$t" env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
 		PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-		oc_timeout "$t" "$(oc_oc_bin)" "$@" 2>/dev/null
+		"$(oc_oc_bin)" "$@" 2>/dev/null
 }
 
 preset_ids() {
