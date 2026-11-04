@@ -737,6 +737,22 @@ models_url_fail() {
 	printf '{"ok":false,"error":"%s"}\n' "$(oc_json_str "$1")"
 }
 
+oc_curl_transient() {
+	# oc_curl_transient <curl-exit-code> -> 0 = 可重试的瞬时错误
+	#
+	# 真机日志里反复出现（走代理时尤其明显）：
+	#   curl: (35) TLS connect error: unexpected eof while reading
+	#   curl: (56) OpenSSL SSL_read: ... errno 0
+	# 这类错误下一次往往就成功，而一次失败会让模型下拉直接变空 ——
+	# 用户看到的是"获取失败"，实际只是网络抖了一下。
+	# 只重试**连接层**错误；HTTP 401/403/404 是 rc=0 + 状态码，不会走到这里，
+	# 所以 Key 无效仍然立刻报错，不会被重试掩盖。
+	case "${1:-}" in
+		7|28|35|52|56|92) return 0 ;;   # 连不上/超时/TLS/空回复/接收失败/HTTP2
+		*) return 1 ;;
+	esac
+}
+
 models_cache_dir() {
 	# 模型清单缓存目录：<base>/cache/models
 	#
@@ -890,7 +906,7 @@ models_public() {
 	# 只在「没有 API Key」时调用：请求公开目录，请求里不含任何凭据。
 	# 成功时 baseUrl 仍是该 provider 自己的地址（后续 apply 会用到），
 	# 不是公开目录的地址。
-	local p="$1" base="$2" envname="$3" prefix body errf code rc msg ids first m public_ip public_host public_port
+	local p="$1" base="$2" envname="$3" prefix body errf code rc msg ids first m public_ip public_host public_port _try
 	prefix="$(public_prefix "$p")" || return 1
 
 	if ! command -v curl >/dev/null 2>&1; then
@@ -914,12 +930,23 @@ models_public() {
 	body="$OC_RUNDIR/models-public.$$.json"
 	errf="$OC_RUNDIR/models-public.$$.err"
 	# 公开目录不需要 Authorization：这里刻意不写任何 header 文件。
-	code="$(oc_timeout 20 curl -sS --max-time 20 --connect-timeout 10 \
-		-H 'Accept: application/json' -o "$body" -w '%{http_code}' \
-		--max-redirs 0 --noproxy '*' \
-		--resolve "$public_host:$public_port:$public_ip" \
-		"$PUBLIC_MODELS_URL" 2>"$errf")"
-	rc=$?
+	_try=1
+	while :; do
+		code="$(oc_timeout 20 curl -sS --max-time 20 --connect-timeout 10 \
+			-H 'Accept: application/json' -o "$body" -w '%{http_code}' \
+			--max-redirs 0 --noproxy '*' \
+			--resolve "$public_host:$public_port:$public_ip" \
+			"$PUBLIC_MODELS_URL" 2>"$errf")"
+		rc=$?
+		# 连接层瞬时错误重试一次（详见 oc_curl_transient 注释）
+		if [ "$rc" -ne 0 ] && [ "$_try" -lt 2 ] && oc_curl_transient "$rc"; then
+			oc_warn "公开模型目录请求失败（curl 退出码 $rc），重试一次"
+			_try=$((_try + 1))
+			sleep 1
+			continue
+		fi
+		break
+	done
 
 	if [ "$rc" -ne 0 ]; then
 		msg="$(head -n1 "$errf" 2>/dev/null)"

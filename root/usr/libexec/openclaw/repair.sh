@@ -136,6 +136,25 @@ if [ "$_free_after" -lt 900 ]; then
 	say WARN "可用空间仍然偏低（${_free_after} MB）：升级/迁移可能因空间不足失败"
 fi
 
+# 0b ------------------------------------------------- 旧崩溃包清理
+# OpenClaw 每次启动失败都会在 <state>/logs/stability/ 写一个 JSON 诊断包。
+# 真机实测：一次崩溃重启循环留下 20 个（每个几十 KB，不占空间但很难读——
+# 真正有用的通常只有最近几个）。这里只保留最近 10 个，其余删除。
+# 只匹配这一种确切文件名，不动目录里的其它东西。
+_stab_dir="$DATA/logs/stability"
+if [ -d "$_stab_dir" ]; then
+	_stab_n="$(ls -1 "$_stab_dir"/openclaw-stability-*.json 2>/dev/null | wc -l)"
+	_stab_n="$(printf '%s' "$_stab_n" | tr -d ' \r\n')"
+	case "$_stab_n" in ''|*[!0-9]*) _stab_n=0 ;; esac
+	if [ "$_stab_n" -gt 10 ]; then
+		_del=$((_stab_n - 10))
+		ls -1t "$_stab_dir"/openclaw-stability-*.json 2>/dev/null | tail -n "$_del" | \
+			while IFS= read -r _f; do rm -f "$_f" 2>/dev/null; done
+		_after="$(ls -1 "$_stab_dir"/openclaw-stability-*.json 2>/dev/null | wc -l | tr -d ' \r\n')"
+		say FIX "清理旧崩溃诊断包 ${_del} 个（保留最近 10 个，现有 ${_after} 个）"
+	fi
+fi
+
 # 1 ------------------------------------------------------------- base dir
 if [ ! -d "$BASE" ]; then
 	mkdir -p "$BASE" 2>/dev/null && say FIX "已重建安装目录 $BASE" \

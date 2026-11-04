@@ -162,6 +162,36 @@ check('hasLive' in view and 'upstream[0]' in view,
       '前端默认选中实时清单的第一项（最新）')
 
 
+# ---------------------------------------------------------------- 瞬时错误重试
+# 真机日志反复出现 curl (35)/(56)（走代理时 TLS 抖动）。一次失败就让下拉变空，
+# 但下一次往往就成功 —— 所以连接层错误重试一次；鉴权错误绝不能重试。
+pub = code_of('models_public')
+check('oc_curl_transient' in pub, '公开目录请求失败后会判断是否可重试')
+check('_try' in pub and 'continue' in pub, '公开目录最多重试一次')
+check('sleep 1' in pub, '重试前稍等，避免瞬间连打')
+
+trans = work / 'trans.sh'
+trans.write_text(NL.join(['#!/bin/sh', func('oc_curl_transient'), 'oc_curl_transient "$1"', '']),
+                 encoding='utf-8', newline=NL)
+
+
+def is_transient(code):
+    r = subprocess.run(['sh', P(trans), str(code)], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+check(is_transient(35), 'curl 35（TLS 连接错误）判为可重试')
+check(is_transient(56), 'curl 56（接收失败）判为可重试')
+check(is_transient(7), 'curl 7（连不上）判为可重试')
+check(is_transient(28), 'curl 28（超时）判为可重试')
+check(not is_transient(0), 'curl 0（成功）不算瞬时错误')
+check(not is_transient(60), 'curl 60（证书校验失败）不重试（重试也没用）')
+check(not is_transient(1), 'curl 1（不支持的协议）不重试')
+
+# 鉴权失败是 HTTP 状态码（rc=0），不能因为重试把 401 掩盖成"网络问题"
+url2 = code_of('models_url')
+check('401|403' in url2, '上游 401/403 仍然是硬错误（与重试逻辑不冲突）')
+
 # ---------------------------------------------------------------- 清单缓存
 # 用户要求：「记住上一次刷新出来的结果，而不是你给的几个兜底」。
 # 成功一次就落盘；之后网络不通时用它，而不是退回随包预设。
