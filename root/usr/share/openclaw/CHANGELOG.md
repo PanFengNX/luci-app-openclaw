@@ -1,8 +1,27 @@
-<!-- version: 1.8.76 -->
+<!-- version: 1.8.77 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.77
+
+安全加固：破坏性操作强制 POST，堵掉跨站 GET 触发。
+
+- 审计发现 7 个有副作用的端点没有 `is_post()` 检查：
+  `restore`（恢复会覆盖数据目录）、`install`、`save`、`backup_upload`、
+  `github_update_install`、`github_update_rollback`、`cloud_logout`。
+  `http.formvalue()` 同时接受 URL 查询串，于是一张
+  `<img src=".../api/restore?file=xxx.tar.gz">` 就能在管理员浏览任意页面时
+  触发一次恢复 —— 典型 CSRF。前端这些端点本来就用 `post()` 调用，加校验不影响界面。
+- `api-post-guard.sh` 扩到 11 项断言，新增「破坏性操作必须强制 POST」一组。
+
+本轮审计同时确认（无需修改）：
+- 敏感文件权限正确：`.env` / `openclaw.json` 600，`secure/` `backups/` 700 root
+- `/etc/config/openclaw` 不含密钥（密钥只在 `.env`）
+- **云端备份往返可用**：下载 929MB `.enc` → 解密得到 929105988 字节（与本地
+  原归档逐字节等长）→ verify 通过（41219 条目、1027 会话）
+- 日志轮转阈值 256KB，当前日志 10KB，尚未触发属正常
 
 ## 1.8.76
 

@@ -101,6 +101,32 @@ for v in sorted((proj / 'luasrc/view/openclaw').glob('*.htm')):
             print('        %s 里的 %s 没有走 post()' % (v.name, api))
 check(post_ok, '前端用 post() 调用带凭据的端点')
 
+# ---------------------------------------------------------------- 破坏性操作必须 POST
+# 2026-11-04 审计：restore / install / save / backup_upload / github_update_install
+# / github_update_rollback / cloud_logout 都是破坏性或有副作用的操作，却没有
+# is_post() 检查。http.formvalue() 同时接受 query，于是
+#   <img src=".../api/restore?file=xxx.tar.gz">
+# 就能在管理员浏览任意页面时触发一次恢复 —— 典型的 CSRF。
+# 前端这些端点本来就用 post() 调用，所以加校验不会破坏界面。
+DESTRUCTIVE = [
+    ('api_restore', '恢复会覆盖数据目录'),
+    ('api_install', '安装会下载并部署程序'),
+    ('api_save', '会写配置'),
+    ('api_backup_upload', '上传后直接恢复'),
+    ('api_github_update_install', '会从 GitHub 安装新版本'),
+    ('api_github_update_rollback', '会回滚到旧版本'),
+    ('api_cloud_logout', '会清除网盘凭据'),
+]
+for name, why in DESTRUCTIVE:
+    m = re.search(r'^function ' + name + r'\(\)(.*?)^end', ctrl, re.M | re.S)
+    if not m:
+        check(False, '%s 存在' % name)
+        continue
+    body = m.group(1)
+    # 只认函数体开头的守卫（避免误判注释里提到的 is_post）
+    head = body[:400]
+    check('is_post()' in head, '%s 强制 POST（%s）' % (name, why))
+
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
 PYEOF

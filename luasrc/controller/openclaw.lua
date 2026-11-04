@@ -399,6 +399,10 @@ function api_github_update_status()
 end
 
 function api_github_update_install()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交（会从 GitHub 安装新版本）" })
+		return
+	end
 	if http.formvalue("confirm") ~= "1" then
 		out({ ok = false, state = "failed", error = "缺少用户确认" })
 		return
@@ -414,6 +418,10 @@ function api_github_update_install()
 end
 
 function api_github_update_rollback()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交（会回滚到旧版本）" })
+		return
+	end
 	if http.formvalue("confirm") ~= "1" then
 		out({ ok = false, state = "failed", error = "缺少用户确认" })
 		return
@@ -454,6 +462,10 @@ function api_uninstall()
 end
 
 function api_install()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交（安装会下载并部署程序）" })
+		return
+	end
 	local ocv  = http.formvalue("oc_version") or "latest"
 	local ndv  = http.formvalue("node_version") or "auto"
 	local dir  = http.formvalue("base_dir") or ""
@@ -613,6 +625,10 @@ function api_service()
 end
 
 function api_save()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交（会写配置）" })
+		return
+	end
 	local keys = {
 		"base_dir", "port", "bind", "oc_version", "node_version",
 		"npm_registry", "node_mirror", "http_proxy", "enabled", "core_dumps"
@@ -1205,6 +1221,10 @@ end
 
 -- 上传归档：只写进私有 rundir，返回一个受约束的文件名
 function api_backup_upload()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交（上传后直接恢复）" })
+		return
+	end
 	local data = http.formvalue("archive")
 	if not data or #data == 0 then
 		out({ ok = false, error = "没有收到文件" })
@@ -1256,6 +1276,10 @@ function api_backup_upload()
 end
 
 function api_restore()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交（恢复会覆盖数据目录）" })
+		return
+	end
 	local f  = http.formvalue("file") or ""
 	local up = http.formvalue("uploaded") or ""
 	local arg
@@ -1558,6 +1582,10 @@ function api_cloud_login_code()
 end
 
 function api_cloud_logout()
+	if not is_post() then
+		out({ ok = false, error = "请使用 POST 提交（会清除网盘凭据）" })
+		return
+	end
 	cloud_reply(cloud_exec("logout"))
 end
 
