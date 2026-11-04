@@ -1,8 +1,23 @@
-<!-- version: 1.8.69 -->
+<!-- version: 1.8.70 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.70
+
+修掉 1.8.69 的一个回归：升级安装后服务起不来（`active with no instances`）。
+
+- **init.d 没有加载 lib.sh**：启动时的"磁盘自愈"块直接调用 `oc_clean_sqlite_snapshots`
+  和 `oc_free_mb`，而 init.d 自带一套 `uci_get` 等函数、刻意不 source lib.sh ——
+  于是这两个函数不存在，快照清理返回空、可用空间被当成 0，空间检查（<200MB 拒绝启动）
+  把服务拦死，表现为 `active with no instances`。
+- 改为在**子 shell 里临时加载 lib.sh** 再调用快照清理；空间用 `df -m` 直接算，
+  不再依赖 lib.sh。两处都 **fail-open**：拿不到数据就跳过检查，绝不因此拒绝启动。
+- schema 自愈改为调用 cli.sh 新的 `selfheal-schema` 子命令（那是已经加载好
+  lib.sh 与跨 su 超时封装的地方），不再在 init.d 里裸拼命令。
+- 真机验证：制造一个测试只读快照 → `restart` → 快照被清、服务 running、
+  端口 18789 恢复应答。
 
 ## 1.8.69
 

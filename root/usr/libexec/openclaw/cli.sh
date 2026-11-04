@@ -729,6 +729,19 @@ cmd_tasklog() {
 	[ -f "$OC_TASKLOG" ] && tail -n "$n" "$OC_TASKLOG"
 }
 
+cmd_selfheal_schema() {
+	# selfheal-schema : 迁移数据库 schema（doctor --fix），以网关用户身份执行。
+	#
+	# 由 init.d 在"上次启动因 SqliteSchemaMismatchError 失败"时后台调用，
+	# 让崩溃重启循环能自己退出。放在 cli.sh 而不是 init.d 里，是因为 init.d
+	# 不 source lib.sh，拿不到 oc_as_user_timeout（跨 su 的包装）。
+	# 失败不报错：下一次 respawn 会再判断一次，10 分钟节流由调用方负责。
+	installed || return 0
+	oc_as_user_timeout 600 env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+		PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+		"$(oc_oc_bin)" doctor --fix
+}
+
 cmd_unlock() {
 	# unlock : 只读判断 + 必要时清锁，**不取锁**（取锁就永远解不开了）。
 	# stdout 只允许一行 JSON；说明信息一律走 stderr。
@@ -2262,6 +2275,7 @@ case "${1:-}" in
 	token)         get_token; printf '\n' ;;
 	models)        shift; sh "$OC_MODELS" "$@" ;;
 	channels)      shift; sh "$OC_CHANNELS" "$@" ;;
+	selfheal-schema) cmd_selfheal_schema ;;
 	*)
 		cat <<EOF
 openclaw - OpenClaw Launcher (OpenWrt)

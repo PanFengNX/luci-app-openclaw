@@ -721,13 +721,19 @@ start_service() {
 	#   1) 每次启动前清掉残留快照（正常情况下是 0 个，开销可忽略）
 	#   2) 空间不足时拒绝启动 —— 满盘状态下重启只会无限复制、无限失败
 	#   3) 上次失败若是 schema 不匹配，后台跑一次 doctor --fix 让它自愈
-	_oc_snap="$(oc_clean_sqlite_snapshots 0 300 2>/dev/null)"
+	#
+	# **init.d 不 source lib.sh**（它自带 uci_get 等，避免命名冲突），所以这些
+	# 辅助函数必须在**子 shell 里临时加载**。直接在 init.d 里裸调用会得到
+	# "oc_clean_sqlite_snapshots: not found"，`_oc_free` 变成空、被当成 0，
+	# 于是"空间检查"反而把服务拦死 —— 这是 1.8.68 真实发生过的回归。
+	# 并且一律 **fail-open**：拿不到数据就跳过检查，绝不因此拒绝启动。
+	_oc_snap="$( ( . /usr/libexec/openclaw/lib.sh 2>/dev/null; oc_clean_sqlite_snapshots 0 300 ) 2>/dev/null )"
 	case "$_oc_snap" in ''|*[!0-9]*) _oc_snap=0 ;; esac
 	[ "$_oc_snap" -gt 0 ] && logger -t openclaw "启动前清理 OpenClaw 只读快照：$_oc_snap 个（每个是整库副本）"
 
-	_oc_free="$(oc_free_mb "$base" 2>/dev/null)"
-	case "$_oc_free" in ''|*[!0-9]*) _oc_free=0 ;; esac
-	if [ "$_oc_free" -lt 200 ]; then
+	_oc_free="$(df -m "$base" 2>/dev/null | awk 'NR==2{print $4}')"
+	case "$_oc_free" in ''|*[!0-9]*) _oc_free="" ;; esac
+	if [ -n "$_oc_free" ] && [ "$_oc_free" -lt 200 ]; then
 		logger -t openclaw "拒绝启动：可用空间仅 ${_oc_free} MB。每次启动都会复制整库，满盘时只会无限失败；请清理空间或点「一键修复」"
 		return 1
 	fi
@@ -736,6 +742,7 @@ start_service() {
 	# 但必须在服务用户身份 + 正确的 HOME/TMPDIR 下跑（否则会撞上
 	# "Unsafe fallback OpenClaw temp dir" 直接拒绝）。放后台：迁移可能跑几十秒，
 	# 不能卡住 procd 的 start；下一次 respawn 会自然成功。
+	# 具体执行交给 cli.sh 的子命令（那里已经加载好 lib.sh 与超时封装）。
 	_oc_fail="$(ls -t "$state_dir"/logs/stability/*gateway.startup_failed.json 2>/dev/null | head -n1)"
 	if [ -n "$_oc_fail" ] && grep -q "SqliteSchemaMismatchError" "$_oc_fail" 2>/dev/null; then
 		_oc_mark="${OC_RUNDIR:-/tmp/.openclaw}/selfheal-schema"
@@ -749,10 +756,10 @@ start_service() {
 			printf '%s\n' "$_oc_now" >"$_oc_mark" 2>/dev/null || true
 			logger -t openclaw "检测到数据库 schema 需要迁移，后台执行 doctor --fix 自愈"
 			if command -v setsid >/dev/null 2>&1; then
-				setsid sh -c 'exec "$1" "$2" doctor --fix' sh "$OC_USER" "$globaldir/bin/openclaw" \
+				setsid sh /usr/libexec/openclaw/cli.sh selfheal-schema \
 					</dev/null >>"$base/logs/selfheal-doctor.log" 2>&1 &
 			else
-				( oc_as_user "$globaldir/bin/openclaw" doctor --fix ) \
+				( sh /usr/libexec/openclaw/cli.sh selfheal-schema ) \
 					</dev/null >>"$base/logs/selfheal-doctor.log" 2>&1 &
 			fi
 		fi

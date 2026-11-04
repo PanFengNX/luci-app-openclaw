@@ -433,6 +433,20 @@ else
 	skip "缺少 tools/tests/models-catalog.sh"
 fi
 
+# init.d 启动路径的守护：1.8.68 曾在这里裸调 lib.sh 的函数，导致空间检查把
+# 服务拦死（active with no instances）。这条静态测试专门守住它。
+if [ -f tools/tests/init-guard.sh ]; then
+	if out="$(sh tools/tests/init-guard.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "init-guard.sh 全部断言通过"
+	else
+		bad "init-guard.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 |项失败' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/init-guard.sh"
+fi
+
 if [ -f tools/tests/provider-install-behavior.sh ]; then
 	if out="$(sh tools/tests/provider-install-behavior.sh 2>&1)"; then
 		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
