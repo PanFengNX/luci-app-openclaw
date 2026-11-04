@@ -69,13 +69,17 @@ check('--dry-run' in cli, '子命令把 --dry-run 传给 backup.sh')
 check('api_backup_dryrun' in ctrl, '控制器有 api_backup_dryrun')
 check('"backup_dryrun"}, call("api_backup_dryrun")' in ctrl,
       '控制器注册了 backup_dryrun 路由')
-check('bkDryRun' in view, '备份页有演练函数')
-check("mk('演练'" in view, '备份页有「演练」按钮')
-check('backup_dryrun:' in view, '前端有 backup_dryrun 接口地址')
-
-# 前端解析 data 字符串（否则条目数永远不显示）
-check('bkParseData' in view, '前端解析 helper 返回的 data 字符串')
-check('JSON.parse(rr.data)' in view, 'bkParseData 真的做 JSON.parse')
+# 界面**不再**提供「校验 / 演练」（2026-11-04 用户要求：本地备份就在本机，
+# 下载/校验/演练属于排障动作，不该让用户先理解这些概念）。
+# 能力保留在命令行与控制器端点，需要确认"能不能恢复"时用它们。
+check("mk('演练'" not in view, '本地行不再有「演练」按钮')
+check("mk('校验'" not in view, '本地行不再有「校验」按钮')
+check("mk('下载'" not in view, '本地行不再有「下载」按钮')
+check('bkDryRun' not in view and 'bkVerify' not in view,
+      '随之成为死代码的前端函数已删除')
+# 但端点必须还在（CLI 与排障依赖）
+check('api_backup_dryrun' in ctrl and 'api_backup_verify' in ctrl,
+      '控制器端点保留（CLI 与排障可用）')
 
 print('    共 %s 项，%s 项失败' % (total, failed))
 sys.exit(1 if failed else 0)
