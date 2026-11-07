@@ -108,6 +108,16 @@ check("回滚期间 busy 防重入", "p.busy = true; p.phase = 'rollback'" in rb
 check("pluginRender 按 rollbacks 显示回滚按钮",
       "Number(p.rollbacks) > 0" in view and "btn-plugin-rollback" in view)
 
+# 8. 检查失败必须带出后端的具体原因，不能只写「无法检查更新」
+#    （实机反馈：设备连不上 GitHub 时用户看不到任何线索，无从排查）。
+render_src = view[view.find("function pluginRender()"):view.find("function pluginLastLogLine")]
+check("失败提示拼接后端原因", "msg += '：' +" in render_src)
+check("剥掉冗长的失败前缀", "GitHub Release 检查失败" in render_src)
+check("网络类失败提示去配 HTTP 代理",
+      "「安装」页设置 HTTP 代理" in render_src and
+      re.search(r"/解析\|超时\|网络\|不可达\|代理\|curl", render_src) is not None)
+check("块尾提示写明代理通道", "HTTP 代理" in view.split("pluginRollback")[0])
+
 if fails:
     print("\n    %d 项失败" % len(fails))
     sys.exit(1)

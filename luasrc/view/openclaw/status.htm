@@ -543,7 +543,7 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
     </div>
   </div>
   <div class="oc-hint">拉不到版本列表时用「手动指定版本…」填写版本号升级；Node.js 留空表示自动选择满足要求的版本。
-    插件这一行走固定 GitHub 仓库（PanFengNX/luci-app-openclaw），完整安装日志在「安装」页。</div>
+    插件这一行走固定 GitHub 仓库（PanFengNX/luci-app-openclaw），设备直连不了 GitHub 时会使用「安装」页配置的 HTTP 代理；完整安装日志也在「安装」页。</div>
   <!-- 升级进度：点「升级」立刻弹窗显示，实时滚日志。
        以前是一个默认收起的内嵌小框，用户点完升级看不到任何东西，
        不知道到底有没有开始 —— 这条反馈跟安装页保持一致。 -->
@@ -1406,7 +1406,25 @@ function pluginRender(){
     hint.textContent = '升级完成';
     return;
   }
-  if (p.error){ hint.textContent = (p.errorKind === 'install') ? '升级失败' : '无法检查更新'; return; }
+  if (p.error){
+    if (p.errorKind === 'install'){ hint.textContent = '升级失败'; return; }
+    // 检查失败要把后端的具体原因带出来（DNS 失败 / 超时 / 代理不通），
+    // 只写"无法检查更新"用户没法自己排查 —— 实机截图吃过这个亏。
+    var why = String(p.error || '')
+      .replace(/^GitHub Release 检查失败[：:]*/, '')
+      .replace(/^检查更新失败[：:]*/, '');
+    var msg = '无法检查更新';
+    if (why && why !== '检查失败' && why !== '读取更新状态失败'){
+      msg += '：' + (why.length > 40 ? why.slice(0, 40) + '…' : why);
+      // 网络类失败给出唯一可行的自助手段：设备直连不了 GitHub 时，
+      // 更新器会走安装页配置的 HTTP 代理（main.http_proxy）。
+      if (/解析|超时|网络|不可达|代理|curl|Connection|SSL|TLS/i.test(why)){
+        msg += '；可在「安装」页设置 HTTP 代理后重试';
+      }
+    }
+    hint.textContent = msg;
+    return;
+  }
   if (p.cand && p.id){
     renderVerHint(hint, ['可升级到 ', { bold: p.cand }]);
     btn.textContent = '升级到 ' + p.cand;
