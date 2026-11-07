@@ -1064,6 +1064,18 @@ finish() {
 		fi
 	fi
 
+	# 安装树属主自检：OpenClaw 自更新（openclaw update）的 admission 校验
+	# 安装树属主必须等于网关用户。失败只 WARN 不 die —— 安装本身已成功，
+	# 属主错误只影响自更新功能（2026-11-04 教训：功能路径上的检查必须
+	# fail-open，拿不到判据或修不动时放行 + 告警，不拦截交付）。
+	if command -v oc_fix_install_owner >/dev/null 2>&1; then
+		if oc_fix_install_owner; then
+			ilog "安装树属主自检通过：$OC_USER（OpenClaw 可自更新）"
+		else
+			ilog "WARN: 安装树属主不是 $OC_USER，OpenClaw 自更新会被拒绝；可执行 /usr/libexec/openclaw/repair.sh owner-fix 修复"
+		fi
+	fi
+
 	ilog "== 部署完成 =="
 	ilog "OpenClaw $OCV  |  Node.js $NODE_V  |  目录 $BASE_DIR"
 }

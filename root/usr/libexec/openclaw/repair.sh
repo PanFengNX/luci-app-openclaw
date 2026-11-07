@@ -39,12 +39,21 @@ HOME_DIR="$(oc_home_dir)"
 # chown/chmod, so it needs the same fail-closed validation as BASE before any
 # branch can touch it. Do not fall back to the default on failure.
 DATA="$(oc_state_dir)"
+# 安装树（npm 程序目录）同样会被 owner-fix 递归 chown，所以也必须在分支
+# 之前解析并校验。历史上这里漏掉 OC_DIR：owner-fix 声称修属主，实际从不
+# 碰安装树 —— 而 OpenClaw 自更新（openclaw update）的 admission 恰恰校验
+# 安装树属主，导致"修了还是不能自更新"（真机实测从未成功）。
+OC_DIR_FIX="$(oc_oc_dir)"
 if ! oc_validate_base_dir "$BASE"; then
 	printf '错误：安装目录不安全：%s\n' "$BASE" >&2
 	exit 1
 fi
 if ! oc_validate_base_dir "$DATA"; then
 	printf '错误：数据目录不安全：%s\n' "$DATA" >&2
+	exit 1
+fi
+if ! oc_validate_base_dir "$OC_DIR_FIX"; then
+	printf '错误：程序目录不安全：%s\n' "$OC_DIR_FIX" >&2
 	exit 1
 fi
 
@@ -64,6 +73,7 @@ if [ "$OWNER_FIX" = "1" ]; then
 	}
 	_fix_owner_tree "$HOME_DIR"
 	_fix_owner_tree "$DATA"
+	_fix_owner_tree "$OC_DIR_FIX"
 	_fix_owner_tree "$BASE/logs"
 	_fix_owner_tree "$BASE/tmp"
 	# 顺手清掉别的身份留下的临时根（只匹配 openclaw-<数字>）
@@ -356,6 +366,21 @@ if [ -d "$BASE" ]; then
 	fi
 	chmod -R u+rwX "$BASE" 2>/dev/null
 	oc_harden_root_paths "$BASE"
+fi
+# 9b -------------------------------------------------------- install-tree owner
+# 只查 $BASE 顶层目录看不出安装树内部的问题（root 跑过 npm install 后树是
+# root 的，但顶层目录可能早就是 $OC_USER 的）。OpenClaw 自更新的 admission
+# 校验的是树内的对象（bin/openclaw 等），所以这里必须单独探测。
+if command -v oc_install_owner_bad >/dev/null 2>&1; then
+	if oc_install_owner_bad; then
+		if oc_fix_install_owner; then
+			say FIX "已修复安装树属主为 $OC_USER（OpenClaw 可自更新）"
+		else
+			say WARN "安装树属主修复失败：OpenClaw 自更新（openclaw update）将被拒绝"
+		fi
+	else
+		say OK "安装树属主正确（$OC_USER）"
+	fi
 fi
 # Custom state directories outside BASE still need runtime ownership repair.
 case "$DATA" in

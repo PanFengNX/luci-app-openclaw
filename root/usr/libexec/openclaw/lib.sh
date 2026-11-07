@@ -2177,6 +2177,55 @@ oc_fix_perms() {
 	return 0
 }
 
+oc_install_owner_bad() {
+	# 安装树属主是否需要修复。返回 0 = 需要修复（树不是 $OC_USER 的）。
+	#
+	# 为什么单独查这个：OpenClaw 自更新（openclaw update，以网关用户运行）的
+	# package-publication-admission 阶段校验**安装树属主 == 运行进程 uid**。
+	# 树被 root 写过（root 跑过 npm install / 手工部署）后属主就是 root，
+	# 自更新从此永远被拒 —— 真机实测从未成功过。oc_fix_perms 的 chown -R
+	# 理论上会覆盖安装树，但它静默失败（2>/dev/null）且从不回头验证，
+	# 所以需要这个"只读探测"给安装收尾、一键修复和 postinst 自愈共用。
+	#
+	# probe 对象按优先级：bin/openclaw（更新器 admission 实际校验的对象）
+	# → lib/node_modules/openclaw（npm 包根）→ 目录本身（最小安装）。
+	local ocdir probe
+	ocdir="$(oc_oc_dir)"
+	[ -d "$ocdir" ] || return 1
+	for probe in "$ocdir/bin/openclaw" "$ocdir/lib/node_modules/openclaw" "$ocdir"; do
+		[ -e "$probe" ] && break
+	done
+	[ -e "$probe" ] || return 1
+	[ "$(stat -c %U "$probe" 2>/dev/null)" != "$OC_USER" ]
+}
+
+oc_fix_install_owner() {
+	# 把安装树属主归还网关用户（幂等）。返回 0 = 树已归 $OC_USER 或无需处理。
+	# 顺序不可颠倒：安全校验 → 服务用户存在性（fail-open）→ 探测 → chown → 复验。
+	# chown 失败只告警不拦截调用方：安装本身可能已成功，属主错误只影响自更新
+	# （2026-11-04 教训：功能路径上的检查必须 fail-open）。
+	local ocdir
+	ocdir="$(oc_oc_dir)"
+	[ -d "$ocdir" ] || return 0
+	if ! oc_oc_dir_safe; then
+		oc_warn "跳过安装树属主修复：$ocdir 未通过安全校验"
+		return 1
+	fi
+	if ! grep -q "^${OC_USER}:" /etc/passwd 2>/dev/null; then
+		# 没有服务用户（root 直跑等场景）：无事可做，也不算失败。
+		return 0
+	fi
+	if oc_install_owner_bad; then
+		chown -R "$OC_USER":"$OC_GROUP" "$ocdir" 2>/dev/null \
+			|| chown -R "$OC_USER" "$ocdir" 2>/dev/null
+	fi
+	if oc_install_owner_bad; then
+		oc_warn "安装树属主仍不是 $OC_USER：OpenClaw 自更新（openclaw update）会被拒绝。可执行 /usr/libexec/openclaw/repair.sh owner-fix 修复"
+		return 1
+	fi
+	return 0
+}
+
 # ---------------------------------------------------------------- safety
 # The rules below exist to keep a bad install from bricking the router:
 #   * refuse to operate on system / dot-path base directories

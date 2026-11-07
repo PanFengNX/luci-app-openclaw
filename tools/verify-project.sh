@@ -448,6 +448,35 @@ else
 	skip "缺少 tools/tests/init-guard.sh"
 fi
 
+# 安装树属主守护：OpenClaw 自更新（openclaw update）的 admission 校验安装树
+# 属主 == 网关用户；历史上 owner-fix 漏修安装树、repair 只查顶层目录，
+# 导致真机上自更新从未成功过。这条静态测试守住四环修复链。
+if [ -f tools/tests/install-owner.sh ]; then
+	if out="$(sh tools/tests/install-owner.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "install-owner.sh 全部断言通过"
+	else
+		bad "install-owner.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/install-owner.sh"
+fi
+
+# 同主题的行为级冒烟：真实 source lib.sh 并执行探测 / fail-open / 安全闸门
+# 三条路径（结构断言证明"代码长这样"，这一条证明"跑起来是这个行为"）。
+if [ -f tools/tests/owner-fn-behavior.sh ]; then
+	if out="$(sh tools/tests/owner-fn-behavior.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "owner-fn-behavior.sh 全部断言通过"
+	else
+		bad "owner-fn-behavior.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/owner-fn-behavior.sh"
+fi
+
 # 函数可见性：1.8.70 之前 backup.sh 调了 cli.sh 里的 export_note()，
 # 运行时每备份一次就报一行 "export_note: not found"。这条测试按每个脚本
 # 自己的 source 关系判断可见性（不是"全局有没有定义"）。

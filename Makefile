@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-openclaw
-PKG_VERSION:=1.8.78
+PKG_VERSION:=1.8.79
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=openclaw
@@ -72,6 +72,24 @@ done
 if [ -n "$$missing" ]; then
 	echo "openclaw: 以下文件缺少可执行权限，安装不完整：$$missing" >&2
 	exit 1
+fi
+# Self-heal the OpenClaw install-tree ownership: openclaw update runs as the
+# gateway user and its publication admission refuses when the tree is
+# root-owned (root-run npm install / manual deployment leaves it that way).
+# Package upgrades never re-run install.sh, so this is the one automatic
+# repair point for devices installed by older plugin versions. Best-effort:
+# any failure here must NOT fail the package install. Only runs when the
+# tree actually exists and is actually wrong.
+base="$$(uci -q get openclaw.main.base_dir 2>/dev/null || true)"
+[ -n "$$base" ] || base=/mnt/data/OpenClaw
+ocdir="$$(uci -q get openclaw.main.openclaw_dir 2>/dev/null || true)"
+[ -n "$$ocdir" ] || ocdir="$$base/openclaw"
+if [ -d "$$ocdir" ] && [ -x /usr/libexec/openclaw/repair.sh ] \
+	&& grep -q '^openclaw:' /etc/passwd 2>/dev/null; then
+	if [ "$$(stat -c %U "$$ocdir/bin/openclaw" 2>/dev/null)" != "openclaw" ]; then
+		echo "openclaw: 安装树属主不是 openclaw，自动执行 owner-fix（OpenClaw 自更新需要）"
+		sh /usr/libexec/openclaw/repair.sh owner-fix >/dev/null 2>&1 || true
+	fi
 fi
 exit 0
 endef

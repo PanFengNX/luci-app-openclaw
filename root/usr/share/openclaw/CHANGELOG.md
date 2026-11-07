@@ -1,8 +1,35 @@
-<!-- version: 1.8.78 -->
+<!-- version: 1.8.79 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.79
+
+修复：OpenClaw 自带更新（`openclaw update`）从未成功过 —— 安装树属主从未归还网关用户。
+
+- 现象：更新器在 `package-publication-admission` 阶段拒绝，
+  报 `owner UID 0, expected UID 998`（真机实测从未成功过一次）。
+- 根因链（逐条核实）：
+  1. OpenClaw 的更新器以网关用户运行，admission 校验**安装树属主 == 运行
+     进程 uid**；root 跑过 npm install / 手工部署后树是 root 的；
+  2. `repair.sh owner-fix`（专门修属主的命令）只修 home / state / logs / tmp，
+     **漏了安装树**——而安装失败时的报错提示用户执行的正是这条命令；
+  3. 一键修复的 ownership 项只查安装目录**顶层**，顶层正确就报「属主正确」，
+     从不看树内部；
+  4. 插件包升级不重跑 install.sh，错误属主永久残留。
+- 修复（四环，缺一不可）：
+  - `lib.sh` 新增 `oc_install_owner_bad` / `oc_fix_install_owner`
+    （探测 + 归还；先安全校验再 chown；无服务用户时 fail-open）；
+  - `repair.sh owner-fix` 覆盖安装树，且提前对程序目录做 fail-closed 校验；
+  - 一键修复 ownership 项新增安装树探测（9b 项）；
+  - `install.sh` 收尾自检（失败只 WARN 不中止安装）；
+  - **postinst 自愈**：包升级时若安装树属主不对，自动执行 owner-fix ——
+    已装旧版的设备升级到 1.8.79 后无需任何手动操作。
+- 新增守护测试 `tools/tests/install-owner.sh`（17 项断言，反向验证：
+  在未修复代码上 13 项失败）。
+- 本轮未走异源模型复核（用户指示跳过外部模型，改用机械验证补位：
+  语法 + 结构断言 + 反向验证 + 全量回归）。
 
 ## 1.8.78
 
