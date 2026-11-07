@@ -62,13 +62,21 @@ if [ "$OWNER_FIX" = "1" ]; then
 	# 启动路径只断言不修，修只能由用户显式触发 —— 这样"改错了"永远是
 	# 用户主动选择的结果，而不是启动时静默发生的副作用。
 	_fix_owner_tree() {
-		local d="$1"
+		local d="$1" real
 		[ -d "$d" ] || return 0
-		if grep -q "^${OC_USER}:" /etc/passwd 2>/dev/null; then
-			chown -R "$OC_USER:$OC_USER" "$d" 2>/dev/null || \
-				printf '警告：%s 属主修正未完全成功\n' "$d" >&2
+		# 解析符号链接后再 chown：busybox chown -R 对符号链接操作数
+		# 只改链接本身不进树（2026-11-07 真机教训，详见 oc_resolve_dir）。
+		real="$(oc_resolve_dir "$d")"
+		if [ "$real" != "$d" ] && ! oc_validate_base_dir "$real"; then
+			printf '警告：%s 解析到 %s，后者未通过安全校验，跳过\n' "$d" "$real" >&2
+			return 1
 		fi
-		chmod -R u+rwX "$d" 2>/dev/null || true
+		if grep -q "^${OC_USER}:" /etc/passwd 2>/dev/null; then
+			chown -R "$OC_USER:$OC_USER" "$real" 2>/dev/null || \
+				printf '警告：%s（解析 %s）属主修正未完全成功\n' "$d" "$real" >&2
+			[ "$real" != "$d" ] && chown -h "$OC_USER:$OC_USER" "$d" 2>/dev/null
+		fi
+		chmod -R u+rwX "$real" 2>/dev/null || true
 		printf '已修正属主：%s\n' "$d"
 	}
 	_fix_owner_tree "$HOME_DIR"

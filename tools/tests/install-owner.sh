@@ -178,6 +178,46 @@ for f in "$LIB" "$REPAIR" "$INSTALL"; do
 	fi
 done
 
+# ---- 8. 符号链接盲区（2026-11-07 真机：chown -R 对符号链接操作数不递归）----
+# 设备的 openclaw 目录可以是指向另一棵 npm 树的符号链接；busybox chown -R
+# 遇到符号链接操作数只改链接本身，树纹丝不动且无任何报错。递归 chown 必须
+# 先解析真实路径。
+if grep -q '^oc_resolve_dir()' "$LIB"; then
+	chk ok "lib.sh 提供 oc_resolve_dir()（符号链接解析）"
+else
+	chk fail "lib.sh 缺少 oc_resolve_dir()（符号链接安装树永远修不好）"
+fi
+fix_body="$(sed -n '/^oc_fix_install_owner()/,/^}/p' "$LIB")"
+if printf '%s' "$fix_body" | grep -q 'oc_resolve_dir'; then
+	chk ok "oc_fix_install_owner 先解析真实路径再 chown"
+else
+	chk fail "oc_fix_install_owner 直接对配置路径 chown（符号链接盲区）"
+fi
+# 解析出的真实路径必须再过安全校验（符号链接可以指向校验看不见的地方）
+if printf '%s' "$fix_body" | grep -q 'oc_validate_base_dir.*\$real\|oc_validate_base_dir "\$real"'; then
+	chk ok "解析路径复验安全校验（fail-closed）"
+else
+	chk fail "解析路径缺少 oc_validate_base_dir 复验（符号链接可绕过安全边界）"
+fi
+repair_fn="$(sed -n '/_fix_owner_tree()/,/^	}/p' "$REPAIR")"
+if printf '%s' "$repair_fn" | grep -q 'oc_resolve_dir'; then
+	chk ok "repair.sh owner-fix 解析真实路径再 chown"
+else
+	chk fail "repair.sh owner-fix 直接对原路径 chown（符号链接盲区）"
+fi
+# chown 失败不允许整体静默：必须存在失败告警路径
+if printf '%s' "$fix_body" | grep -q 'oc_warn.*chown\|chown 失败'; then
+	chk ok "chown 失败路径有告警（不再全静默）"
+else
+	chk fail "chown 失败仍被 2>/dev/null 完全吞掉（无法排障）"
+fi
+# 复验失败必须带 stat 证据
+if printf '%s' "$fix_body" | grep -q 'stat -c.*%U:%G'; then
+	chk ok "复验失败时输出 stat 证据（路径+当前属主）"
+else
+	chk fail "复验失败时缺少 stat 证据（下轮排查仍无从下手）"
+fi
+
 printf '    共 %s 项，%s 项失败\n' "$n" "$fail"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

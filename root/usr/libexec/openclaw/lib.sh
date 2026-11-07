@@ -2199,12 +2199,34 @@ oc_install_owner_bad() {
 	[ "$(stat -c %U "$probe" 2>/dev/null)" != "$OC_USER" ]
 }
 
+oc_resolve_dir() {
+	# oc_resolve_dir <dir> -> 解析符号链接后的真实目录（stdout）。
+	#
+	# 为什么需要它：busybox `chown -R` 对**符号链接操作数**默认不递归——
+	# 只 chown 链接本身，链接指向的树一个文件都不动（2026-11-07 真机教训：
+	# `openclaw` 目录是指向另一棵 npm 树的符号链接时，`chown -R openclaw
+	# openclaw/` 执行成功但 stat 探测依旧 root，表现为"修了还是坏"且无任何
+	# 报错）。任何递归 chown 前，都必须先把操作数解析成真实路径。
+	#
+	# 解析链：readlink -f → `cd && pwd -P` 兜底 → 原样返回（交由调用方的
+	# 安全校验继续把关）。
+	local d="${1:-}" r=""
+	[ -n "$d" ] || return 0
+	if command -v readlink >/dev/null 2>&1; then
+		r="$(readlink -f "$d" 2>/dev/null)"
+	fi
+	if [ -z "$r" ] || [ ! -d "$r" ]; then
+		r="$(cd "$d" 2>/dev/null && pwd -P)"
+	fi
+	printf '%s' "${r:-$d}"
+}
+
 oc_fix_install_owner() {
 	# 把安装树属主归还网关用户（幂等）。返回 0 = 树已归 $OC_USER 或无需处理。
 	# 顺序不可颠倒：安全校验 → 服务用户存在性（fail-open）→ 探测 → chown → 复验。
 	# chown 失败只告警不拦截调用方：安装本身可能已成功，属主错误只影响自更新
 	# （2026-11-04 教训：功能路径上的检查必须 fail-open）。
-	local ocdir
+	local ocdir real probe
 	ocdir="$(oc_oc_dir)"
 	[ -d "$ocdir" ] || return 0
 	if ! oc_oc_dir_safe; then
@@ -2216,11 +2238,30 @@ oc_fix_install_owner() {
 		return 0
 	fi
 	if oc_install_owner_bad; then
-		chown -R "$OC_USER":"$OC_GROUP" "$ocdir" 2>/dev/null \
-			|| chown -R "$OC_USER" "$ocdir" 2>/dev/null
+		# 必须解析符号链接后 chown：busybox `chown -R` 遇到符号链接操作数
+		# 只改链接本身、不进树（2026-11-07 真机实测：执行"成功"但树纹丝不动）。
+		# 解析出的真实路径还要再过一次形状校验——符号链接完全可能指到
+		# 校验时看不见的地方（oc_oc_dir_safe 校验的是配置路径）。
+		real="$(oc_resolve_dir "$ocdir")"
+		if [ "$real" != "$ocdir" ] && ! oc_validate_base_dir "$real"; then
+			oc_warn "安装树属主修复被拒绝：$ocdir 解析到 $real，后者未通过安全校验"
+			return 1
+		fi
+		if ! chown -R "$OC_USER":"$OC_GROUP" "$real" 2>/dev/null; then
+			if ! chown -R "$OC_USER" "$real" 2>/dev/null; then
+				oc_warn "chown -R $OC_USER $real 失败（退出码 $?）"
+			fi
+		fi
+		# 操作数本身若是符号链接，也一并归位（admission 若按 lstat 看链接
+		# 本身，链接属主同样不能是 root）。
+		[ "$real" != "$ocdir" ] && chown -h "$OC_USER":"$OC_GROUP" "$ocdir" 2>/dev/null
 	fi
 	if oc_install_owner_bad; then
-		oc_warn "安装树属主仍不是 $OC_USER：OpenClaw 自更新（openclaw update）会被拒绝。可执行 /usr/libexec/openclaw/repair.sh owner-fix 修复"
+		# 复验仍失败：把 stat 证据带出来，别再让失败无声无息。
+		for probe in "$ocdir/bin/openclaw" "$ocdir/lib/node_modules/openclaw" "$ocdir"; do
+			[ -e "$probe" ] && break
+		done
+		oc_warn "安装树属主仍不是 $OC_USER（$(stat -c '%n %U:%G' "$probe" 2>/dev/null || echo "$probe 不可 stat")；解析路径 $(oc_resolve_dir "$ocdir")）：OpenClaw 自更新（openclaw update）会被拒绝。可执行 /usr/libexec/openclaw/repair.sh owner-fix 修复"
 		return 1
 	fi
 	return 0
