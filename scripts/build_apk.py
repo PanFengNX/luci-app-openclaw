@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -494,6 +495,35 @@ def source_date_epoch() -> int:
 
 
 # --------------------------------------------------------------------------- main
+def add_meta_items(items, version):
+    """Append two generated files that make .run installs first-class citizens.
+
+    .run 免包管理器安装不进包数据库，github-update.sh 于是查不到
+    「已装了哪个版本、装了哪些文件」（1.8.83 及更早的 .run 设备因此
+    永远装不了自更新）。这两个文件补上：
+
+      usr/share/openclaw/version      一行版本号 -> current_version() 兜底
+      usr/share/openclaw/filelist.txt 相对路径清单 -> installed_files_list() 兜底
+
+    apk/ipk 安装同样带上它们（数据库才是权威来源，文件只是冗余标记，
+    apk del 时会被一并删掉）。清单必须包含这两个文件自身。
+    """
+    rels = sorted({arc for _, arc, _ in items}
+                  | {"usr/share/openclaw/version",
+                     "usr/share/openclaw/filelist.txt"})
+    meta_dir = Path(tempfile.mkdtemp(prefix="ocmeta-"))
+    sub = meta_dir / "usr/share/openclaw"
+    sub.mkdir(parents=True)
+    vfile = sub / "version"
+    vfile.write_bytes((version + "\n").encode("utf-8"))
+    lfile = sub / "filelist.txt"
+    lfile.write_bytes(("".join(r + "\n" for r in rels)).encode("utf-8"))
+    items.append((vfile, "usr/share/openclaw/version", 0o644))
+    items.append((lfile, "usr/share/openclaw/filelist.txt", 0o644))
+    log(f"meta  -> version={version}, filelist={len(rels)} entries")
+    return meta_dir
+
+
 def main():
     ap = argparse.ArgumentParser()
     _ver, _rel = read_makefile_versions()
@@ -515,6 +545,7 @@ def main():
         log("no files collected, aborting")
         return 1
     log(f"collected {len(items)} files")
+    meta_dir = add_meta_items(items, version)
 
     installed_size = sum(p.stat().st_size for p, _, _ in items)
 
@@ -565,6 +596,7 @@ def main():
 
     build_ipk(items, version, args.release, sde, DIST / f"{PKG_NAME}_{version}_all.ipk")
     build_run(items, version, DIST / f"{PKG_NAME}-{version}.run", sde)
+    shutil.rmtree(meta_dir, ignore_errors=True)
 
     # sha256 file
     sums = []

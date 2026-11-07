@@ -47,8 +47,9 @@ def P(path):
     s = pathlib.Path(path).as_posix()
     return '/c' + s[2:] if len(s) > 1 and s[1] == ':' else s
 
-def run_list(kind, output, rc=0, no_apk=False, db_file=None, db_func=False):
-    bind = work / ('bin-' + kind + str(rc) + str(len(output)) + str(bool(db_file)) + str(db_func) + str(len(list(work.iterdir()))))
+def run_list(kind, output, rc=0, no_apk=False, db_file=None, db_func=False,
+             pkg_filelist=None, with_builtin=True, extra_funcs=()):
+    bind = work / ('bin-' + kind + str(rc) + str(len(output)) + str(bool(db_file)) + str(db_func) + str(bool(pkg_filelist)) + str(with_builtin) + str(len(list(work.iterdir()))))
     bind.mkdir()
     if kind == 'apk':
         (bind / 'apk').write_text('#!/bin/sh\nprintf %s "$OUTPUT"\nexit "$RC"\n', encoding='utf-8')
@@ -64,16 +65,22 @@ def run_list(kind, output, rc=0, no_apk=False, db_file=None, db_func=False):
         p = bind / name
         if p.exists(): p.chmod(0o755)
     judge = work / ('judge-' + kind + str(rc) + str(len(output)) + '.sh')
-    judge.write_text(NL.join([
+    head = [
         '#!/bin/sh',
         'PKG_NAME=luci-app-openclaw',
+        # 默认指向不存在的路径：无参数用例就是"设备上没有包内清单文件"
+        'PKG_FILELIST=' + repr(P(pkg_filelist)) if pkg_filelist else 'PKG_FILELIST="/nonexistent/filelist.txt"',
+        'RUN_VERSION_FILE=/nonexistent/version',
         'APK_DB_FILE=' + repr(P(db_file)) if db_file else 'APK_DB_FILE="/lib/apk/db/installed"',
         'LOG=/dev/null',
         'msg() { :; }',
+    ]
+    if with_builtin:
+        head.append(func(gh_src, 'builtin_filelist'))
+    judge.write_text(NL.join(head + [
         func(gh_src, 'apk_db_files'),
         func(gh_src, 'installed_files_list'),
-        'installed_files_list',
-    ]) + NL, encoding='utf-8')
+    ] + list(extra_funcs) + ['installed_files_list']) + NL, encoding='utf-8')
     judge.chmod(0o755)
     env = os.environ.copy()
     env['OUTPUT'] = output
@@ -99,8 +106,75 @@ r = run_list('apk', '', rc=1, db_file=apk_db, db_func=True)
 check(r.returncode == 0 and r.stdout == 'etc/config/openclaw\ntoplevel\nabs/x\n', 'apk_db_files 丢弃 .. 段并按归一化绝对路径规则得到 abs/x')
 r = run_list('apk', '', rc=1, db_file=apk_db)
 check(r.returncode == 0 and r.stdout == 'etc/config/openclaw\ntoplevel\nabs/x\n', 'apk info 失败时从已安装库兜底')
-r = run_list('apk', '', rc=1, db_file=work / 'missing-installed')
-check(r.returncode != 0 and r.stdout == '', 'apk info 与已安装库都不可用时失败且 stdout 为空')
+r = run_list('apk', '', rc=1, db_file=work / 'missing-installed', with_builtin=False)
+check(r.returncode != 0 and r.stdout == '', 'apk info / 已安装库 / 包内清单 / 内置清单全部不可用时失败且 stdout 为空')
+
+# .run 免包管理器安装的三级兜底（1.8.84 起的行为）：
+# 包数据库查不到 -> 包内清单文件 -> 内置兜底清单。
+fl = work / 'filelist-stub.txt'
+fl.write_text('etc/config/openclaw\nusr/share/openclaw/model-presets.json\n', encoding='utf-8')
+r = run_list('apk', '', rc=1, db_file=work / 'missing-fl', pkg_filelist=fl)
+check(r.returncode == 0 and r.stdout == 'etc/config/openclaw\nusr/share/openclaw/model-presets.json\n',
+      '包数据库查不到时用包内清单文件（.run 安装 1.8.84+）')
+r = run_list('apk', '', rc=1, db_file=work / 'missing-builtin')
+check(r.returncode == 0
+      and 'usr/libexec/openclaw/github-update.sh' in r.stdout
+      and 'usr/share/openclaw/filelist.txt' in r.stdout
+      and 'usr/lib/lua/luci/view/openclaw/status.htm' in r.stdout,
+      '连包内清单都没有时用内置兜底清单（.run 安装 1.8.83-）')
+
+# 内置兜底清单必须与仓库实际打包内容一致（build_apk.py 的收集规则 + 两个
+# meta 文件）。少一条就会漏备份，多一条只是被 missing 逻辑跳过 —— 但两边
+# 漂移本身就是 bug 信号，这里直接对账。
+expected = set()
+for base, prefix in (('root', ''), ('luasrc', 'usr/lib/lua/luci')):
+    src = proj / base
+    for p in src.rglob('*'):
+        if p.is_file():
+            rel = p.relative_to(src).as_posix()
+            expected.add(prefix + '/' + rel if prefix else rel)
+expected |= {'usr/share/openclaw/version', 'usr/share/openclaw/filelist.txt'}
+m = re.search(r"builtin_filelist\(\) \{.*?<<'__FILELIST__'\n(.*?)\n__FILELIST__", gh_src, re.S)
+check(bool(m), '找到内置兜底清单 here-doc')
+if m:
+    got = {x for x in m.group(1).splitlines() if x.strip()}
+    check(got == expected,
+          '内置兜底清单与仓库打包内容一致',
+          ('仅内置清单有：%s；仅仓库有：%s' % (
+              sorted(got - expected)[:4], sorted(expected - got)[:4])) if got != expected else '')
+
+# current_version 的 .run 兜底：包数据库查不到时读版本标记文件，
+# 标记非法照样给空串，不给 0.0.0 顶包。
+def run_ver(marker, has_marker=True):
+    vf = work / ('ver-' + str(abs(hash(marker))) + str(has_marker))
+    if has_marker:
+        vf.write_text(marker, encoding='utf-8')
+    j = work / ('vj-' + str(abs(hash(marker))) + str(has_marker) + '.sh')
+    j.write_text(NL.join([
+        '#!/bin/sh',
+        'PKG_NAME=luci-app-openclaw',
+        'RUN_VERSION_FILE=' + repr(P(vf)),
+        'APK_DB_FILE=/nonexistent/installed',
+        func(gh_src, 'ver_norm'),
+        func(gh_src, 'version_ok'),
+        func(gh_src, 'current_version'),
+        'current_version',
+    ]) + NL, encoding='utf-8')
+    j.chmod(0o755)
+    # PATH 只给 /usr/bin:/bin：Git Bash 里没有 apk/opkg，走的是
+    # 「两个包管理器都查不到」的路径。
+    e = os.environ.copy()
+    e['PATH'] = '/usr/bin:/bin'
+    return subprocess.run(['sh', P(j)], capture_output=True, text=True, env=e, timeout=30)
+
+r = run_ver('1.8.83\n')
+check(r.returncode == 0 and r.stdout == '1.8.83', '.run 版本标记可当作已装版本', r.stdout)
+r = run_ver('1.8.83-r9\n')
+check(r.returncode == 0 and r.stdout == '1.8.83', '.run 版本标记剥掉 -r 包修订号', r.stdout)
+r = run_ver('not-a-version\n')
+check(r.returncode != 0 and r.stdout == '', '.run 版本标记非法时给空串而不是硬编版本')
+r = run_ver('', has_marker=False)
+check(r.returncode == 0 and r.stdout == '0.0.0', '没有任何版本来源时仍报告 0.0.0（未知）')
 
 opkg_listing = 'Package luci-app-openclaw is installed on root and has the following files:\n/etc/config/openclaw\n/usr/libexec/openclaw/main.sh\n'
 opkg_mark = work / 'opkg-used'
@@ -115,8 +189,13 @@ check(opkg_mark.exists() and opkg_mark.read_text(encoding='utf-8') == 'opkg',
 mixed = 'luci-app-openclaw-1.8.52-r1 contains:\n  etc/config/openclaw\n../evil\n/etc/passwd\n-rf\n   \nusr/bin/openclaw\n'
 r = run_list('apk', mixed)
 check(r.returncode == 0 and r.stdout == 'etc/config/openclaw\netc/passwd\nusr/bin/openclaw\n', '清单丢弃越界、选项行与空白行并归一化绝对路径')
-r = run_list('apk', 'etc/config/openclaw\n', rc=1)
-check(r.returncode != 0, 'apk 非零退出码不能视为空清单成功')
+# apk info 非零退出码时其输出不可信：即使它吐了内容也必须弃用。
+# 数据库也没有条目（.run 设备的常态）会落到内置清单 —— 断言两点：
+# 结果可用，但**绝不是**那个失败工具吐出来的内容。
+r = run_list('apk', 'zz-collide\n', rc=1, db_file=work / 'missing-rc1')
+check(r.returncode == 0 and 'zz-collide' not in (r.stdout or '')
+      and 'usr/libexec/openclaw/github-update.sh' in (r.stdout or ''),
+      'apk 非零退出码的输出被弃用，改用兜底清单（.run 设备）')
 
 def rnd_left(d, label):
     """返回 (是否干净, 说明)。

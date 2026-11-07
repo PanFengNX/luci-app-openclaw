@@ -28,6 +28,11 @@ PKG_NAME="luci-app-openclaw"
 # apk 已安装库文本路径。默认就是 apk 自己的已安装库；这个变量只为测试注入，
 # 不要在生产里改。
 APK_DB_FILE="${APK_DB_FILE:-/lib/apk/db/installed}"
+# 包内清单 / 版本标记（1.8.84 起随包安装）。只为测试注入这两个路径。
+# .run 免包管理器安装没有包数据库：版本靠版本标记文件，已装文件清单靠
+# 包内清单文件；两者都缺（1.8.83 及更早的 .run 安装）才用内置兜底清单。
+PKG_FILELIST="${PKG_FILELIST:-/usr/share/openclaw/filelist.txt}"
+RUN_VERSION_FILE="${RUN_VERSION_FILE:-/usr/share/openclaw/version}"
 MAX_BYTES=8388608      # 8 MiB：本包是纯脚本，正常只有几十 KB
 FETCH_TIMEOUT=30       # 元数据 / 校验和：30s
 PKG_TIMEOUT=180        # 插件包本体：3min
@@ -259,6 +264,19 @@ current_version() {
 	else
 		v="$(opkg status "$PKG_NAME" 2>/dev/null | sed -n 's/^Version: //p' | head -n1)"
 		[ -n "$v" ] && found=1
+	fi
+	# .run 免包管理器安装：包数据库里没有本包，读安装器随包落下的版本标记。
+	# 标记内容就是一行版本号（构建时生成），首行取值后仍然走下面的
+	# version_ok 校验。注意语义：文件读不到/为空 = "没有版本来源"（0.0.0）；
+	# 文件有内容但不是版本号 = "本该知道却坏了"（空串 + 失败），绝不拿
+	# 0.0.0 把"坏了"说成"没装"。
+	if [ "$found" -eq 0 ] && [ -r "$RUN_VERSION_FILE" ]; then
+		v="$(head -n1 "$RUN_VERSION_FILE" 2>/dev/null | tr -d ' \t\r')"
+		case "$v" in
+			[0-9]*) found=1 ;;
+			'') v="" ;;
+			*) printf ''; return 1 ;;
+		esac
 	fi
 	if [ "$found" -eq 0 ]; then printf '0.0.0'; return 0; fi
 	# 只取开头的数字版本段，丢掉 -r1 / -1 之类的包修订号
@@ -532,24 +550,78 @@ apk_db_files() {
 	' "$APK_DB_FILE" 2>/dev/null
 }
 
+builtin_filelist() {
+	# 内置兜底清单：本包的标准安装路径（与 scripts/build_apk.py 的收集规则
+	# 一致，tools/tests/github-update-filelist.sh 负责盯住两边不漂移）。
+	# 只在「包数据库查不到 + 包内清单文件也不存在」时使用 —— 典型场景是
+	# 1.8.83 及更早的 .run 免包管理器安装：设备上文件都在，但没有任何清单
+	# 可查。老安装里不存在的文件由 backup_current 的 missing 逻辑跳过，
+	# 多列不存在的路径是安全的，少列才会漏备份。
+	cat <<'__FILELIST__'
+etc/init.d/openclaw
+etc/uci-defaults/99-openclaw
+usr/bin/openclaw
+usr/lib/lua/luci/controller/openclaw.lua
+usr/lib/lua/luci/view/openclaw/backup.htm
+usr/lib/lua/luci/view/openclaw/changelog.htm
+usr/lib/lua/luci/view/openclaw/channels.htm
+usr/lib/lua/luci/view/openclaw/install.htm
+usr/lib/lua/luci/view/openclaw/log.htm
+usr/lib/lua/luci/view/openclaw/model.htm
+usr/lib/lua/luci/view/openclaw/setup.htm
+usr/lib/lua/luci/view/openclaw/status.htm
+usr/lib/lua/luci/view/openclaw/terminal.htm
+usr/libexec/openclaw/backup.sh
+usr/libexec/openclaw/channels.sh
+usr/libexec/openclaw/cli.sh
+usr/libexec/openclaw/cloud.sh
+usr/libexec/openclaw/credential.sh
+usr/libexec/openclaw/github-update.sh
+usr/libexec/openclaw/install.sh
+usr/libexec/openclaw/lib.sh
+usr/libexec/openclaw/models.sh
+usr/libexec/openclaw/repair.sh
+usr/libexec/openclaw/versions.sh
+usr/share/openclaw/CHANGELOG.md
+usr/share/openclaw/config.default
+usr/share/openclaw/filelist.txt
+usr/share/openclaw/model-presets.json
+usr/share/openclaw/version
+usr/share/rpcd/acl.d/luci-app-openclaw.json
+__FILELIST__
+}
+
 installed_files_list() {
 	# 输出已安装文件的相对路径；诊断进入日志，不能污染 stdout。
-	local raw rc
+	# 来源按优先级：包管理器（apk info / apk 已安装库 / opkg files）
+	# -> 包内清单文件 -> 内置兜底清单。前两级都查不到说明这是 .run 安装
+	# 或包数据库异常，早先在这里直接失败，.run 设备因此永远装不了更新。
+	local raw rc src=""
 	if command -v apk >/dev/null 2>&1; then
 		raw="$(apk info -L "$PKG_NAME" 2>/dev/null)"
 		rc=$?
-		if [ "$rc" -ne 0 ] || [ -z "$raw" ]; then
+		if [ "$rc" -eq 0 ] && [ -n "$raw" ]; then
+			src='apk info'
+		else
 			raw="$(apk_db_files)"
-			if [ -z "$raw" ]; then
-				msg 'apk info 与已安装库都没取到文件清单'
-				return 1
-			fi
+			if [ -n "$raw" ]; then src='apk 已安装库'; fi
 		fi
 	else
 		raw="$(opkg files "$PKG_NAME" 2>/dev/null)"
 		rc=$?
-		[ "$rc" -eq 0 ] || { msg "获取已安装文件列表失败（退出码 $rc）"; return 1; }
+		if [ "$rc" -eq 0 ] && [ -n "$raw" ]; then src='opkg'; fi
 	fi
+	if [ -z "$src" ]; then
+		if [ -r "$PKG_FILELIST" ]; then
+			raw="$(cat "$PKG_FILELIST" 2>/dev/null)"
+			src='包内清单文件'
+		else
+			raw="$(builtin_filelist)"
+			src='内置清单'
+		fi
+	fi
+	[ -n "$raw" ] || { msg 'apk/opkg、包内清单与内置清单都没有取到文件清单'; return 1; }
+	msg "已安装文件清单来源：$src"
 	# 两个包管理器都统一：去行首空白、剥掉至多一个前导 /；剥完仍为空、
 	# 仍以 / 开头、含 .. 段则丢弃。老代码对两个包管理器从来都是这套逻辑，
 	# 这道 allow_absolute 门是新加的收紧；某个构建的 apk 输出绝对路径时会让
