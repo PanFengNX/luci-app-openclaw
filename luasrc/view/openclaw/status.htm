@@ -507,7 +507,8 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
       <button id="btn-node-upgrade" class="oc-btn" disabled>升级</button>
     </div>
     <!-- 插件自身的版本更新（GitHub Release）：和上面两行同构，省得为了升级
-         插件再跳到安装页去找。装包仍然是 POST + 用户确认，回滚留在安装页。 -->
+         插件再跳到安装页去找。装包仍然是 POST + 用户确认；回滚入口在下方
+         操作区（有回滚包才显示）。 -->
     <div class="oc-row oc-row-fixed">
       <label>插件</label>
       <span class="oc-pill" id="up-plugin-cur">-</span>
@@ -527,6 +528,9 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
     <!-- 插件检查失败 / 想强制复查时的手动入口。首页加载时会静默检查一次，
          有候选就把上面「插件」行的按钮点亮，所以平时不用点这个。 -->
     <button id="btn-plugin-check" class="oc-btn ghost" type="button">检查插件更新</button>
+    <!-- 安装页的「插件自身更新」卡片已并入首页；回滚是升级失败后的兜底，
+         平时没有回滚包，按钮藏起来，status 轮询读到 rollbacks>0 才显示。 -->
+    <button id="btn-plugin-rollback" class="oc-btn ghost" type="button" style="display:none">回滚上一版本</button>
   </div>
   <div id="ver-manual" class="oc-pick-manual" style="display:none">
     <div class="oc-row"><label for="oc-ver-input">OpenClaw</label>
@@ -539,7 +543,7 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
     </div>
   </div>
   <div class="oc-hint">拉不到版本列表时用「手动指定版本…」填写版本号升级；Node.js 留空表示自动选择满足要求的版本。
-    插件这一行走固定 GitHub 仓库（PanFengNX/luci-app-openclaw），安装日志与回滚在「安装」页。</div>
+    插件这一行走固定 GitHub 仓库（PanFengNX/luci-app-openclaw），完整安装日志在「安装」页。</div>
   <!-- 升级进度：点「升级」立刻弹窗显示，实时滚日志。
        以前是一个默认收起的内嵌小框，用户点完升级看不到任何东西，
        不知道到底有没有开始 —— 这条反馈跟安装页保持一致。 -->
@@ -1385,12 +1389,16 @@ function pluginRender(){
   var p = state.plugin;
   var hint = $('plugin-ver-hint'), btn = $('btn-plugin-update'), pill = $('up-plugin-cur');
   if (pill) pill.textContent = pluginPillCur() || '-';
+  // 回滚按钮：有回滚包（上一次升级留下）才出现，升级/检查过程中不出现。
+  var rb = $('btn-plugin-rollback');
+  if (rb) rb.style.display = (!p.busy && Number(p.rollbacks) > 0) ? '' : 'none';
   if (!hint || !btn) return;
   hint.className = 'oc-hint';
   btn.textContent = '升级';
   btn.disabled = true;
   if (p.busy){
-    hint.textContent = (p.phase === 'install') ? '正在升级…' : '正在检查…';
+    hint.textContent = (p.phase === 'install') ? '正在升级…'
+                     : (p.phase === 'rollback') ? '正在回滚…' : '正在检查…';
     return;
   }
   if (p.phase === 'done'){
@@ -1532,10 +1540,11 @@ function pluginPoll(){
         if (d.state === 'running'){ pluginRender(); pluginPoll(); return; }
         p.busy = false;
         if (d.state === 'success'){
+          var wasRollback = (p.phase === 'rollback');
           p.phase = 'done'; p.cand = ''; p.id = '';
           pluginCacheClear();            // 版本已变，缓存的候选必须作废
           pluginRender();
-          verUpSay('插件升级完成，正在刷新页面…');
+          verUpSay(wasRollback ? '已回滚到上一版本，正在刷新页面…' : '插件升级完成，正在刷新页面…');
           // 插件文件已被替换：刷新才能加载新界面，也能读到新版本号。
           setTimeout(function(){ location.reload(); }, 1500);
           return;
@@ -1574,6 +1583,31 @@ function pluginInstall(){
       p2.errorKind = 'install';
       pluginRender();
       verUpSay('插件升级失败：' + p2.error, true);
+      return;
+    }
+    pluginRender();
+    pluginPoll();
+  }, 75000);
+}
+// 回滚上一版本：用最近一次升级留下的回滚包恢复插件文件。
+// 原「安装」页卡片并入首页后，这是唯一的图形回滚入口；
+// 只有 status 轮询读到 rollbacks>0（确实有回滚包）时按钮才显示。
+function pluginRollback(){
+  var p = state.plugin;
+  if (p.busy) return;
+  if (!confirm('确认使用最近的回滚包恢复当前插件文件？\n当前版本会被替换为上一次升级前的文件。')) return;
+  p.busy = true; p.phase = 'rollback'; p.error = ''; p.errorKind = '';
+  p.ticks = 0; p.fails = 0;
+  pluginRender();
+  verUpSay('正在回滚插件…');
+  post(API.github_update_rollback, { confirm:'1' }, function(d){
+    var p2 = state.plugin;
+    if (!d || d.ok === false){
+      p2.busy = false;
+      p2.error = (d && d.error) || '无法启动回滚';
+      p2.errorKind = 'install';
+      pluginRender();
+      verUpSay('插件回滚失败：' + p2.error, true);
       return;
     }
     pluginRender();
@@ -2388,6 +2422,7 @@ if ($('btn-node-upgrade')) $('btn-node-upgrade').onclick = function(){ startNode
 // 「插件」行：有候选时是「升级到 x」，检查失败后可用下面的「检查插件更新」复查。
 if ($('btn-plugin-update')) $('btn-plugin-update').onclick = function(){ pluginInstall(); };
 if ($('btn-plugin-check'))  $('btn-plugin-check').onclick  = function(){ pluginCheck(false); };
+if ($('btn-plugin-rollback')) $('btn-plugin-rollback').onclick = function(){ pluginRollback(); };
 
 // 手填入口（次要入口）：默认折叠，只在拉不到列表或用户想指定特定版本时展开。
 // 收起时不参与任何提交 —— 两个提交按钮就在折叠区里，收起后点不到。

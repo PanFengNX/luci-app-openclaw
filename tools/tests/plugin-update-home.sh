@@ -91,6 +91,23 @@ check("status 输出 current 字段", r'\"current\":\"$(jstr "$cur")\"' in st)
 check("status 调 current_version", "current_version" in st)
 check("status 仍输出 rollbacks", r'\"rollbacks\":$nrb' in st)
 
+# 7. 安装页卡片已移除，回滚入口挪到首页
+#    1.8.85：首页有了检查/安装之后，「安装」页那张「插件自身更新」卡片
+#    与首页完全重复；唯一不重复的是「回滚上一版本」，挪到首页操作区。
+inst_view = (proj / "luasrc/view/openclaw/install.htm").read_text(encoding="utf-8")
+check("安装页不再有「插件自身更新」卡片", "插件自身更新" not in inst_view)
+check("安装页没有残留 gh 卡片元素", "btn-gh-" not in inst_view and "gh-log" not in inst_view)
+check("安装页没有残留 github_update 引用", "github_update" not in inst_view)
+check("首页有回滚按钮", 'id="btn-plugin-rollback"' in view)
+check("回滚按钮默认隐藏", re.search(r'id="btn-plugin-rollback"[^>]*display:none', view) is not None)
+check("回滚走 POST + confirm=1",
+      bool(re.search(r"post\(API\.github_update_rollback,\s*\{\s*confirm:'1'\s*\}", view)))
+rbfn = view[view.find("function pluginRollback()"):] if "function pluginRollback()" in view else ""
+check("回滚前有确认弹窗", "confirm(" in rbfn)
+check("回滚期间 busy 防重入", "p.busy = true; p.phase = 'rollback'" in rbfn)
+check("pluginRender 按 rollbacks 显示回滚按钮",
+      "Number(p.rollbacks) > 0" in view and "btn-plugin-rollback" in view)
+
 if fails:
     print("\n    %d 项失败" % len(fails))
     sys.exit(1)
