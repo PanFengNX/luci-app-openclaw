@@ -118,26 +118,53 @@ fi
 # ---- 6. Makefile postinst 自愈 --------------------------------------------
 postinst_body="$(sed -n '/^define Package\/\$(PKG_NAME)\/postinst/,/^endef/p' "$MAKEFILE")"
 if printf '%s' "$postinst_body" | grep -q 'owner-fix'; then
-	chk ok "postinst 含 owner-fix 自愈"
+	chk ok "Makefile postinst 含 owner-fix 自愈（SDK 构建通道）"
 else
-	chk fail "postinst 缺少 owner-fix 自愈（旧设备升级后树属主不会修）"
+	chk fail "Makefile postinst 缺少 owner-fix 自愈（SDK 构建通道）"
 fi
 if printf '%s' "$postinst_body" | grep -q 'stat -c %U.*bin/openclaw'; then
-	chk ok "postinst 用 stat 探测 bin/openclaw 属主（只在确实不对时才修）"
+	chk ok "Makefile postinst 用 stat 探测 bin/openclaw 属主（只在确实不对时才修）"
 else
-	chk fail "postinst 缺少 stat -c %U 探测（会无条件跑 owner-fix）"
+	chk fail "Makefile postinst 缺少 stat -c %U 探测（会无条件跑 owner-fix）"
 fi
 if printf '%s' "$postinst_body" | grep -q 'uci -q get openclaw.main'; then
-	chk ok "postinst 用 uci 解析安装目录（不写死路径）"
+	chk ok "Makefile postinst 用 uci 解析安装目录（不写死路径）"
 else
-	chk fail "postinst 没有通过 uci 解析安装目录"
+	chk fail "Makefile postinst 没有通过 uci 解析安装目录"
 fi
 # postinst 自愈必须 best-effort：任何失败不得让包安装失败
 heal_body="$(printf '%s\n' "$postinst_body" | sed -n '/Self-heal/,/exit 0/p')"
 if printf '%s' "$heal_body" | grep -q '|| true'; then
-	chk ok "postinst 自愈 best-effort（|| true 兜底）"
+	chk ok "Makefile postinst 自愈 best-effort（|| true 兜底）"
 else
-	chk fail "postinst 自愈缺少 || true（可能让包安装失败）"
+	chk fail "Makefile postinst 自愈缺少 || true（可能让包安装失败）"
+fi
+
+# ---- 6b. 发行包构建通道的自愈（build_apk.py 的 SCRIPTS 与 .run 模板）------
+# 真实教训：postinst 有三条独立通道 —— Makefile define 只进 SDK 构建，
+# **发行包（apk v3 / ipk / apk v2 / .run）全部走 build_apk.py 里的模板**。
+# 1.8.79 首包就漏了这里：源码修了、包里没有，靠解包验证才抓到。
+BUILDER="$PROJ/scripts/build_apk.py"
+if [ -f "$BUILDER" ]; then
+	builder_scripts="$(sed -n '/^SCRIPTS = """/,/^"""/p' "$BUILDER")"
+	if printf '%s' "$builder_scripts" | grep -q 'owner-fix'; then
+		chk ok "build_apk.py SCRIPTS 模板含 owner-fix 自愈（apk/ipk 通道）"
+	else
+		chk fail "build_apk.py SCRIPTS 模板缺少 owner-fix 自愈（发行包 postinst 不会自愈！）"
+	fi
+	if printf '%s' "$builder_scripts" | grep -q 'stat -c %U.*bin/openclaw'; then
+		chk ok "SCRIPTS 模板用 stat 探测（只在确实不对时才修）"
+	else
+		chk fail "SCRIPTS 模板缺少 stat 探测（会无条件跑 owner-fix）"
+	fi
+	run_tail="$(sed -n '/script = f"""/,/^"""/p' "$BUILDER")"
+	if printf '%s' "$run_tail" | grep -q 'owner-fix'; then
+		chk ok ".run 模板含 owner-fix 自愈（免包管理器通道）"
+	else
+		chk fail ".run 模板缺少 owner-fix 自愈（.run 安装不会自愈！）"
+	fi
+else
+	chk fail "找不到 scripts/build_apk.py（发行包构建器缺失）"
 fi
 
 # ---- 7. 不允许在代码里写死 UID（环境适配：判据必须是相对量）--------------

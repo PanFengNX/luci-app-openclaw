@@ -108,6 +108,24 @@ if [ -n "$missing" ]; then
 	echo "openclaw: 以下文件缺少可执行权限，安装不完整：$missing" >&2
 	exit 1
 fi
+# Self-heal the OpenClaw install-tree ownership: openclaw update runs as the
+# gateway user and its publication admission refuses when the tree is
+# root-owned (root-run npm install / manual deployment leaves it that way).
+# Package upgrades never re-run install.sh, so this is the one automatic
+# repair point for devices installed by older plugin versions. Best-effort:
+# any failure here must NOT fail the package install. Only runs when the
+# tree actually exists and is actually wrong.
+base="$(uci -q get openclaw.main.base_dir 2>/dev/null || true)"
+[ -n "$base" ] || base=/mnt/data/OpenClaw
+ocdir="$(uci -q get openclaw.main.openclaw_dir 2>/dev/null || true)"
+[ -n "$ocdir" ] || ocdir="$base/openclaw"
+if [ -d "$ocdir" ] && [ -x /usr/libexec/openclaw/repair.sh ] \
+	&& grep -q '^openclaw:' /etc/passwd 2>/dev/null; then
+	if [ "$(stat -c %U "$ocdir/bin/openclaw" 2>/dev/null)" != "openclaw" ]; then
+		echo "openclaw: 安装树属主不是 openclaw，自动执行 owner-fix（OpenClaw 自更新需要）"
+		sh /usr/libexec/openclaw/repair.sh owner-fix >/dev/null 2>&1 || true
+	fi
+fi
 exit 0
 """
 
@@ -406,6 +424,20 @@ rm -f /tmp/luci-indexcache
 # 读 ACL，装完不 reload 的话新会话仍按旧权限表判定（表现为接口 403）。
 # .run 路径没有包管理器代跑 postinst，所以这段必须在这里重复一次。
 [ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd reload >/dev/null 2>&1
+# 安装树属主自愈（与 postinst 同款）：openclaw update 以网关用户运行，
+# admission 校验安装树属主；root 部署的旧设备树是 root 的，自更新永远被拒。
+# best-effort，失败不影响安装结果。
+base="$(uci -q get openclaw.main.base_dir 2>/dev/null || true)"
+[ -n "$base" ] || base=/mnt/data/OpenClaw
+ocdir="$(uci -q get openclaw.main.openclaw_dir 2>/dev/null || true)"
+[ -n "$ocdir" ] || ocdir="$base/openclaw"
+if [ -d "$ocdir" ] && [ -x /usr/libexec/openclaw/repair.sh ] \
+	&& grep -q '^openclaw:' /etc/passwd 2>/dev/null; then
+	if [ "$(stat -c %U "$ocdir/bin/openclaw" 2>/dev/null)" != "openclaw" ]; then
+		echo "openclaw: 安装树属主不是 openclaw，自动执行 owner-fix（OpenClaw 自更新需要）"
+		sh /usr/libexec/openclaw/repair.sh owner-fix >/dev/null 2>&1 || true
+	fi
+fi
 echo "installed {PKG_NAME} {version}"
 echo "LuCI: 服务 -> OpenClaw 助手"
 """
