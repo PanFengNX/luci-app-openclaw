@@ -866,7 +866,7 @@ cmd_install() {
 
 # ---------------------------------------------------------------- status
 cmd_status() {
-	local s='idle' tail_txt nrb lpid
+	local s='idle' tail_txt nrb lpid cur
 	init_dirs || { fail '私有临时目录不可用'; return 1; }
 	if [ -d "$LOCK" ]; then
 		lpid="$(cat "$LOCK/pid" 2>/dev/null)"
@@ -888,7 +888,11 @@ cmd_status() {
 	nrb="$(ls -1 "$ROLLBACK_DIR"/rollback-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')"
 	case "$nrb" in ''|*[!0-9]*) nrb=0 ;; esac
 	tail_txt="$(tail -n 40 "$LOG" 2>/dev/null)"
-	json "{\"ok\":true,\"state\":\"$s\",\"rollbacks\":$nrb,\"log\":\"$(jstr "$tail_txt")\"}"
+	# 已安装插件版本：首页要把「插件」和 OpenClaw / Node 并排显示，
+	# 就不再依赖「先检查一次才有版本号」。只读本机包数据库，不联网。
+	# 解析失败给空串（不知道就是不知道），别用 0.0.0 伪装成某个版本。
+	cur="$(current_version 2>/dev/null)" || cur=""
+	json "{\"ok\":true,\"state\":\"$s\",\"current\":\"$(jstr "$cur")\",\"rollbacks\":$nrb,\"log\":\"$(jstr "$tail_txt")\"}"
 }
 
 # ---------------------------------------------------------------- rollback

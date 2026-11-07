@@ -506,6 +506,14 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
       <span id="node-ver-hint" class="oc-hint"></span>
       <button id="btn-node-upgrade" class="oc-btn" disabled>升级</button>
     </div>
+    <!-- 插件自身的版本更新（GitHub Release）：和上面两行同构，省得为了升级
+         插件再跳到安装页去找。装包仍然是 POST + 用户确认，回滚留在安装页。 -->
+    <div class="oc-row oc-row-fixed">
+      <label>插件</label>
+      <span class="oc-pill" id="up-plugin-cur">-</span>
+      <span id="plugin-ver-hint" class="oc-hint">未检查</span>
+      <button id="btn-plugin-update" class="oc-btn" type="button" disabled>升级</button>
+    </div>
     <!-- 升级/安装的反馈就放在升级模块里：失败原因、冲突提示、"正在升级"。
          之前统一写进页面最底部的 #st-op-hint（在"可复制的控制台地址"卡片里），
          用户点了升级后红字出现在一个无关位置，等于没提示。 -->
@@ -516,6 +524,9 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
   </div>
   <div class="oc-actions">
     <button id="btn-ver-manual" class="oc-btn ghost" type="button">手动指定版本…</button>
+    <!-- 插件检查失败 / 想强制复查时的手动入口。首页加载时会静默检查一次，
+         有候选就把上面「插件」行的按钮点亮，所以平时不用点这个。 -->
+    <button id="btn-plugin-check" class="oc-btn ghost" type="button">检查插件更新</button>
   </div>
   <div id="ver-manual" class="oc-pick-manual" style="display:none">
     <div class="oc-row"><label for="oc-ver-input">OpenClaw</label>
@@ -527,7 +538,8 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
       <button id="btn-node-manual" class="oc-btn ghost" type="button">升级 Node.js</button>
     </div>
   </div>
-  <div class="oc-hint">拉不到版本列表时用「手动指定版本…」填写版本号升级；Node.js 留空表示自动选择满足要求的版本。</div>
+  <div class="oc-hint">拉不到版本列表时用「手动指定版本…」填写版本号升级；Node.js 留空表示自动选择满足要求的版本。
+    插件这一行走固定 GitHub 仓库（PanFengNX/luci-app-openclaw），安装日志与回滚在「安装」页。</div>
   <!-- 升级进度：点「升级」立刻弹窗显示，实时滚日志。
        以前是一个默认收起的内嵌小框，用户点完升级看不到任何东西，
        不知道到底有没有开始 —— 这条反馈跟安装页保持一致。 -->
@@ -742,7 +754,12 @@ var API = {
   backup_download: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","backup_download")%>',
   restore: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","restore")%>',
   devices_pending: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","devices_pending")%>',
-  devices_approve: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","devices_approve")%>'
+  devices_approve: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","devices_approve")%>',
+  // 插件自身更新（脚本 root/usr/libexec/openclaw/github-update.sh）。
+  // status 只读；check 访问 GitHub 并落盘候选版本；install 必须 POST + 确认。
+  github_update_status: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","github_update_status")%>',
+  github_update_check: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","github_update_check")%>',
+  github_update_install: '<%=luci.dispatcher.build_url("admin","services","openclaw","api","github_update_install")%>'
 };
 var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer:null, nodeExisting:[], nodeBusy:false, upAutoScroll:true,
   // versionsStatus：api_versions 透传的 versions.sh status（一行 JSON 字符串）。
@@ -757,7 +774,11 @@ var state = { info:null, ocList:[], nodeList:[], engines:'', poll:null, logTimer
   upgrading:false,
   // ocCand / nodeCand：最近一次渲染算出的升级候选（null = 没有可升级的目标）。
   // 按钮的 disabled 与「升级到 x」的目标版本都从这里取，保证提示和按钮一致。
-  ocCand:null, nodeCand:null };
+  ocCand:null, nodeCand:null,
+  // plugin：插件自身的更新状态。current/cand/id 来自更新器 JSON；
+  // busy 期间按钮全部禁用，phase 区分「检查」与「安装」两种进行中提示。
+  plugin:{ current:'', cand:'', id:'', state:'idle', checked:false,
+           busy:false, phase:'', error:'', rollbacks:0, timer:null, ticks:0, fails:0 } };
 var VER_CHECKING = '正在检查更新…';
 
 function $(id){ return document.getElementById(id); }
@@ -767,7 +788,7 @@ function once(cb){
   var done = false;
   return function(v){ if (done) return; done = true; cb(v); };
 }
-function post(url, data, cb){
+function post(url, data, cb, timeoutMs){
   var body = [];
   for (var k in data) body.push(encodeURIComponent(k)+'='+encodeURIComponent(data[k]));
   var x = new XMLHttpRequest();
@@ -782,8 +803,9 @@ function post(url, data, cb){
   // 让轮询类调用方知道"这次没拿到数据"而不是"服务端说失败了"。
   x.onerror   = function(){ fin({ok:false, net:true}); };
   x.ontimeout = function(){ fin({ok:false, net:true}); };
-  // 有界等待：启停网关可能要几十秒。
-  x.timeout = 900000;
+  // 有界等待：启停网关可能要几十秒。插件更新检查要访问 GitHub，
+  // 后端单次 max-time 30s，调用方可以传更短/更长的上限。
+  x.timeout = timeoutMs || 900000;
   x.send(body.join('&'));
 }
 function get(url, cb, timeoutMs){
@@ -1346,6 +1368,217 @@ function renderOcUpdate(){
   // 回到非 update 状态时按钮文案复位：否则会残留上一轮的「升级到 x」。
   if (btn && st !== 'update') btn.textContent = '升级';
   renderUpgradeBtns();
+}
+
+// ------------------------------------------------- 插件自身更新提示（首页）
+// 与 OpenClaw / Node 两行同构：当前版本药丸 + 一行提示 + 一个按钮。
+// 数据源是插件自带的更新器（固定 GitHub Release）。首屏先读本机版本
+// （只读包数据库，不联网），再静默检查一次远端；有候选才点亮按钮。
+// 「检查」本身会落盘候选版本，所以它是 POST；「升级」还要用户显式确认。
+function pluginPillCur(){
+  var cur = String(state.plugin.current || '');
+  // 0.0.0 表示更新器在包数据库里查不到本插件（.run 安装或安装方式特殊），
+  // 这种情况下显示 - 更诚实，不谎报一个具体版本。
+  return (cur && cur !== '0.0.0') ? cur : '';
+}
+function pluginRender(){
+  var p = state.plugin;
+  var hint = $('plugin-ver-hint'), btn = $('btn-plugin-update'), pill = $('up-plugin-cur');
+  if (pill) pill.textContent = pluginPillCur() || '-';
+  if (!hint || !btn) return;
+  hint.className = 'oc-hint';
+  btn.textContent = '升级';
+  btn.disabled = true;
+  if (p.busy){
+    hint.textContent = (p.phase === 'install') ? '正在升级…' : '正在检查…';
+    return;
+  }
+  if (p.phase === 'done'){
+    hint.className = 'oc-hint oc-ok';
+    hint.textContent = '升级完成';
+    return;
+  }
+  if (p.error){ hint.textContent = (p.errorKind === 'install') ? '升级失败' : '无法检查更新'; return; }
+  if (p.cand && p.id){
+    renderVerHint(hint, ['可升级到 ', { bold: p.cand }]);
+    btn.textContent = '升级到 ' + p.cand;
+    btn.disabled = false;
+    return;
+  }
+  if (!p.checked){ hint.textContent = '未检查'; return; }
+  // 拉到了列表才可能说"已是最新"：检查失败时走上面的 error 分支。
+  if (p.state === 'none'){ hint.textContent = '已是最新'; return; }
+  hint.textContent = pluginPillCur() ? '无法检查更新' : '本机版本未知';
+}
+function pluginLastLogLine(log){
+  var lines = String(log || '').split('\n');
+  for (var i = lines.length - 1; i >= 0; i--){
+    var s = lines[i].replace(/^\s+|\s+$/g, '');
+    if (s) return s.length > 160 ? s.slice(0, 160) + '…' : s;
+  }
+  return '详见「安装」页日志';
+}
+// 静默检查每次进页面都要打一次 GitHub（后端单次上限 30s，会占住一个
+// uhttpd worker）。用 sessionStorage 记 15 分钟：同一浏览器里反复刷新首页
+// 不再重复访问。缓存只在本机版本没变时可信 —— 版本一变（刚装完新包）就作废
+// 重查，否则会提示"可升级到刚装上的版本"。
+var PLUGIN_CACHE_KEY = 'oc-plugin-check';
+var PLUGIN_CACHE_MS  = 15 * 60 * 1000;
+function pluginCacheGet(){
+  try {
+    var s = window.sessionStorage.getItem(PLUGIN_CACHE_KEY);
+    if (!s) return null;
+    var o = JSON.parse(s);
+    if (!o || !o.ts || (Date.now() - o.ts) > PLUGIN_CACHE_MS) return null;
+    return o;
+  } catch(e){ return null; }
+}
+function pluginCacheSet(d){
+  try {
+    window.sessionStorage.setItem(PLUGIN_CACHE_KEY, JSON.stringify({
+      ts: Date.now(), current: d.current || '', state: d.state || '',
+      release: d.release || '', id: d.id || ''
+    }));
+  } catch(e){}
+}
+function pluginCacheClear(){
+  try { window.sessionStorage.removeItem(PLUGIN_CACHE_KEY); } catch(e){}
+}
+// check 与缓存共用同一段落状态，避免两处对字段的解释漂移。
+function pluginApplyCheck(d){
+  var p = state.plugin;
+  p.checked = true;
+  if (d.current) p.current = String(d.current);
+  p.state = d.state || '';
+  if (d.state === 'available' && d.id){
+    p.cand = String(d.release || '');
+    p.id = String(d.id);
+  } else {
+    p.cand = ''; p.id = '';
+  }
+}
+function pluginStatus(auto){
+  get(API.github_update_status, function(d){
+    var p = state.plugin;
+    if (!d || d.ok === false){
+      p.busy = false;
+      p.error = (d && d.error) || '读取更新状态失败';
+      p.errorKind = 'status';
+      pluginRender();
+      return;
+    }
+    if (d.current) p.current = String(d.current);
+    p.rollbacks = Number(d.rollbacks) || 0;
+    if (d.state === 'running'){
+      // 从安装页发起、或切走又切回：接着轮询，别让界面像卡住。
+      p.busy = true; p.phase = 'install';
+      pluginRender();
+      pluginPoll();
+      return;
+    }
+    // 不从持久化的 success 推断"刚升级完"：刷新后仍会读到它，
+    // 那样会变成无限刷新。真正的完成只在本页轮询里处理。
+    if (auto && !p.checked && !p.busy){
+      var c = pluginCacheGet();
+      if (c && c.current === pluginPillCur()){
+        pluginApplyCheck(c);
+        pluginRender();
+        return;
+      }
+      pluginCheck(true);
+      return;
+    }
+    pluginRender();
+  }, 20000);
+}
+function pluginCheck(silent){
+  var p = state.plugin;
+  if (p.busy) return;
+  p.busy = true; p.phase = 'check'; p.error = ''; p.errorKind = ''; p.cand = ''; p.id = '';
+  pluginRender();
+  // 后端单次访问 GitHub 的上限是 30s，另外可能再抓一次校验和文件。
+  post(API.github_update_check, {}, function(d){
+    var p2 = state.plugin;
+    p2.busy = false; p2.phase = '';
+    if (!d || d.ok === false){
+      p2.error = (d && d.error) || '检查失败';
+      p2.errorKind = 'check';
+      pluginRender();
+      if (!silent) verUpSay('检查插件更新失败：' + p2.error, true);
+      return;
+    }
+    pluginApplyCheck(d);
+    pluginCacheSet(d);
+    pluginRender();
+  }, 75000);
+}
+function pluginPoll(){
+  var p = state.plugin;
+  if (p.timer) clearTimeout(p.timer);
+  p.timer = setTimeout(function(){
+    p.ticks = (p.ticks || 0) + 1;
+    // 与安装页一致：1.5s × 200 ≈ 5 分钟，超时就停，别无限转圈。
+    if (p.ticks > 200){
+      p.busy = false; p.error = '等待升级结果超时'; p.errorKind = 'install';
+      pluginRender();
+      verUpSay('等待插件升级结果超时，请到「安装」页查看日志。', true);
+      return;
+    }
+    get(API.github_update_status, function(d){
+      if (d && d.ok !== false){
+        p.fails = 0;
+        p.rollbacks = Number(d.rollbacks) || 0;
+        if (d.current) p.current = String(d.current);
+        if (d.state === 'running'){ pluginRender(); pluginPoll(); return; }
+        p.busy = false;
+        if (d.state === 'success'){
+          p.phase = 'done'; p.cand = ''; p.id = '';
+          pluginCacheClear();            // 版本已变，缓存的候选必须作废
+          pluginRender();
+          verUpSay('插件升级完成，正在刷新页面…');
+          // 插件文件已被替换：刷新才能加载新界面，也能读到新版本号。
+          setTimeout(function(){ location.reload(); }, 1500);
+          return;
+        }
+        p.error = '升级失败'; p.errorKind = 'install';
+        pluginRender();
+        verUpSay('插件升级失败：' + pluginLastLogLine(d.log), true);
+        return;
+      }
+      p.fails = (p.fails || 0) + 1;
+      if (p.fails >= 3){
+        p.busy = false; p.error = '读取升级状态失败'; p.errorKind = 'install';
+        pluginRender();
+        verUpSay('连续 3 次读取插件升级状态失败' + (d && d.error ? '：' + d.error : ''), true);
+        return;
+      }
+      pluginPoll();
+    }, 15000);
+  }, 1500);
+}
+function pluginInstall(){
+  var p = state.plugin;
+  if (p.busy || !p.id) return;
+  if (!confirm('确认把插件升级到 ' + p.cand + '？\n升级前会自动备份当前插件文件。')) return;
+  // 候选指纹必须原样回传：后端据此确认装的就是页面上这一份，
+  // 期间另一次检查换了候选就拒绝安装（否则等于静默升级）。
+  p.busy = true; p.phase = 'install'; p.error = ''; p.errorKind = '';
+  p.ticks = 0; p.fails = 0;
+  pluginRender();
+  verUpSay('正在下载并安装插件 ' + p.cand + '…');
+  post(API.github_update_install, { confirm:'1', id: p.id }, function(d){
+    var p2 = state.plugin;
+    if (!d || d.ok === false){
+      p2.busy = false;
+      p2.error = (d && d.error) || '无法启动安装';
+      p2.errorKind = 'install';
+      pluginRender();
+      verUpSay('插件升级失败：' + p2.error, true);
+      return;
+    }
+    pluginRender();
+    pluginPoll();
+  }, 75000);
 }
 
 // 安装类操作的进度提示：安装日志已移到「设置」页，本页只显示一行状态。
@@ -2152,6 +2385,9 @@ document.addEventListener('click', function(e){
 // 必须包一层：直接把 startOcUpdate 挂到 onclick 上，浏览器会把 Event 当第一个参数传进去。
 if ($('btn-oc-upgrade'))   $('btn-oc-upgrade').onclick   = function(){ startOcUpdateFromHint(); };
 if ($('btn-node-upgrade')) $('btn-node-upgrade').onclick = function(){ startNodeUpdateFromHint(); };
+// 「插件」行：有候选时是「升级到 x」，检查失败后可用下面的「检查插件更新」复查。
+if ($('btn-plugin-update')) $('btn-plugin-update').onclick = function(){ pluginInstall(); };
+if ($('btn-plugin-check'))  $('btn-plugin-check').onclick  = function(){ pluginCheck(false); };
 
 // 手填入口（次要入口）：默认折叠，只在拉不到列表或用户想指定特定版本时展开。
 // 收起时不参与任何提交 —— 两个提交按钮就在折叠区里，收起后点不到。
@@ -2343,6 +2579,10 @@ function resumeInstallIfRunning(){
 }
 
 loadInfo();
+// 插件自身的更新状态：status 只读本机包数据库（毫秒级），拿到当前版本后
+// 再静默检查一次 GitHub Release —— 有候选才点亮「插件」行的按钮。
+// 这就是「和 OpenClaw / Node 一样放在首页」：不用先去安装页点检查。
+pluginStatus(true);
 // 进入页面只读缓存，不联网。
 // 原来这里带 refresh=1：后端会串行跑 4 次网络请求（npm 官方 / npmmirror /
 // Node 官方 / Node 镜像，单次 max-time 20s），一次页面加载最多占住 CGI
