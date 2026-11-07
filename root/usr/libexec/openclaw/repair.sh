@@ -81,7 +81,18 @@ if [ "$OWNER_FIX" = "1" ]; then
 	}
 	_fix_owner_tree "$HOME_DIR"
 	_fix_owner_tree "$DATA"
-	_fix_owner_tree "$OC_DIR_FIX"
+	# 安装树走 oc_fix_install_owner：它处理符号链接（目录级 + launcher 指向
+	# 树外的链接终点），_fix_owner_tree 只做普通递归 chown，两者不等价
+	# （2026-11-07 真机：launcher 是指向 /SSD/OpenClaw/global 的符号链接）。
+	if command -v oc_fix_install_owner >/dev/null 2>&1; then
+		if oc_fix_install_owner; then
+			printf '已修正属主（含链接终点）：%s\n' "$OC_DIR_FIX"
+		else
+			printf '警告：安装树属主修正未完全成功：%s\n' "$OC_DIR_FIX" >&2
+		fi
+	else
+		_fix_owner_tree "$OC_DIR_FIX"
+	fi
 	_fix_owner_tree "$BASE/logs"
 	_fix_owner_tree "$BASE/tmp"
 	# 顺手清掉别的身份留下的临时根（只匹配 openclaw-<数字>）

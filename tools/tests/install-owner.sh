@@ -212,10 +212,36 @@ else
 	chk fail "chown 失败仍被 2>/dev/null 完全吞掉（无法排障）"
 fi
 # 复验失败必须带 stat 证据
-if printf '%s' "$fix_body" | grep -q 'stat -c.*%U:%G'; then
-	chk ok "复验失败时输出 stat 证据（路径+当前属主）"
+if printf '%s' "$fix_body" | grep -q 'ls -ld\|stat -c.*%U:%G'; then
+	chk ok "复验失败时输出 stat/ls 证据（路径+当前属主）"
 else
 	chk fail "复验失败时缺少 stat 证据（下轮排查仍无从下手）"
+fi
+# ---- 9. 树内 launcher 符号链接（2026-11-07 第二层根因）--------------------
+# bin/openclaw 可以是指向树外另一棵 npm 树的符号链接：stat/admission 看的是
+# 链接终点的属主，而 chown -R 递归不跟随树内链接。必须显式解析并归还。
+if printf '%s' "$fix_body" | grep -q '\[ -L "\$probe" \]\|-L "\$probe"'; then
+	chk ok "oc_fix_install_owner 对探测对象做符号链接判定（[ -L ]）"
+else
+	chk fail "oc_fix_install_owner 不判定探测对象是否符号链接（launcher 指树外时修不到）"
+fi
+if printf '%s' "$fix_body" | grep -q 'readlink -f "\$probe"'; then
+	chk ok "探测对象是链接时解析终点（readlink -f）"
+else
+	chk fail "缺少对探测对象链接终点的解析（树外目标永远轮不到）"
+fi
+# 链接终点的 chown 也必须过安全校验（不能 chown 任意 readlink 结果）
+linktgt_body="$(printf '%s' "$fix_body" | sed -n '/for probe in/,/done/p' | head -40)"
+if printf '%s' "$linktgt_body" | grep -q 'oc_validate_base_dir'; then
+	chk ok "链接终点 chown 前有 oc_validate_base_dir 校验（fail-closed）"
+else
+	chk fail "链接终点缺少安全校验（readlink 可被指向系统路径）"
+fi
+ownerfix_body2="$(sed -n '/OWNER_FIX" = "1"/,/^exit 0/p' "$REPAIR" | head -70)"
+if printf '%s' "$ownerfix_body2" | grep -q 'oc_fix_install_owner'; then
+	chk ok "owner-fix 对安装树复用 oc_fix_install_owner（与 9b 同路径）"
+else
+	chk fail "owner-fix 用普通递归 chown 处理安装树（与 9b 行为漂移）"
 fi
 
 printf '    共 %s 项，%s 项失败\n' "$n" "$fail"

@@ -2226,7 +2226,7 @@ oc_fix_install_owner() {
 	# 顺序不可颠倒：安全校验 → 服务用户存在性（fail-open）→ 探测 → chown → 复验。
 	# chown 失败只告警不拦截调用方：安装本身可能已成功，属主错误只影响自更新
 	# （2026-11-04 教训：功能路径上的检查必须 fail-open）。
-	local ocdir real probe
+	local ocdir real probe ptgt pdir
 	ocdir="$(oc_oc_dir)"
 	[ -d "$ocdir" ] || return 0
 	if ! oc_oc_dir_safe; then
@@ -2255,13 +2255,38 @@ oc_fix_install_owner() {
 		# 操作数本身若是符号链接，也一并归位（admission 若按 lstat 看链接
 		# 本身，链接属主同样不能是 root）。
 		[ "$real" != "$ocdir" ] && chown -h "$OC_USER":"$OC_GROUP" "$ocdir" 2>/dev/null
+		# 递归 chown 同样不跟随**树内**的符号链接：launcher（bin/openclaw）
+		# 常是指向另一棵 npm 树（如 /SSD/OpenClaw/global）的符号链接，
+		# stat 探测（跟链接）看的是树外目标的属主，admission 校验的也是它。
+		# 必须对每个探测对象单独解析终点并归还属主。
+		for probe in "$ocdir/bin/openclaw" "$ocdir/lib/node_modules/openclaw" "$ocdir"; do
+			[ -L "$probe" ] || continue
+			ptgt="$(readlink -f "$probe" 2>/dev/null)"
+			[ -n "$ptgt" ] && [ "$ptgt" != "$probe" ] || continue
+			pdir="$ptgt"
+			[ -d "$ptgt" ] || pdir="$(dirname "$ptgt")"
+			if ! oc_validate_base_dir "$pdir"; then
+				oc_warn "跳过 $probe 的链接终点 $ptgt：未通过安全校验"
+				continue
+			fi
+			if [ -d "$ptgt" ]; then
+				chown -R "$OC_USER":"$OC_GROUP" "$ptgt" 2>/dev/null \
+					|| chown -R "$OC_USER" "$ptgt" 2>/dev/null \
+					|| oc_warn "chown -R $OC_USER $ptgt 失败"
+			else
+				chown "$OC_USER":"$OC_GROUP" "$ptgt" 2>/dev/null \
+					|| chown "$OC_USER" "$ptgt" 2>/dev/null \
+					|| oc_warn "chown $OC_USER $ptgt 失败"
+			fi
+			chown -h "$OC_USER":"$OC_GROUP" "$probe" 2>/dev/null
+		done
 	fi
 	if oc_install_owner_bad; then
-		# 复验仍失败：把 stat 证据带出来，别再让失败无声无息。
+		# 复验仍失败：把 stat/ls 证据带出来，别再让失败无声无息。
 		for probe in "$ocdir/bin/openclaw" "$ocdir/lib/node_modules/openclaw" "$ocdir"; do
 			[ -e "$probe" ] && break
 		done
-		oc_warn "安装树属主仍不是 $OC_USER（$(stat -c '%n %U:%G' "$probe" 2>/dev/null || echo "$probe 不可 stat")；解析路径 $(oc_resolve_dir "$ocdir")）：OpenClaw 自更新（openclaw update）会被拒绝。可执行 /usr/libexec/openclaw/repair.sh owner-fix 修复"
+		oc_warn "安装树属主仍不是 $OC_USER（$(ls -ld "$probe" 2>/dev/null || stat -c '%n %U:%G' "$probe" 2>/dev/null || echo "$probe 不可 stat")；解析路径 $(oc_resolve_dir "$ocdir")）：OpenClaw 自更新（openclaw update）会被拒绝。可执行 /usr/libexec/openclaw/repair.sh owner-fix 修复"
 		return 1
 	fi
 	return 0

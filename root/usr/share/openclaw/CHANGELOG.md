@@ -1,8 +1,27 @@
-<!-- version: 1.8.81 -->
+<!-- version: 1.8.82 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.8.82
+
+修复：安装树内的 launcher 是符号链接时，1.8.81 依旧修不动（真机实证）。
+
+- 1.8.81 部署后的取证输出：`/SSD/OpenClaw/openclaw/bin/openclaw
+  root:root`，目录解析结果与配置路径相同（目录**不是**链接），且无
+  chown 失败告警（chown 返回 0）。
+- 根因（第二层）：**`bin/openclaw`（launcher）本身是指向树外另一棵 npm
+  树（`/SSD/OpenClaw/global`）的符号链接**。`stat` 探测跟随链接看的是
+  树外目标，admission 校验的也是它；而 busybox `chown -R` 递归时**不跟随
+  树内的符号链接**——目标在树外，永远轮不到。
+- 修复：`oc_fix_install_owner` 对每个探测对象（bin/openclaw /
+  lib/node_modules / 目录本身）检查 `[ -L ]`，是链接则 `readlink -f`
+  解析终点、过 `oc_validate_base_dir` 安全校验后单独归还属主（目录
+  递归 / 文件单点），链接本身也 `chown -h` 归位；失败告警保留退出码。
+- `repair.sh owner-fix` 对安装树改走 `oc_fix_install_owner`（与
+  9b、postinst 自愈同一代码路径，避免三条路径行为漂移）。
+- 复验失败的告警升级为 `ls -ld`（直接暴露类型与链接指向）。
 
 ## 1.8.81
 
