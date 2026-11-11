@@ -1775,7 +1775,11 @@ end
 --   * 删除密码只判"你是否同意删除"，永远不需要还原，所以只存加盐哈希。
 -- 合成一套的后果是"改了删除密码，老备份就解不开了"，必须分开。
 function api_delpass_status()
-	cloud_reply(cloud_exec("delpass-status"))
+	-- delpass-status 只在 cli.sh 里实现，cloud.sh 没有这个子命令。
+	-- 以前误用 cloud_exec，端点永远返回「未知动作：delpass-status」，
+	-- 备份页在设置/修改删除密码后刷新状态拿不到结果。
+	-- set / verify / clear 走的都是 cli.sh，这里必须同源。
+	cloud_reply(sh(SH .. " delpass-status"))
 end
 
 function api_delpass_set()

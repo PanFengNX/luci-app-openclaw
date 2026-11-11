@@ -348,6 +348,19 @@ else
 	skip "缺少 tools/tests/cloud-ls.sh"
 fi
 
+head_ "7e2a. 云端备份删除必须复验（不许 rc=0 就报已删除）"
+if [ -f tools/tests/cloud-rm-verify.sh ]; then
+	if out="$(sh tools/tests/cloud-rm-verify.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "cloud-rm-verify.sh 全部断言通过"
+	else
+		bad "cloud-rm-verify.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/cloud-rm-verify.sh"
+fi
+
 head_ "7e2b. 插件自身更新在首页可用（与 OpenClaw / Node 同构）"
 if [ -f tools/tests/plugin-update-home.sh ]; then
 	if out="$(sh tools/tests/plugin-update-home.sh 2>&1)"; then

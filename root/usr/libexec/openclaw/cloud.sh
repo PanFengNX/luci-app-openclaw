@@ -2936,11 +2936,91 @@ cmd_download_dec() {
 # ---------------------------------------------------------------- rm
 # 删除失败原因（不含凭据）；由 cloud_rm_remote 写入，调用方拼进 JSON / 日志。
 OC_RM_ERR=""
+# 复验无法确认时的具体原因，由 cloud_rm_verify 写入。
+OC_RM_VERIFY_ERR=""
+
+# 读取一次远端列表，转成 TSV 写入 <out>。
+# 返回：0 成功 / 2 列表读不到或无法解析（绝不返回 0 却留下不完整文件）。
+cloud_rm_list() {
+	local bin="$1" out="$2" tmp rc
+	tmp="$OC_RUNDIR/cloud-rm-ls.$$"
+	rm -f "$tmp" "$out" 2>/dev/null
+	cloud_run 60 "$bin" ls "$OC_CLOUD_REMOTE" --json >"$tmp" 2>&1
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		rm -f "$tmp" "$out" 2>/dev/null
+		return 2
+	fi
+	rc=0
+	cloud_ls_tsv "$tmp" >"$out" 2>/dev/null || rc=$?
+	rm -f "$tmp" 2>/dev/null
+	if [ "$rc" -ne 0 ]; then
+		rm -f "$out" 2>/dev/null
+		return 2
+	fi
+	return 0
+}
+
+# cloud_rm_stat <tsv-file> <name> -> "<条数> <目标是否出现(0/1)>"
+# 只数第三列非空的记录；空列表输出 "0 0"。
+cloud_rm_stat() {
+	local tab
+	tab="$(printf '\t')"
+	awk -F "$tab" -v n="$2" \
+		'NF >= 3 && $3 != "" { c++; if ($3 == n) h=1 } END { printf "%d %d\n", c+0, h+0 }' \
+		"$1" 2>/dev/null
+}
+
+# 删除后的复验。bdpan 有些版本对不存在的路径也返回 0，help 里探测到的
+# 子命令也可能与实际不符 —— 只看退出码会把「没删掉」报成成功。
+#
+# 不能只看「目标是否还在」：ls 若分页或截断，后面的文件会补进第一页，
+# 目标从列表里消失但文件其实还在。因此三条都要满足：
+#   * 删除前的列表里必须包含目标（否则无法判断）
+#   * 删除后的列表里不含目标
+#   * 删除后条数恰好比删除前少 1（分页补齐时条数不变，判「无法确认」）
+# 返回：0 目标已消失 / 1 仍在 / 2 无法确认
+cloud_rm_verify() {
+	local bin="$1" name="$2" before="$3" after bc bh ac ah
+	OC_RM_VERIFY_ERR=""
+	after="$OC_RUNDIR/cloud-rm-after.$$"
+	set -- $(cloud_rm_stat "$before" "$name")
+	bc="${1:-0}"; bh="${2:-0}"
+	if [ "$bh" -ne 1 ]; then
+		OC_RM_VERIFY_ERR="删除前的列表里没有 $name（列表可能未返回全量）"
+		return 2
+	fi
+	cloud_rm_list "$bin" "$after" || {
+		OC_RM_VERIFY_ERR="读取远端列表失败"
+		rm -f "$after" 2>/dev/null
+		return 2
+	}
+	set -- $(cloud_rm_stat "$after" "$name")
+	ac="${1:-0}"; ah="${2:-0}"
+	rm -f "$after" 2>/dev/null
+	if [ "$ah" -ne 0 ]; then
+		return 1
+	fi
+	if [ "$ac" -ne "$((bc - 1))" ]; then
+		OC_RM_VERIFY_ERR="远端列表条数由 $bc 变为 $ac（期望 $((bc - 1))，疑似分页或并发写入）"
+		return 2
+	fi
+	return 0
+}
+
+# 执行一次删除并复验。返回 0 成功 / 1 目标仍在 / 2 无法确认。
+cloud_rm_attempt() {
+	local bin="$1" sub="$2" name="$3" tmp="$4" before="$5" vrc
+	cloud_run 60 "$bin" "$sub" "$OC_CLOUD_REMOTE/$name" >"$tmp" 2>&1
+	cloud_rm_verify "$bin" "$name" "$before"
+	vrc=$?
+	return "$vrc"
+}
 
 cloud_rm_remote() {
 	# cloud_rm_remote <remote-name> -> 0 成功 / 1 失败（原因在 $OC_RM_ERR）
 	# 不往 stdout 写任何东西：手动删除（cmd_rm）与远端轮转（backup-run）共用。
-	local name="${1:-}" bin help sub tmp rc out err
+	local name="${1:-}" bin help sub tmp out err cand tried arc c before
 
 	OC_RM_ERR=""
 	[ -n "$name" ] || { OC_RM_ERR="缺少远端文件名"; return 1; }
@@ -2950,7 +3030,16 @@ cloud_rm_remote() {
 	}
 	bin="$(cloud_bin_ready)" || { OC_RM_ERR="请先安装网盘组件"; return 1; }
 
-	# 只使用 CLI 自己声明的删除子命令；没有就明确拒绝，绝不自行拼 API。
+	# 删除前先取一次基线；拿不到就不执行删除，避免「删了却没法确认」。
+	before="$OC_RUNDIR/cloud-rm-before.$$"
+	rm -f "$before" 2>/dev/null
+	cloud_rm_list "$bin" "$before" || {
+		rm -f "$before" 2>/dev/null
+		OC_RM_ERR="无法读取远端列表确认结果，未执行删除，请稍后重试"
+		return 1
+	}
+
+	# 只使用 CLI 自己声明的删除子命令；没有就按常见命名试，绝不自行拼 API。
 	help="$(cloud_run 30 "$bin" help 2>&1)"
 	[ -n "$help" ] || help="$(cloud_run 30 "$bin" --help 2>&1)"
 	sub=""
@@ -2962,36 +3051,45 @@ cloud_rm_remote() {
 		sub="remove"
 	fi
 
+	# help 里探测到的名字也可能与实际实现不符：探测结果排最前，其余候选
+	# 仍依次兜底。每次都以远端复验判定，不会对已消失的文件重复删除。
+	if [ -n "$sub" ]; then
+		set -- "$sub"
+		for c in rm delete remove; do
+			[ "$c" = "$sub" ] || set -- "$@" "$c"
+		done
+	else
+		set -- rm delete remove
+	fi
+
 	tmp="$OC_RUNDIR/cloud-rm.$$"
 	rm -f "$tmp" 2>/dev/null
+	tried=""
+	arc=1
+	for cand in "$@"; do
+		tried="${tried:+$tried/}$cand"
+		cloud_rm_attempt "$bin" "$cand" "$name" "$tmp" "$before"
+		arc=$?
+		[ "$arc" -eq 0 ] && break
+		[ "$arc" -eq 2 ] && break
+	done
+	rm -f "$before" 2>/dev/null
 
-	if [ -z "$sub" ]; then
-		# help 不可用：试一次 rm，靠输出判断「没有这个子命令」。
-		cloud_run 60 "$bin" rm "$OC_CLOUD_REMOTE/$name" >"$tmp" 2>&1
-		rc=$?
-		out="$(cat "$tmp" 2>/dev/null)"
-		rm -f "$tmp" 2>/dev/null
-		[ "$rc" -eq 0 ] && return 0
-		case "$out" in
-			*unknown*|*Unknown*|*unrecognized*|*Unrecognized*|*"invalid command"*|*"no such command"*|*未知*|*不支持*)
-				OC_RM_ERR="当前 CLI 不支持删除，请在网盘 App 里删除"
-				return 1 ;;
-		esac
-		err="$(printf '%s\n' "$out" | cloud_redact | tail -n 5 | oc_cut_utf8 800)"
-		OC_RM_ERR="删除失败（rc=$rc）：${err:-无输出}"
-		return 1
-	fi
-
-	cloud_run 60 "$bin" "$sub" "$OC_CLOUD_REMOTE/$name" >"$tmp" 2>&1
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		err="$(cloud_tail_err "$tmp" 8)"
-		rm -f "$tmp" 2>/dev/null
-		OC_RM_ERR="删除失败（rc=$rc）：${err:-无输出}"
-		return 1
-	fi
+	out="$(cat "$tmp" 2>/dev/null)"
 	rm -f "$tmp" 2>/dev/null
-	return 0
+	[ "$arc" -eq 0 ] && return 0
+	err="$(printf '%s\n' "$out" | cloud_redact | tail -n 5 | oc_cut_utf8 800)"
+	if [ "$arc" -eq 2 ]; then
+		OC_RM_ERR="已执行删除，但无法确认结果：${OC_RM_VERIFY_ERR:-远端列表未返回全量}，请刷新备份列表核对。CLI 输出：${err:-无输出}"
+		return 1
+	fi
+	case "$out" in
+		*unknown*|*Unknown*|*unrecognized*|*Unrecognized*|*"invalid command"*|*"no such command"*|*未知*|*不支持*)
+			OC_RM_ERR="当前 CLI 不支持删除（已试 ${tried:-无}），请在网盘 App 里删除" ;;
+		*)
+			OC_RM_ERR="删除未生效（已试 ${tried:-无}），远端仍存在 $name。CLI 输出：${err:-无输出}" ;;
+	esac
+	return 1
 }
 
 cmd_rm() {
