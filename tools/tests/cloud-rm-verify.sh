@@ -199,9 +199,12 @@ run_case('远端确实消失 -> 成功', TARGET + '\n', HELP_RM, 'rm', expect_rc
 run_case('rc 非 0 但文件已消失 -> 以复验为准', TARGET + '\n', HELP_RM,
          'rm', rm_rc=1, expect_rc=0)
 
-# 4. help 没有明确子命令时依次试，delete 才是真命令
-run_case('help 无子命令 -> 自动试到 delete 成功', TARGET + '\n',
-         'usage: bdpan <command>', 'delete', expect_rc=0)
+# 4. help 里一个删除命令都没有（bdpan 3.8.9 实况）-> 1.8.91 起不再跑三个
+#    注定失败的 CLI 候选，直接走开放平台接口。本用例把接口桩成不可用，
+#    所以结果是失败、且原因指向接口通道，而不是「unknown command」。
+run_case('help 无删除命令 -> 直接走接口，不试 CLI 候选', TARGET + '\n',
+         'usage: bdpan <command>', 'delete', expect_rc=1,
+         expect_err='网盘删除接口')
 
 # 5. help 无子命令且都不支持 -> 明确提示，不谎报成功
 run_case('CLI 不支持删除 -> 明确提示', TARGET + '\n',

@@ -80,9 +80,18 @@ BODY = '\n'.join(func(n) for n in NAMES)
 
 BD = r'''#!/bin/sh
 sub="$1"; shift
+printf '%s\n' "$sub" >>"$STUB_CALLS"
 case "$sub" in
   help|--help) printf '%s\n' "$STUB_HELP" ;;
   ls)
+    # 复现真机现象：同一次操作里的第 N 次 ls 偶发非 0 退出。
+    cnt=$(cat "$STUB_LS_COUNT" 2>/dev/null || echo 0)
+    cnt=$((cnt + 1))
+    printf '%s\n' "$cnt" >"$STUB_LS_COUNT"
+    case ",${STUB_LS_FAIL_ON:-}," in
+      *",$cnt,"*) printf 'Error: transient list failure #%s\n' "$cnt" >&2
+        exit "${STUB_LS_EXIT:-1}" ;;
+    esac
     n=0
     printf '['
     while IFS= read -r f || [ -n "$f" ]; do
@@ -94,6 +103,10 @@ case "$sub" in
     printf ']'
     ;;
   rm|delete|remove)
+    if [ "${STUB_RM_RC:-1}" = "0" ]; then
+      awk -v t="$STUB_TARGET" '$0 != t' "$STUB_STATE" >"$STUB_STATE.n"
+      [ -f "$STUB_STATE.n" ] && mv "$STUB_STATE.n" "$STUB_STATE"
+    fi
     printf '%s\n' "$STUB_RM_OUT"
     exit "$STUB_RM_RC"
     ;;
@@ -158,7 +171,8 @@ OTHER = 'openclaw-backup-20261110-000000.tar.gz.enc'
 
 def run(name, api_mode='ok', api_effect=1, state=None, token=TOKEN,
         fmt_ok=True, expect_rc=None, expect_err=None, extra_check=None,
-        remote='openclaw-backups', config=None):
+        remote='openclaw-backups', config=None, ls_fail_on='', help_text=None,
+        expect_not_err=None, ls_exit=1, calls_expect=None, rm_rc=1):
     if not HAVE_ALL:
         check(name + '（缺函数，判失败）', False)
         return
@@ -197,10 +211,14 @@ def run(name, api_mode='ok', api_effect=1, state=None, token=TOKEN,
             'OC_CLOUD_REMOTE=' + repr(remote),
             'PATH="' + mspath(d) + ':$PATH"',
             'export PATH',
-            'export STUB_HELP=' + repr('usage: bdpan <command>'),
+            'export STUB_HELP=' + repr(help_text or 'usage: bdpan <command>'),
+            'export STUB_CALLS=' + repr(posix(d / 'calls.txt')),
+            'export STUB_LS_COUNT=' + repr(posix(d / 'ls-count.txt')),
+            'export STUB_LS_FAIL_ON=' + repr(ls_fail_on),
+            'export STUB_LS_EXIT=' + repr(str(ls_exit)),
+            'export STUB_RM_RC=' + repr(str(rm_rc)),
             'export STUB_STATE=' + repr(posix(state_f)),
             'export STUB_RM_OUT=' + repr('unknown command'),
-            'export STUB_RM_RC=' + repr('1'),
             'export STUB_TARGET=' + repr(TARGET),
             'export STUB_API=' + repr(api_mode),
             'export STUB_API_EFFECT=' + repr(str(api_effect)),
@@ -236,11 +254,19 @@ def run(name, api_mode='ok', api_effect=1, state=None, token=TOKEN,
             good = good and rc == expect_rc
         if expect_err is not None:
             good = good and expect_err in err
+        if expect_not_err is not None and expect_not_err in err:
+            good = False
+            err = err + ' | 不该出现：' + expect_not_err
         argv = (d / 'argv.txt').read_text() if (d / 'argv.txt').exists() else ''
         conf = (d / 'conf.txt').read_text() if (d / 'conf.txt').exists() else ''
         data = (d / 'data.txt').read_text() if (d / 'data.txt').exists() else ''
-        runtime = dict(argv=argv, conf=conf, data=data, dir=d,
+        calls_f = d / 'calls.txt'
+        calls = calls_f.read_text().split() if calls_f.exists() else []
+        runtime = dict(argv=argv, conf=conf, data=data, dir=d, calls=calls,
                        conf_keep=(d / 'conf.keep').exists())
+        if calls_expect is not None and calls != calls_expect:
+            good = False
+            err = err + ' | calls=%s 期望 %s' % (' '.join(calls), ' '.join(calls_expect))
         if extra_check:
             ok2, why = extra_check(runtime)
             good = good and ok2
@@ -301,6 +327,56 @@ run('凭据含非法字符 -> 拒绝', token='bad token with space',
     expect_rc=1, expect_err='凭据格式异常',
     extra_check=lambda r: (r['argv'] == '', '不应调用 curl'))
 
+
+# ---------------------------------------------------------------- 1.8.91 新契约
+# help 里没有任何删除命令时，不该再跑 rm/delete/remove 三个注定失败的候选：
+# 真机上它们只会刷出「unknown command」，还叠加三次列表读取。
+run('help 无删除命令 -> 不调用 CLI 候选，直接走接口',
+    expect_rc=0,
+    extra_check=lambda r: (not [c for c in r['calls']
+                                if c in ('rm', 'delete', 'remove')],
+                           '不应调用 CLI 删除候选：' + ' '.join(r['calls'])))
+
+# CLI 自报有 delete 时仍应按候选尝试（别的 bdpan 版本可能真有）
+run('help 有 delete -> 仍先试 CLI 候选',
+    help_text='usage: bdpan <command>\n  delete   remove a file',
+    expect_rc=0,
+    extra_check=lambda r: ('delete' in r['calls'],
+                           '应尝试 CLI 的 delete：' + ' '.join(r['calls'])))
+
+# 真机故障复现：删除后那一次 ls 失败一次 -> **仅靠重试**就要判成功。
+# 断言不调用接口，否则「接口兜底」也能凑出 rc=0，这条就测不到重试本身。
+run('复验那一次 ls 瞬时失败 -> 仅靠重试判成功（CLI 已删）',
+    help_text='usage: bdpan <command>\n  delete   remove a file',
+    rm_rc=0, ls_fail_on='2', expect_rc=0,
+    extra_check=lambda r: (r['argv'] == '',
+                           '不该走到接口通道；calls=' + ' '.join(r['calls'])))
+
+# ls 被 timeout 杀掉（124）-> 不重试：重试只会让页面多等一个超时周期
+run('ls 超时 -> 不重试、直接报超时',
+    ls_fail_on='1,2', ls_exit=124, expect_rc=1, expect_err='超时',
+    calls_expect=['ls'],
+    extra_check=lambda r: (r['argv'] == '', '不应调用接口'))
+
+# 基线 ls 两次都失败 -> 不执行删除，也不调用接口
+run('基线 ls 连续失败 -> 未执行删除',
+    ls_fail_on='1,2', expect_rc=1, expect_err='无法读取远端列表确认结果',
+    extra_check=lambda r: (r['argv'] == '', '不应调用接口'))
+
+# 接口成功但复验两次都读不到列表 -> 文案说清「接口已成功、无法确认」，
+# 且不能掺进 CLI 的 unknown command（真机就是这么误报的）
+run('接口成功但复验读不到列表 -> 文案不掺 CLI 噪声',
+    ls_fail_on='2,3', expect_rc=1,
+    expect_err='网盘删除接口返回成功，但列表读不到',
+    expect_not_err='unknown command',
+    extra_check=lambda r: (r['argv'] != '', '接口通道应被调用'))
+
+# arc=2（CLI 之后读不到列表）也必须继续走接口，否则这台设备永远删不掉
+run('CLI 复验读不到列表 -> 仍走接口通道并成功',
+    help_text='usage: bdpan <command>\n  delete   remove a file',
+    ls_fail_on='2,3', expect_rc=0,
+    extra_check=lambda r: ('delete' in r['calls'] and r['argv'] != '',
+                           '应既试 CLI 又走接口：' + ' '.join(r['calls'])))
 
 # ---------------------------------------------------------------- 安全断言
 def sec_check(r):

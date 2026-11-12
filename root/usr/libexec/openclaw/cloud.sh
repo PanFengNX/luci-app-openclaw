@@ -2941,6 +2941,9 @@ cmd_download_dec() {
 OC_RM_ERR=""
 # 复验无法确认时的具体原因，由 cloud_rm_verify 写入。
 OC_RM_VERIFY_ERR=""
+# 最近一次读取远端列表失败的具体原因（退出码 + stderr 摘要），
+# 由 cloud_rm_list 写入。只回一句「读取失败」在现场无法定位。
+OC_LS_ERR=""
 
 # bdpan 至今（实测 3.8.9）没有删除子命令：help 里只有 whoami / ls / upload /
 # download / transfer / share / version / init / update。网盘侧能真正删除的
@@ -3129,24 +3132,44 @@ cloud_api_delete() {
 
 # 读取一次远端列表，转成 TSV 写入 <out>。
 # 返回：0 成功 / 2 列表读不到或无法解析（绝不返回 0 却留下不完整文件）。
+#
+# 重试一次：bdpan 是单实例 CLI，和页面轮询撞车、或一次网络抖动都会让 ls
+# 非 0 退出。真机实测过一次点击里 6 次 ls 有一两次失败——而删除流程对
+# 列表的依赖是「必须全量」，一次抖动就让整次删除前功尽弃。两次都失败才
+# 判读不到，并把退出码与 stderr 摘要留在 OC_LS_ERR 里给用户看。
 cloud_rm_list() {
-	local bin="$1" out="$2" tmp rc
+	local bin="$1" out="$2" tmp rc try detail
 	tmp="$OC_RUNDIR/cloud-rm-ls.$$"
-	rm -f "$tmp" "$out" 2>/dev/null
-	cloud_run 60 "$bin" ls "$OC_CLOUD_REMOTE" --json >"$tmp" 2>&1
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
+	OC_LS_ERR=""
+	try=0
+	while [ "$try" -lt 2 ]; do
+		try=$((try + 1))
 		rm -f "$tmp" "$out" 2>/dev/null
-		return 2
-	fi
-	rc=0
-	cloud_ls_tsv "$tmp" >"$out" 2>/dev/null || rc=$?
-	rm -f "$tmp" 2>/dev/null
-	if [ "$rc" -ne 0 ]; then
-		rm -f "$out" 2>/dev/null
-		return 2
-	fi
-	return 0
+		cloud_run 60 "$bin" ls "$OC_CLOUD_REMOTE" --json >"$tmp" 2>&1
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			rc=0
+			cloud_ls_tsv "$tmp" >"$out" 2>/dev/null || rc=$?
+			if [ "$rc" -eq 0 ]; then
+				rm -f "$tmp" 2>/dev/null
+				return 0
+			fi
+			OC_LS_ERR="列表解析失败（网盘返回的不是可识别的 JSON）"
+		else
+			detail="$(cloud_redact <"$tmp" 2>/dev/null | tr -d '\r' | tail -n 2 | oc_cut_utf8 200)"
+			OC_LS_ERR="网盘列表命令退出码 $rc${detail:+：$detail}"
+			# 超时/被杀（timeout 的 124、TERM 的 143、KILL 的 137）不重试：
+			# 再等一个 60 秒，页面请求会先一步超时，用户反而看不到原因。
+			case "$rc" in
+				124|137|143)
+					OC_LS_ERR="网盘列表命令超时或被杀（退出码 $rc），请稍后重试"
+					break ;;
+			esac
+		fi
+		[ "$try" -lt 2 ] && sleep 1
+	done
+	rm -f "$tmp" "$out" 2>/dev/null
+	return 2
 }
 
 # cloud_rm_stat <tsv-file> <name> -> "<条数> <目标是否出现(0/1)>"
@@ -3168,6 +3191,9 @@ cloud_rm_stat() {
 #   * 删除后的列表里不含目标
 #   * 删除后条数恰好比删除前少 1（分页补齐时条数不变，判「无法确认」）
 # 返回：0 目标已消失 / 1 仍在 / 2 无法确认
+#
+# 这三条是删除结果的**最终判据**，CLI 退出码与接口 errno 都只是线索：
+# 条数恰好少 1 这一条专门对付「ls 分页/截断让目标滑出列表」的假成功。
 cloud_rm_verify() {
 	local bin="$1" name="$2" before="$3" after bc bh ac ah
 	OC_RM_VERIFY_ERR=""
@@ -3179,7 +3205,7 @@ cloud_rm_verify() {
 		return 2
 	fi
 	cloud_rm_list "$bin" "$after" || {
-		OC_RM_VERIFY_ERR="读取远端列表失败"
+		OC_RM_VERIFY_ERR="读取远端列表失败（${OC_LS_ERR:-原因未知}）"
 		rm -f "$after" 2>/dev/null
 		return 2
 	}
@@ -3208,11 +3234,15 @@ cloud_rm_attempt() {
 cloud_rm_remote() {
 	# cloud_rm_remote <remote-name> -> 0 成功 / 1 失败（原因在 $OC_RM_ERR）
 	# 不往 stdout 写任何东西：手动删除（cmd_rm）与远端轮转（backup-run）共用。
-	local name="${1:-}" bin help sub tmp out err cand tried arc c before api_tried
+	local name="${1:-}" bin help sub tmp out err cand tried arc c before api_tried cli_arc
 
 	OC_RM_ERR=""
 	OC_API_ERR=""
 	OC_RM_VERIFY_ERR=""
+	# 显式清一次：即使本次没走到读列表的分支（例如组件未安装），也不会
+	# 把上一轮残留的原因拼进本次文案。
+	OC_LS_ERR=""
+	cli_arc=0
 	[ -n "$name" ] || { OC_RM_ERR="缺少远端文件名"; return 1; }
 	cloud_valid_remote_name "$name" || {
 		OC_RM_ERR="远端文件名不合法（只允许字母数字与 . _ -，不能以 - 开头，长度 1-128）"
@@ -3221,11 +3251,13 @@ cloud_rm_remote() {
 	bin="$(cloud_bin_ready)" || { OC_RM_ERR="请先安装网盘组件"; return 1; }
 
 	# 删除前先取一次基线；拿不到就不执行删除，避免「删了却没法确认」。
+	# 这份基线是**任何删除动作之前**的快照，CLI 尝试与接口调用共用它：
+	# 判据是「相对删除前少了这一条」，中途谁删的不重要。
 	before="$OC_RUNDIR/cloud-rm-before.$$"
 	rm -f "$before" 2>/dev/null
 	cloud_rm_list "$bin" "$before" || {
 		rm -f "$before" 2>/dev/null
-		OC_RM_ERR="无法读取远端列表确认结果，未执行删除，请稍后重试"
+		OC_RM_ERR="无法读取远端列表确认结果（${OC_LS_ERR:-原因未知}），未执行删除，请稍后重试"
 		return 1
 	}
 	# 目标不在基线里就不必再试：这通常表示列表已过期，或文件已被别处删掉。
@@ -3247,33 +3279,43 @@ cloud_rm_remote() {
 		sub="remove"
 	fi
 
+	tmp="$OC_RUNDIR/cloud-rm.$$"
+	rm -f "$tmp" 2>/dev/null
+	tried=""
+	arc=1
 	# help 里探测到的名字也可能与实际实现不符：探测结果排最前，其余候选
 	# 仍依次兜底。每次都以远端复验判定，不会对已消失的文件重复删除。
+	#
+	# help 里**一个删除命令都没有**时（bdpan 3.8.9 正是如此）不再跑三个注定
+	# 失败的候选：真机上叠的是 3 次失败进程 + 3 次列表读取，既慢又容易撞上
+	# 网盘 CLI 的瞬时失败，最后报出一句与真正原因无关的「unknown command」。
+	# 这种情况下直接走开放平台接口。
 	if [ -n "$sub" ]; then
 		set -- "$sub"
 		for c in rm delete remove; do
 			[ "$c" = "$sub" ] || set -- "$@" "$c"
 		done
-	else
-		set -- rm delete remove
+		for cand in "$@"; do
+			tried="${tried:+$tried/}$cand"
+			cloud_rm_attempt "$bin" "$cand" "$name" "$tmp" "$before"
+			arc=$?
+			[ "$arc" -eq 0 ] && break
+			# 无法确认时不再试后面的候选：多删一轮也判不出来，
+			# 只会再多两次列表读取。剩下的交给接口通道。
+			[ "$arc" -eq 2 ] && break
+		done
 	fi
-
-	tmp="$OC_RUNDIR/cloud-rm.$$"
-	rm -f "$tmp" 2>/dev/null
-	tried=""
-	arc=1
-	for cand in "$@"; do
-		tried="${tried:+$tried/}$cand"
-		cloud_rm_attempt "$bin" "$cand" "$name" "$tmp" "$before"
-		arc=$?
-		[ "$arc" -eq 0 ] && break
-		[ "$arc" -eq 2 ] && break
-	done
-	# CLI 三个候选都删不掉（bdpan 目前根本没有删除子命令）：改走开放平台
-	# 接口。接口返回 0 也仍然要复验，绝不再拿退出码当结论。
-	if [ "$arc" -eq 1 ]; then
+	# CLI 通道删不掉（bdpan 目前根本没有删除子命令）：改走开放平台接口。
+	# 接口返回 0 也仍然要复验，绝不再拿退出码当结论。
+	#
+	# arc=2（CLI 之后读不到列表、无法判定）同样要走接口：这是本机上唯一真能
+	# 删掉的通道，此时放弃等于「永远删不掉」。删除目标在基线里已确认存在，
+	# 接口对已经不存在的文件返回 -9 会走「交给复验」分支，重复调用不会误删
+	# 别的东西。
+	if [ "$arc" -ne 0 ]; then
 		tried="${tried:+$tried/}xpan-api"
 		api_tried=1
+		cli_arc="$arc"
 		if cloud_api_delete "$name"; then
 			cloud_rm_verify "$bin" "$name" "$before"
 			arc=$?
@@ -3284,7 +3326,9 @@ cloud_rm_remote() {
 				OC_API_ERR="网盘删除接口返回成功，但远端仍有该文件（可能路径不在本应用目录内）"
 			fi
 		else
-			arc=1
+			# 接口也没成功。CLI 侧本来就是「无法确认」时不要把结论
+			# 降级成「删除失败」——分页/并发上传的线索比一句失败更有用。
+			[ "$cli_arc" -eq 2 ] || arc=1
 		fi
 	fi
 	rm -f "$before" 2>/dev/null
@@ -3294,7 +3338,15 @@ cloud_rm_remote() {
 	[ "$arc" -eq 0 ] && return 0
 	err="$(printf '%s\n' "$out" | cloud_redact | tail -n 5 | oc_cut_utf8 800)"
 	if [ "$arc" -eq 2 ]; then
-		OC_RM_ERR="已执行删除，但无法确认结果：${OC_RM_VERIFY_ERR:-远端列表未返回全量}，请刷新备份列表核对。CLI 输出：${err:-无输出}"
+		# 没走到接口通道时，CLI 输出是有用线索；走了接口通道还缀一句
+		# 「unknown command」，只会让人以为删除命令打错了，盖掉真正原因。
+		if [ -n "${api_tried:-}" ] && [ -n "$OC_API_ERR" ]; then
+			OC_RM_ERR="删除未确认：${OC_RM_VERIFY_ERR:-远端列表未返回全量}；接口通道也没成功（${OC_API_ERR}）。请刷新备份列表核对 $name 是否还在"
+		elif [ -n "${api_tried:-}" ]; then
+			OC_RM_ERR="网盘删除接口返回成功，但列表读不到、无法确认是否真的删掉（接口成功不等于已落到存储）：${OC_RM_VERIFY_ERR:-远端列表未返回全量}。请刷新备份列表核对 $name 是否还在"
+		else
+			OC_RM_ERR="删除未确认：${OC_RM_VERIFY_ERR:-远端列表未返回全量}，请刷新备份列表核对。CLI 输出：${err:-无输出}"
+		fi
 		return 1
 	fi
 	if [ "$arc" -eq 1 ] && [ -n "${api_tried:-}" ] && [ -z "$OC_API_ERR" ]; then
