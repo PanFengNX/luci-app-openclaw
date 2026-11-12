@@ -2957,6 +2957,91 @@ OC_LS_ERR=""
 OC_API_ERR=""
 OC_API_TOKEN=""
 
+cloud_json_deep() {
+	# cloud_json_deep <file> <key> -> 任意层级里第一个同名键的标量值。
+	#
+	# 与 cloud_json_scalar 的区别只有一条：不限制 depth == 1。bdpan 的登录
+	# 配置可能把凭据放在 {"tokens": {...}} 这种子对象里，按顶层找会得到空值，
+	# 页面就只能报「未登录」——真机 1.8.91 正是这样。
+	[ -f "$1" ] || return 0
+	awk -v key="$2" '
+	function h2d(h,   i,c,v,ch) {
+		v = 0
+		h = tolower(h)
+		for (i = 1; i <= length(h); i++) {
+			ch = substr(h, i, 1)
+			c = index("0123456789abcdef", ch) - 1
+			if (c < 0) c = 0
+			v = v * 16 + c
+		}
+		return v
+	}
+	function unesc(s,   o,i,c,e,n) {
+		o = ""
+		for (i = 1; i <= length(s); i++) {
+			c = substr(s, i, 1)
+			if (c != "\\") { o = o c; continue }
+			i++
+			e = substr(s, i, 1)
+			if (e == "n") o = o "\n"
+			else if (e == "t") o = o "\t"
+			else if (e == "r") o = o "\r"
+			else if (e == "u") { n = h2d(substr(s, i + 1, 4)); i += 4; o = o "?" }
+			else o = o e
+		}
+		return o
+	}
+	{ buf = buf $0 "\n" }
+	END {
+		n = length(buf); instr = 0; esc = 0; val = ""; want = 0; last = ""
+		for (i = 1; i <= n; i++) {
+			c = substr(buf, i, 1)
+			if (instr) {
+				if (esc) { cur = cur "\\" c; esc = 0 }
+				else if (c == "\\") esc = 1
+				else if (c == "\"") { instr = 0; last = cur; if (want) { print unesc(cur); exit } }
+				else cur = cur c
+				continue
+			}
+			if (want) {
+				if (c == "\"") { instr = 1; cur = ""; continue }
+				if (c == " " || c == "\t" || c == "\r" || c == "\n") continue
+				if (c == "," || c == "}" || c == "]") { print val; exit }
+				val = val c
+				continue
+			}
+			if (c == "\"") { instr = 1; cur = ""; continue }
+			if (c == ":") {
+				gsub(/[ \t\r\n]/, "", last)
+				if (last == key) { want = 1; val = "" }
+			}
+		}
+	}
+	' "$1"
+}
+
+cloud_json_keys() {
+	# cloud_json_keys <file> <上限> -> 前 N 个出现的字段名（逗号分隔，不含值）。
+	#
+	# 只在凭据取不到时用来解释「配置文件里到底有什么」。**只回显键名**，
+	# 值一个字符都不回显 —— 这不是调试开关，是给用户看的失败原因。
+	[ -f "$1" ] || return 0
+	awk -v lim="${2:-10}" '
+	{
+		line = $0
+		while (match(line, /"[A-Za-z0-9_.-]+"[ 	]*:/)) {
+			k = substr(line, RSTART, RLENGTH)
+			gsub(/[" 	]/, "", k)
+			sub(/:$/, "", k)
+			if (!(k in seen)) { seen[k] = 1; out = (out == "" ? k : out "," k); n++ }
+			line = substr(line, RSTART + RLENGTH)
+			if (n >= lim) { print out; exit }
+		}
+	}
+	END { if (out != "") print out }
+	' "$1"
+}
+
 cloud_api_conf() {
 	# 组件用私有 HOME 安装，登录态固定落在 <home>/.config/bdpan/config.json。
 	printf '%s' "$OC_CLOUD_HOME/.config/bdpan/config.json"
@@ -2968,7 +3053,7 @@ cloud_api_token() {
 	# 刻意不用 stdout 回传：调用方一旦写成 tok="$(cloud_api_token)"，函数就
 	# 在子 shell 里执行，OC_API_ERR 会随子 shell 一起消失，界面只剩一句
 	# 没有原因的空错误。
-	local cfg tok
+	local cfg tok _k _ks
 	OC_API_TOKEN=""
 	cfg="$(cloud_api_conf)"
 	if [ ! -f "$cfg" ]; then
@@ -2979,9 +3064,18 @@ cloud_api_token() {
 		OC_API_ERR="网盘组件的登录配置是空的，请在组件设置里重新登录"
 		return 1
 	fi
-	tok="$(cloud_json_scalar "$cfg" access_token 2>/dev/null | sed -n '1p' | tr -d '\r')"
+	# 先按顶层找，再按任意层级找（bdpan 可能把凭据放在子对象里），
+	# 最后试几个常见别名。顺序固定，取到即止。
+	for _k in access_token accessToken token; do
+		[ -n "$tok" ] && break
+		tok="$(cloud_json_deep "$cfg" "$_k" 2>/dev/null | sed -n '1p' | tr -d '\r')"
+	done
+	unset _k
 	if [ -z "$tok" ]; then
-		OC_API_ERR="网盘组件未登录（没有可用的 access_token），请重新登录"
+		# 只报字段名，绝不回显值：用于区分「没有这个字段」和「字段名不同」。
+		_ks="$(cloud_json_keys "$cfg" 10 2>/dev/null)"
+		OC_API_ERR="网盘组件未登录（配置里取不到 access_token；现有字段：${_ks:-无}），请重新登录"
+		unset _ks
 		return 1
 	fi
 	# token 会被拼进 curl 配置文件的 url= 行：一旦掺入引号 / 空白 / 换行，

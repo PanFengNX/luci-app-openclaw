@@ -51,7 +51,8 @@ def func(name):
     return src[i:j + 3] if j > i else ''
 
 
-NAMES = ('cloud_valid_remote_name', 'cloud_json_scalar', 'cloud_ls_tsv',
+NAMES = ('cloud_valid_remote_name', 'cloud_json_scalar', 'cloud_json_deep',
+         'cloud_json_keys', 'cloud_ls_tsv',
          'cloud_rm_list', 'cloud_rm_stat', 'cloud_rm_verify',
          'cloud_rm_attempt', 'cloud_api_conf', 'cloud_api_token',
          'cloud_api_delete', 'cloud_rm_remote')
@@ -320,6 +321,17 @@ run('登录配置为空文件 -> 明确提示', config='',
 # 8. 目标不在基线里 -> 提前返回，不做无用请求
 run('基线里没有目标 -> 直接报错', state=OTHER + '\n',
     expect_rc=1, expect_err='远端列表里没有',
+    extra_check=lambda r: (r['argv'] == '', '不应调用接口'))
+
+# 8b. 凭据放在子对象里（真机就是这样）-> 必须也能取到并走通接口
+run('凭据在子对象 tokens 里 -> 仍能删除',
+    config='{"tokens":{"access_token":"' + TOKEN + '","refresh_token":"r"}}',
+    expect_rc=0)
+
+# 8c. 配置里根本没有凭据字段 -> 明确说「取不到 access_token」并列出字段名
+run('配置里没有凭据字段 -> 报字段名清单',
+    config='{"app_id":"x","uid":123}',
+    expect_rc=1, expect_err='现有字段：app_id,uid',
     extra_check=lambda r: (r['argv'] == '', '不应调用接口'))
 
 # 9. 凭据异常（含空格）-> 拒绝且不调用接口
