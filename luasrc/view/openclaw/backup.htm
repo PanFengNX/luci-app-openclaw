@@ -486,6 +486,9 @@ h2.oc-title>a#content{color:inherit;text-decoration:none;min-width:0;
   </div>
   <div id="bk-status" class="oc-hint" style="margin-top:8px"></div>
   <div id="bk-list" style="margin-top:8px"></div>
+  <!-- 云端删除不可用时的说明：不显示删除按钮，得告诉用户去哪儿删，
+       否则只会觉得「按钮不见了」。文案来自服务端 del.hint（含云端目录名）。 -->
+  <div id="bk-del-note" class="oc-hint" style="display:none;margin-top:6px"></div>
 
   <!-- 删除保护：删除本地或云端备份前都要输这个密码。与加密口令是两套，
        加密口令要能解密所以只能明文存，删除密码只判「是否同意」所以只存哈希。 -->
@@ -1236,7 +1239,12 @@ function bkRow(e){
     mk('恢复', function(){
       clRestore({ name: e.ref, display: e.name, encrypted: e.encrypted });
     });
-    mk('删除', function(){ bkDeleteCloud(e.ref, e.name); }, true);
+    // 云端删除不可用（组件没有删除命令、且登录凭据是加密包）时**不给按钮**：
+    // 一个必然失败的按钮只会让人反复点、以为是偶发故障。具体去哪儿删，
+    // 由列表下方的 bk-del-note 说明。
+    if (CL.del.can){
+      mk('删除', function(){ bkDeleteCloud(e.ref, e.name); }, true);
+    }
   }
 
   row.appendChild(act);
@@ -1565,6 +1573,11 @@ var CL = {
   cliLatest: '',       // 最近一次 cli-check 的 latest（只用于展示）
   cliWarn: '',         // 更新后要保留在第一步错误区的 warn（clStatus 会清空该区）
   cliAutoChecked: false, // 进入页面时是否已自动检查过组件更新（只自动查一次）
+  // 云端删除能力（来自 overview 的 del）。
+  // 默认 can=true：拿不到结论时保持按钮可见 —— 隐藏一个本来能用的功能
+  // 比显示一个会报错并说明原因的按钮更糟。
+  del: { can: true, why: '', path: '', hint: '' },
+  delKnown: false,
   schBusy: false,      // 定时设置保存中（只影响定时区块）
   schNote: ''          // 保存成功后的一句说明
 };
@@ -2802,6 +2815,40 @@ clRender();
 // 于是「刷新」要等好几秒，页面上一直显示「读取中」。
 //
 // 现在合成一次调用，结果在这里分发到各自的「应用」函数。
+// 云端删除能力：只影响「云端行要不要显示删除按钮」和列表下方那句说明。
+// 与其它 Apply 一样只碰自己的 DOM，顺序无关。
+function clApplyDelete(r){
+  var d = (r && r.ok && r.data && typeof r.data === 'object') ? r.data : null;
+  if (!d){
+    // 读取失败 -> 保持默认（可见），不因为一次网络抖动藏按钮。
+    CL.delKnown = false;
+    bkRenderDelNote();
+    return;
+  }
+  CL.delKnown = true;
+  CL.del = {
+    can: (d.can === true),
+    why: String(d.why || ''),
+    path: String(d.path || ''),
+    hint: String(d.hint || '')
+  };
+  bkRenderDelNote();
+}
+
+function bkRenderDelNote(){
+  var el = $('bk-del-note');
+  if (!el) return;
+  if (CL.del.can){
+    el.style.display = 'none';
+    el.textContent = '';
+    return;
+  }
+  var txt = CL.del.hint || '当前网盘组件不支持删除云端备份';
+  if (CL.del.path) txt += '（云端目录：' + CL.del.path + '）';
+  el.textContent = txt;   // 服务端字符串只进 textContent
+  el.style.display = '';
+}
+
 function loadOverview(fresh){
   var url = API.cloud_overview + (fresh ? '?fresh=1' : '');
   get(url, function(r){
@@ -2813,6 +2860,7 @@ function loadOverview(fresh){
       clApplyEncrypt({ ok:false, error: (r && r.error) || '读取状态失败' });
       clApplySchedule({ ok:false, error: (r && r.error) || '读取状态失败' });
       dpApply({ ok:false, error: (r && r.error) || '读取状态失败' });
+      clApplyDelete({ ok:false });
       loadBackups();
       return;
     }
@@ -2822,6 +2870,7 @@ function loadOverview(fresh){
     clApplyEncrypt({ ok:true, data: d.encrypt || {} });
     clApplySchedule({ ok:true, data: d.schedule || {} });
     dpApply({ ok:true, data: d.delpass || {} });
+    clApplyDelete({ ok:true, data: d.del || null });
 
     loadBackups();
     clMaybeCliCheck();

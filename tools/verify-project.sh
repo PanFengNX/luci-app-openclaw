@@ -400,6 +400,19 @@ else
 	skip "缺少 tools/tests/state-owner-release.sh"
 fi
 
+head_ "7e2f. 云端删除不可用时不显示删除按钮（能力判定）"
+if [ -f tools/tests/cloud-del-capability.sh ]; then
+	if out="$(sh tools/tests/cloud-del-capability.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "cloud-del-capability.sh 全部断言通过"
+	else
+		bad "cloud-del-capability.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/cloud-del-capability.sh"
+fi
+
 head_ "7e2e. 云端删除的开放平台接口通道（bdpan 无删除子命令）"
 if [ -f tools/tests/cloud-api-rm.sh ]; then
 	if out="$(sh tools/tests/cloud-api-rm.sh 2>&1)"; then

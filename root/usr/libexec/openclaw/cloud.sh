@@ -1080,8 +1080,16 @@ cmd_overview() {
 	# 都会把「启用」勾选框强制清空（保存其实已成功）。
 	[ "$OC_SCH_ENABLED" = "1" ] && sch_enabled=true
 
-	printf '{"ok":true,%s,"encrypt":{"enabled":%s,"pass_set":%s},"pass":{"set":%s},"delpass":{"set":%s},"schedule":{"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"keep_local":%s,"installed":%s,"line":"%s"}}\n' \
+	# 云端删除能力：决定备份页要不要显示「删除」按钮。
+	# 拿不到结论时按「可用」处理（fail-open）：宁可显示一个会给出明确原因的
+	# 按钮，也不要因为一次读取失败把本来能用的功能藏起来。
+	cloud_del_capability >/dev/null 2>&1 || true
+	local del_can=true
+	[ "$OC_DEL_CAN" = "1" ] || del_can=false
+
+	printf '{"ok":true,%s,"encrypt":{"enabled":%s,"pass_set":%s},"pass":{"set":%s},"delpass":{"set":%s},"del":{"can":%s,"why":"%s","path":"/apps/bdpan/%s","hint":"%s"},"schedule":{"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"keep_local":%s,"installed":%s,"line":"%s"}}\n' \
 		"$base" "$enc_on" "$pass_set" "$pass_set" "$dp_set" \
+		"$del_can" "$(jstr "${OC_DEL_WHY:-}")" "$(jstr "$OC_CLOUD_REMOTE")" "$(jstr "${OC_DEL_HINT:-}")" \
 		"$sch_enabled" "$OC_SCH_PERIOD" "$OC_SCH_WEEKDAY" "$OC_SCH_HOUR" \
 		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$OC_SCH_KEEP_LOCAL" "$sch_installed" "$(jstr "$sch_line")"
 }
@@ -3172,6 +3180,87 @@ cloud_api_unwrap_binary() {
 		''|*[!0-9]*) return 1 ;;
 	esac
 	[ "$nprint" -gt 0 ]
+}
+
+# ---------------------------------------------------------------- del capability
+# 云端删除是否可用：备份页据此决定「显不显示删除按钮」。
+#
+# 判据全在本机完成（不联网、不探测），只有两类：
+#   * 网盘 CLI 自报有删除子命令（别的组件可能有）；
+#   * 登录凭据是可直接使用的形式（明文 token，或解开一层 base64 就拿到 token）。
+# bdpan 3.8.9 把凭据加密保存成 v1:<密文>，删除接口用不了 —— 此时结论是不可行，
+# 界面就不该给出一个必然失败的按钮。
+# 结果写全局；**stdout 永远为空**（overview 正在输出 JSON）。
+OC_DEL_CAN=""
+OC_DEL_WHY=""
+OC_DEL_HINT=""
+
+cloud_api_raw_token() {
+	# 读出配置文件里的凭据值（已去引号/Bearer），不做网络请求。
+	# 与 cloud_api_token 的区别：这里只回答「有没有、长什么样」。
+	local cfg tok _k
+	cfg="$(cloud_api_conf)"
+	[ -f "$cfg" ] || return 0
+	[ -s "$cfg" ] || return 0
+	for _k in access_token accessToken token; do
+		tok="$(cloud_json_deep "$cfg" "$_k" 2>/dev/null | sed -n '1p' | tr -d '\r')"
+		[ -n "$tok" ] && break
+	done
+	case "$tok" in
+		\"*\") tok="${tok#\"}"; tok="${tok%\"}" ;;
+	esac
+	case "$tok" in
+		[Bb]earer\ *) tok="${tok#* }" ;;
+	esac
+	printf '%s' "$tok"
+}
+
+cloud_api_token_usable() {
+	# cloud_api_token_usable <值> -> 0 表示「拿去调接口有戏」
+	local t="$1" c
+	[ -n "$t" ] || return 1
+	case "$t" in
+		*[!A-Za-z0-9._~+/=-]*) ;;
+		*) [ "${#t}" -ge 8 ] && return 0 ;;
+	esac
+	c="$(cloud_api_unwrap "$t" 2>/dev/null)"
+	[ -n "$c" ] && return 0
+	c="$(cloud_api_unwrap "${t##*:}" 2>/dev/null)"
+	[ -n "$c" ] && return 0
+	return 1
+}
+
+cloud_del_capability() {
+	local bin help tok
+	OC_DEL_CAN=0
+	OC_DEL_WHY=""
+	OC_DEL_HINT=""
+	bin="$(cloud_bin_ready 2>/dev/null)" || {
+		OC_DEL_WHY="nobin"
+		OC_DEL_HINT="未安装网盘组件，无法删除云端备份"
+		return 1
+	}
+	help="$(cloud_run 30 "$bin" help 2>/dev/null)"
+	[ -n "$help" ] || help="$(cloud_run 30 "$bin" --help 2>/dev/null)"
+	if printf '%s\n' "$help" | grep -qE '(^|[^A-Za-z0-9_-])(rm|delete|remove)([^A-Za-z0-9_-]|$)'; then
+		OC_DEL_CAN=1
+		OC_DEL_WHY="cli"
+		return 0
+	fi
+	tok="$(cloud_api_raw_token 2>/dev/null)"
+	if [ -z "$tok" ]; then
+		OC_DEL_WHY="nologin"
+		OC_DEL_HINT="网盘组件未登录，登录后才能删除云端备份"
+		return 1
+	fi
+	if cloud_api_token_usable "$tok"; then
+		OC_DEL_CAN=1
+		OC_DEL_WHY="token"
+		return 0
+	fi
+	OC_DEL_WHY="encrypted"
+	OC_DEL_HINT="网盘组件把登录凭据加密保存，插件无法调用删除接口；请在百度网盘 App 的 bdpan → openclaw-backups 目录里删除"
+	return 1
 }
 
 cloud_api_cand_ok() {
