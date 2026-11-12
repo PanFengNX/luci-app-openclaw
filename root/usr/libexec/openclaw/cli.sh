@@ -546,15 +546,24 @@ oc_gateway_reachable() {
 	# 顺序：bind 是 lan/auto 时先试 LAN IP，再回退 127.0.0.1；其余只试本地。
 	# 超时给得很短（连接 1 秒、总共 2 秒）：这个函数在 status 轮询路径上，
 	# 不能因为它把整个页面拖慢。
-	local port="$1" bind="${2:-lan}" code host
+	local port="$1" bind="${2:-lan}"
 	case "$port" in ''|*[!0-9]*) return 1 ;; esac
+	# 判据统一到 lib.sh 的 oc_http_answers：任意 HTTP 状态码都算在应答。
+	# 这里曾经只认 2xx/3xx 且只探 /，于是网关回 401 时状态页谎报
+	# 「运行中（端口未应答）」，而同机 `openclaw gateway status` 说
+	# "Connectivity check: ok" —— 两个结论冲突，界面信了错的那个。
+	if command -v oc_http_answers >/dev/null 2>&1; then
+		oc_http_answers "$port" "$bind"
+		return $?
+	fi
+	# 兜底（lib.sh 版本过旧时）：至少把 401/403 也算作在监听。
+	local code host
 	command -v curl >/dev/null 2>&1 || return 1
-
 	for host in $(oc_probe_hosts "$bind"); do
 		code="$(curl -s -o /dev/null --connect-timeout 1 --max-time 2 \
 			-w '%{http_code}' "http://${host}:${port}/" 2>/dev/null)"
 		case "$code" in
-			2[0-9][0-9]|3[0-9][0-9]) return 0 ;;
+			[1-5][0-9][0-9]) return 0 ;;
 		esac
 	done
 	return 1

@@ -1786,6 +1786,174 @@ oc_state_lock_pid() {
 	return 0
 }
 
+oc_state_owner_pids() {
+	# oc_state_owner_pids <state-dir> -> 每行一个记录在所有权 sidecar 里的 pid
+	#
+	# 官方 gateway-lock 文档：所有权在
+	#   $OPENCLAW_STATE_DIR/tmp/openclaw-<uid>/state.<hash>.lock
+	# 以及兼容投影 gateway.state.lock 里记录 pid / 进程启动身份。
+	# 这里只读这些 sidecar，**不改不删**；读不到合法 pid 就什么都不输出
+	# （宁可少报，也不要把一个瞎猜的 pid 交给 kill）。
+	local sd="$1" d f pid
+	[ -n "$sd" ] || return 0
+	[ -d "$sd/tmp" ] || return 0
+	for d in "$sd"/tmp/openclaw-*; do
+		[ -d "$d" ] || continue
+		for f in "$d"/state*.lock "$d"/gateway.state.lock; do
+			[ -f "$f" ] || continue
+			pid="$(oc_state_lock_pid "$f" 2>/dev/null)" || continue
+			case "$pid" in ''|*[!0-9]*) continue ;; esac
+			printf '%s\n' "$pid"
+		done
+	done | sort -u
+	return 0
+}
+
+oc_http_answers() {
+	# oc_http_answers <port> [bind] -> 0 端口在应答 HTTP
+	#
+	# 判据是"拿到**任意** HTTP 状态码"，不是"2xx/3xx"。这条是真机证据逼出来的：
+	# 在同一台设备上 `openclaw gateway status` 报 "Connectivity check: ok"，
+	# 而插件报 reachable=false、状态页显示「运行中（端口未应答）」。原因就是
+	# 网关的 / 需要鉴权，未带 token 回 401/404，旧判据只认 2xx/3xx，把
+	# **健康网关判成了死的**。
+	# 401/403/404/5xx 都证明 socket 已监听、HTTP 栈在工作；只有连不上（000）
+	# 才算不应答。顺序：先 /healthz（官方健康端点），再 /（兼容老版本）。
+	#
+	# 主机顺序与状态页一致（bind=lan/auto 时先 LAN IP 再回环）：网关的 bind
+	# 可能来自 openclaw.json 只监听 LAN，回环探测会失败。
+	local port="$1" bind="${2:-lan}" code host path
+	case "$port" in ''|*[!0-9]*) return 1 ;; esac
+	command -v curl >/dev/null 2>&1 || return 1
+	for host in $(oc_probe_hosts_plain "$bind"); do
+		for path in /healthz /; do
+			code="$(curl -s -o /dev/null --connect-timeout 1 --max-time 2 \
+				-w '%{http_code}' "http://${host}:${port}${path}" 2>/dev/null)"
+			case "$code" in
+				[1-5][0-9][0-9]) return 0 ;;
+			esac
+		done
+	done
+	return 1
+}
+
+oc_probe_hosts_plain() {
+	# oc_probe_hosts_plain <bind> -> 依次尝试的主机名
+	#
+	# 与 cli.sh 的 oc_probe_hosts 同一语义，但放在 lib 里（repair.sh 只加载
+	# lib.sh，不加载 cli.sh）。两处必须一致，否则"状态页说健康、修复说半死"。
+	local bind="${1:-lan}" ip
+	case "$bind" in
+		lan|auto)
+			ip="$(uci -q get network.lan.ipaddr 2>/dev/null)"
+			case "$ip" in ''|*[!0-9.]*) ;; *) printf '%s\n' "$ip" ;; esac
+			;;
+	esac
+	# 127.0.0.1 永远试：网关默认也监听回环，
+	# 而 LAN IP 在 bind=loopback 时根本不该被访问。
+	printf '%s\n' 127.0.0.1
+}
+
+oc_stop_pids() {
+	# oc_stop_pids <pid...> -> 0 全部退出 / 1 仍有存活
+	#
+	# 先 TERM 给足退出时间（网关要落盘、释放 SQLite），再 KILL。
+	# 参数必须来自 oc_state_owner_pids + 身份核对，不能拿 pgrep 结果直接用：
+	# `pgrep -f openclaw` 会命中 tail -f openclaw.log 之类的无关进程。
+	local p i alive
+	[ "$#" -gt 0 ] || return 0
+	for p in "$@"; do
+		case "$p" in ''|*[!0-9]*) return 1 ;; 1) return 1 ;; esac
+	done
+	for p in "$@"; do kill -TERM "$p" 2>/dev/null; done
+	i=0
+	while [ "$i" -lt 15 ]; do
+		alive=""
+		for p in "$@"; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
+		[ -n "$alive" ] || return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	for p in $alive; do kill -KILL "$p" 2>/dev/null; done
+	i=0
+	while [ "$i" -lt 10 ]; do
+		alive=""
+		for p in "$@"; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
+		[ -n "$alive" ] || return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+oc_release_blocked_state_owner() {
+	# oc_release_blocked_state_owner <state-dir> <port> <bind> [<网关 pid 列表>] [<最小存活秒数>]
+	#
+	# 解决的真机现象：页面显示「运行中（端口未应答）」。进程还在、procd 也认它
+	# 在跑，但它已经半死（卡在启动/迁移里，HTTP 端口永不应答），同时**持有**
+	# 状态目录所有权。官方策略是新进程等它最多 5 分钟；procd 的 respawn 永不
+	# 放弃，于是每一轮都撞同一个占用者 —— 永远起不来，而日志只说
+	# 「Another gateway (pid N) already owns this state directory」。
+	#
+	# 官方（docs.openclaw.ai/gateway/gateway-lock）允许的路径是：
+	#   * 持有者已死 → 运行时自己回收；
+	#   * 持有者仍活 → **先停掉它**，再启动（锁文件绝不手工删）。
+	# 这里就是"先停掉它"，但只在**三条同时成立**时才动手：
+	#   1) sidecar 记录的 pid 仍存活；
+	#   2) 该 pid 确实是本插件的网关进程（身份核对，杀错人不可接受）；
+	#   3) 该端口当前不应答（健康网关一律不干预，官方行为也是让它继续持有）；
+	#   4) 该进程已经存活了足够久（默认 120s）。这一条挡的是"刚被 procd 拉起的
+	#      新网关"：它拿到端口前必然不应答，杀它就是杀死正在启动的正常进程。
+	#      同时也挡住 PID 复用 —— 复用的新进程一定"很年轻"。
+	#
+	# 返回：0 = 无占用或已释放；1 = 有占用但无法安全释放（需人工）；
+	#       2 = 占用者健康，未做处理；3 = 占用者刚启动，暂不判定。
+	local sd="$1" port="$2" bind="${3:-lan}" own="${4:-}" minage="${5:-120}"
+	local pids alive p q found now started age
+	pids="$(oc_state_owner_pids "$sd" 2>/dev/null)"
+	[ -n "$pids" ] || return 0
+	if [ -z "$own" ]; then
+		own="$(oc_gateway_pids 2>/dev/null)"
+	fi
+	alive=""
+	for p in $pids; do
+		kill -0 "$p" 2>/dev/null || continue
+		alive="$alive $p"
+	done
+	# 记录里的进程都已消失：运行时在下次启动会自己回收，不需要我们碰锁。
+	[ -n "$alive" ] || return 0
+	for p in $alive; do
+		found=0
+		for q in $own; do
+			[ "$q" = "$p" ] && { found=1; break; }
+		done
+		# 不是我们的网关进程：绝不 kill。可能是用户自己跑的另一个实例，
+		# 也可能是同端口竞争的其它服务 —— 交给人判断。
+		[ "$found" = "1" ] || return 1
+	done
+	if oc_http_answers "$port" "$bind"; then
+		return 2
+	fi
+	# 进程存活时长：/proc/<pid> 目录的 mtime 就是进程启动时刻（无需 HZ 换算）。
+	# 读不到就不动它 —— 拿不到证据时宁可不作为。
+	case "$minage" in ''|*[!0-9]*) minage=120 ;; esac
+	now="$(date +%s 2>/dev/null)"
+	case "$now" in ''|*[!0-9]*) return 1 ;; esac
+	for p in $alive; do
+		started="$(stat -c %Y "/proc/$p" 2>/dev/null)"
+		case "$started" in ''|*[!0-9]*) return 1 ;; esac
+		age=$((now - started))
+		# 3 = 进程太年轻，还没到能判定为半死的时候。不能复用 2（那代表
+		# "健康在应答"），否则界面会说"已有网关在应答"而端口明明不应答。
+		[ "$age" -lt "$minage" ] && return 3
+	done
+	oc_stop_pids $alive || return 1
+	for p in $alive; do
+		kill -0 "$p" 2>/dev/null && return 1
+	done
+	return 0
+}
+
 oc_clear_stale_state_lock() {
 	# 官方当前恢复协议（docs.openclaw.ai/gateway/gateway-lock）：
 	#   1) `openclaw gateway recover-lock` 只做检查，报告记录的 PID、

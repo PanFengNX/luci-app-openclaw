@@ -387,6 +387,19 @@ else
 	skip "缺少 tools/tests/github-update-download.sh"
 fi
 
+head_ "7e2d. 网关状态目录占用：半死网关必须能被安全释放"
+if [ -f tools/tests/state-owner-release.sh ]; then
+	if out="$(sh tools/tests/state-owner-release.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "state-owner-release.sh 全部断言通过"
+	else
+		bad "state-owner-release.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/state-owner-release.sh"
+fi
+
 head_ "7e3. install-status 的 idle/lost 判定（重启后不得误报中断）"
 if [ -f tools/tests/install-status-idle.sh ]; then
 	if out="$(sh tools/tests/install-status-idle.sh 2>&1)"; then

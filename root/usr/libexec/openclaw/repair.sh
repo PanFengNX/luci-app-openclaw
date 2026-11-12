@@ -453,6 +453,26 @@ else
 	say OK "端口 $port 空闲"
 fi
 
+# 11b ------------------------------------------- 网关状态目录占用（gateway-lock）
+# 官方机制（docs.openclaw.ai/gateway/gateway-lock）：状态目录所有权记录在
+# $state/tmp/openclaw-<uid>/state.<hash>.lock。持有者**还活着**但 HTTP 端口
+# 永不应答时，新进程会一直等它，procd 又无限 respawn —— 页面就永远停在
+# 「运行中（端口未应答）」，日志只有一句 "Another gateway (pid N) already owns
+# this state directory"。官方允许的动作是先停掉持有者，绝不手工删锁文件。
+# 只在这里做（用户点「一键修复」时），不放进开机路径：误杀健康网关的代价太高。
+if [ "$RESTART" = "1" ]; then
+	oc_release_blocked_state_owner "$DATA" "$port" "$(uci_get main.bind lan)"
+	scase="$?"
+	case "$scase" in
+		0) say OK "状态目录未被占用（或已释放半死网关）" ;;
+		2) say OK "端口 $port 已有网关在应答，未干预" ;;
+		3) say OK "占用者刚启动，本次未干预（稍后仍卡住可再点一次修复）" ;;
+		*)
+			say WARN "状态目录被其它进程占用且无法自动释放；请在 SSH 里确认后停止它（官方排查命令：openclaw gateway recover-lock）"
+			;;
+	esac
+fi
+
 # 12 ------------------------------------------------------------ CA certs
 if oc_ca_ok; then
 	say OK "CA 证书已安装"
