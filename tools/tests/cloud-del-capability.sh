@@ -67,9 +67,8 @@ check('新增 cloud_del_capability', func('cloud_del_capability') != '')
 check('能力判定不做网络请求（只读配置 + help）',
       'curl' not in func('cloud_del_capability')
       and 'cloud_api_probe' not in func('cloud_del_capability'))
-check('能力判定不向 stdout 写东西',
-      'printf' not in func('cloud_del_capability').replace(
-          "printf '%s\\n' \"$help\"", ''))
+# stdout 必须为空：overview 正在输出 JSON，能力判定的任何回显都会破坏它。
+# 这条在下面每个行为用例里都会真跑一遍（judge 记录 OUT）。
 check('overview 暴露 del 子对象',
       '"del":{"can":%s' in src and 'OC_DEL_HINT' in src)
 check('前端按能力隐藏云端删除按钮',
@@ -97,6 +96,9 @@ CASES = [
     ('help 正文含 remove 但无该命令 -> 不可用（真机回归）',
      'usage: bdpan <command>\n  upload   add a file (remove deletes it)', B64BIN,
      1, 'encrypted', '加密保存'),
+    ('help 无表格行 + --help 只给根用法 -> 不可用（真机回归 v2）',
+     'usage: bdpan <command>\n  upload   add a file', B64BIN,
+     1, 'encrypted', '加密保存'),
     ('help 无删除命令 + 没有登录配置 -> 不可用（nologin）',
      'usage: bdpan <command>', None, 1, 'nologin', '未登录'),
 ]
@@ -122,18 +124,23 @@ def run_case(name, help_text, token, want_rc, want_why, want_hint):
             '#!/bin/sh',
             'export OC_CLOUD_HOME=' + repr(posix(home)),
             'export OC_CLOUD_REMOTE=' + repr('openclaw-backups'),
+            'OUTF=' + repr(posix(d / 'cap.out')),
             'cloud_bin_ready() { printf %s ' + repr(posix(bd)) + '; }',
             # 桩要像真 CLI：help 打印正文；<sub> --help 对不存在的命令报
             # unknown command 并非 0 —— 真机就是这个行为。
             'cloud_run() { shift; case "$*" in '
             '*" --help") case "$2" in rm|delete|remove) '
-            'printf "Error: unknown command %s\\n" "$2"; return 1 ;; esac ;; esac; '
+            'printf "Usage: %s [command]\\n" ' + repr('bdpan') + '; return 0 ;; esac ;; esac; '
             # %b：help 文本里的 \n 要被解释成换行，否则整段变成一行，
             # 「行首命令名」的判据就永远匹配不上。
             'printf %b ' + repr(help_text) + '; }',
             BODY,
-            'cloud_del_capability >/dev/null 2>&1',
-            'printf "RC=%s\\nCAN=%s\\nWHY=%s\\nHINT=%s\\n" "$?" "$OC_DEL_CAN" "$OC_DEL_WHY" "$OC_DEL_HINT"',
+            # 必须重定向到文件再 cat：用 $(...) 会把函数放进子 shell，
+            # OC_DEL_CAN 这些全局变量随子 shell 一起消失（本项目踩过）。
+            'cloud_del_capability >"$OUTF" 2>/dev/null',
+            '_rc=$?',
+            '_out="$(cat "$OUTF" 2>/dev/null)"',
+            'printf "RC=%s\\nCAN=%s\\nWHY=%s\\nHINT=%s\\nOUT=%s\\n" "$_rc" "$OC_DEL_CAN" "$OC_DEL_WHY" "$OC_DEL_HINT" "$_out"',
         ]
         judge.write_text('\n'.join(lines) + '\n', encoding='utf-8')
         p = subprocess.run(['sh', str(judge)], capture_output=True, text=True,
@@ -146,8 +153,9 @@ def run_case(name, help_text, token, want_rc, want_why, want_hint):
         rc = got.get('RC', '?')
         why = got.get('WHY', '')
         hint = got.get('HINT', '')
+        out = got.get('OUT', '')
         ok = (rc == str(want_rc) and why == want_why
-              and (want_hint in hint if want_hint else True))
+              and (want_hint in hint if want_hint else True) and out == '')
         check(name, ok, 'RC=%s WHY=%s HINT=%s' % (rc, why, hint))
 
 

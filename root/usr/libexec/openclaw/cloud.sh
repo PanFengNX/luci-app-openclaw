@@ -3242,15 +3242,17 @@ cloud_del_capability() {
 	}
 	help="$(cloud_run 30 "$bin" help 2>/dev/null)"
 	[ -n "$help" ] || help="$(cloud_run 30 "$bin" --help 2>/dev/null)"
-	# 只认「行首的命令名」：help 正文里出现 remove 之类的词很常见（真机就是这样
-	# 把 bdpan 误判成支持删除的），整段任意位置匹配会给出相反的结论。
-	if printf '%s\n' "$help" | grep -qE '^[[:space:]]*(rm|delete|remove)([[:space:]]|$)'; then
+	# 只认「help 里的命令表格行」：命令名在行首、缩进至少一格、后面跟两个
+	# 以上空格（或直接行尾）。整段任意位置匹配会把正文里的 remove 当成命令 ——
+	# 真机就是这样被误判成「支持删除」的。
+	if printf '%s\n' "$help" | grep -qE '^[[:space:]]+(rm|delete|remove)([[:space:]]{2,}|$)'; then
 		OC_DEL_CAN=1
 		OC_DEL_WHY="cli"
 		return 0
 	fi
-	# 行首没找到也不下结论：逐个问 `<sub> --help`。真命令会给出用法并以 0 退出，
-	# 不存在的命令只会报 unknown command（不动任何文件，属于只读探测）。
+	# 表格里没有也不下结论：问 `<sub> --help` 要**该子命令自己的用法行**。
+	# 注意不能只看退出码：cobra 一类 CLI 收到未知命令 + --help 时会打印根用法
+	# 并返回 0（真机 bdpan 就是），只看 rc 会把不存在的命令当存在。
 	local _s _h _rc
 	for _s in rm delete remove; do
 		_h="$(cloud_run 15 "$bin" "$_s" --help 2>&1)"
@@ -3259,7 +3261,9 @@ cloud_del_capability() {
 			*'unknown command'*|*'Unknown command'*|*'unrecognized'*|*'Unrecognized'*|*'not found'*|*'no such'*)
 				continue ;;
 		esac
-		if [ "$_rc" -eq 0 ] && [ -n "$_h" ]; then
+		[ "$_rc" -eq 0 ] || continue
+		# 用法行必须带上这个子命令本身：`Usage: bdpan rm ...`
+		if printf '%s\n' "$_h" | grep -qiE "^[[:space:]]*usage:.*[[:space:]]$_s([[:space:]]|$)"; then
 			OC_DEL_CAN=1
 			OC_DEL_WHY="cli"
 			return 0
