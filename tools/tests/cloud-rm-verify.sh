@@ -78,7 +78,8 @@ check('delpass_status 不再误调 cloud.sh',
 STUB = r'''#!/bin/sh
 sub="$1"; shift
 case "$sub" in
-  help|--help) printf '%s\n' "$STUB_HELP" ;;
+  # %b：help 文本里的 \n 要解释成换行（判据只认行首命令名）
+  help|--help) printf '%b\n' "$STUB_HELP" ;;
   ls)
     [ "$STUB_LS_FAIL" = "1" ] && { printf 'ls failed\n'; exit 7; }
     n=0
@@ -185,7 +186,7 @@ def run_case(name, state, help_text, effect, rm_out='ok', rm_rc=0,
 TARGET = 'openclaw-backup-20261111-000000.tar.gz.enc'
 OTHER1 = 'openclaw-backup-20261110-000000.tar.gz.enc'
 OTHER2 = 'openclaw-backup-20261109-000000.tar.gz.enc'
-HELP_RM = 'Commands: ls upload download rm'
+HELP_RM = 'Commands://n  ls       list files\n  rm       delete a file\n  upload   add a file'
 THREE = TARGET + '\n' + OTHER1 + '\n' + OTHER2 + '\n'
 
 # 1. 现场复现：CLI 返回 0 但文件还在 —— 必须失败，不能报「已删除」

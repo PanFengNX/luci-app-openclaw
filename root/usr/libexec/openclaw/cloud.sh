@@ -3242,11 +3242,29 @@ cloud_del_capability() {
 	}
 	help="$(cloud_run 30 "$bin" help 2>/dev/null)"
 	[ -n "$help" ] || help="$(cloud_run 30 "$bin" --help 2>/dev/null)"
-	if printf '%s\n' "$help" | grep -qE '(^|[^A-Za-z0-9_-])(rm|delete|remove)([^A-Za-z0-9_-]|$)'; then
+	# 只认「行首的命令名」：help 正文里出现 remove 之类的词很常见（真机就是这样
+	# 把 bdpan 误判成支持删除的），整段任意位置匹配会给出相反的结论。
+	if printf '%s\n' "$help" | grep -qE '^[[:space:]]*(rm|delete|remove)([[:space:]]|$)'; then
 		OC_DEL_CAN=1
 		OC_DEL_WHY="cli"
 		return 0
 	fi
+	# 行首没找到也不下结论：逐个问 `<sub> --help`。真命令会给出用法并以 0 退出，
+	# 不存在的命令只会报 unknown command（不动任何文件，属于只读探测）。
+	local _s _h _rc
+	for _s in rm delete remove; do
+		_h="$(cloud_run 15 "$bin" "$_s" --help 2>&1)"
+		_rc=$?
+		case "$_h" in
+			*'unknown command'*|*'Unknown command'*|*'unrecognized'*|*'Unrecognized'*|*'not found'*|*'no such'*)
+				continue ;;
+		esac
+		if [ "$_rc" -eq 0 ] && [ -n "$_h" ]; then
+			OC_DEL_CAN=1
+			OC_DEL_WHY="cli"
+			return 0
+		fi
+	done
 	tok="$(cloud_api_raw_token 2>/dev/null)"
 	if [ -z "$tok" ]; then
 		OC_DEL_WHY="nologin"
@@ -3592,12 +3610,14 @@ cloud_rm_remote() {
 	# 只使用 CLI 自己声明的删除子命令；没有就按常见命名试，绝不自行拼 API。
 	help="$(cloud_run 30 "$bin" help 2>&1)"
 	[ -n "$help" ] || help="$(cloud_run 30 "$bin" --help 2>&1)"
+	# 只认行首的命令名：help 正文里的 "remove" 之类的词会把不存在的子命令
+	# 当成存在的，白白多跑一轮（真机 bdpan 就是这样）。
 	sub=""
-	if printf '%s\n' "$help" | grep -qE '(^|[^A-Za-z0-9_-])rm([^A-Za-z0-9_-]|$)'; then
+	if printf '%s\n' "$help" | grep -qE '^[[:space:]]*rm([[:space:]]|$)'; then
 		sub="rm"
-	elif printf '%s\n' "$help" | grep -qE '(^|[^A-Za-z0-9_-])delete([^A-Za-z0-9_-]|$)'; then
+	elif printf '%s\n' "$help" | grep -qE '^[[:space:]]*delete([[:space:]]|$)'; then
 		sub="delete"
-	elif printf '%s\n' "$help" | grep -qE '(^|[^A-Za-z0-9_-])remove([^A-Za-z0-9_-]|$)'; then
+	elif printf '%s\n' "$help" | grep -qE '^[[:space:]]*remove([[:space:]]|$)'; then
 		sub="remove"
 	fi
 

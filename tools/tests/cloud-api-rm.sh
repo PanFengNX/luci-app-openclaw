@@ -85,7 +85,8 @@ BD = r'''#!/bin/sh
 sub="$1"; shift
 printf '%s\n' "$sub" >>"$STUB_CALLS"
 case "$sub" in
-  help|--help) printf '%s\n' "$STUB_HELP" ;;
+  # %b：help 文本里的 \n 要解释成换行，「行首命令名」的判据才匹配得上。
+  help|--help) printf '%b\n' "$STUB_HELP" ;;
   ls)
     # 复现真机现象：同一次操作里的第 N 次 ls 偶发非 0 退出。
     cnt=$(cat "$STUB_LS_COUNT" 2>/dev/null || echo 0)

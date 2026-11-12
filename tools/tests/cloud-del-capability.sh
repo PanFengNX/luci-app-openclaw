@@ -85,13 +85,18 @@ B64BIN = 'v1:' + base64.b64encode(bytes(range(0, 40))).decode()
 PLAIN = TOKEN
 
 CASES = [
-    ('help 里有 rm -> 可用（成因 cli）', 'Commands: ls upload download rm', PLAIN, 0, 'cli', ''),
+    ('help 里有 rm -> 可用（成因 cli）',
+     'Commands://n  ls       list\n  rm       delete a file\n  upload   add', PLAIN,
+     0, 'cli', ''),
     ('help 无删除命令 + 明文凭据 -> 可用（token）',
      'usage: bdpan <command>', PLAIN, 0, 'token', ''),
     ('help 无删除命令 + base64 JSON 凭据 -> 可用（token）',
      'usage: bdpan <command>', B64JSON, 0, 'token', ''),
     ('help 无删除命令 + 加密凭据 -> 不可用（encrypted）',
      'usage: bdpan <command>', B64BIN, 1, 'encrypted', '加密保存'),
+    ('help 正文含 remove 但无该命令 -> 不可用（真机回归）',
+     'usage: bdpan <command>\n  upload   add a file (remove deletes it)', B64BIN,
+     1, 'encrypted', '加密保存'),
     ('help 无删除命令 + 没有登录配置 -> 不可用（nologin）',
      'usage: bdpan <command>', None, 1, 'nologin', '未登录'),
 ]
@@ -118,7 +123,14 @@ def run_case(name, help_text, token, want_rc, want_why, want_hint):
             'export OC_CLOUD_HOME=' + repr(posix(home)),
             'export OC_CLOUD_REMOTE=' + repr('openclaw-backups'),
             'cloud_bin_ready() { printf %s ' + repr(posix(bd)) + '; }',
-            'cloud_run() { shift; printf %s ' + repr(help_text) + '; }',
+            # 桩要像真 CLI：help 打印正文；<sub> --help 对不存在的命令报
+            # unknown command 并非 0 —— 真机就是这个行为。
+            'cloud_run() { shift; case "$*" in '
+            '*" --help") case "$2" in rm|delete|remove) '
+            'printf "Error: unknown command %s\\n" "$2"; return 1 ;; esac ;; esac; '
+            # %b：help 文本里的 \n 要被解释成换行，否则整段变成一行，
+            # 「行首命令名」的判据就永远匹配不上。
+            'printf %b ' + repr(help_text) + '; }',
             BODY,
             'cloud_del_capability >/dev/null 2>&1',
             'printf "RC=%s\\nCAN=%s\\nWHY=%s\\nHINT=%s\\n" "$?" "$OC_DEL_CAN" "$OC_DEL_WHY" "$OC_DEL_HINT"',
