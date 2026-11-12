@@ -1087,9 +1087,10 @@ cmd_overview() {
 	local del_can=true
 	[ "$OC_DEL_CAN" = "1" ] || del_can=false
 
-	printf '{"ok":true,%s,"encrypt":{"enabled":%s,"pass_set":%s},"pass":{"set":%s},"delpass":{"set":%s},"del":{"can":%s,"why":"%s","path":"/apps/bdpan/%s","hint":"%s"},"schedule":{"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"keep_local":%s,"installed":%s,"line":"%s"}}\n' \
+	printf '{"ok":true,%s,"encrypt":{"enabled":%s,"pass_set":%s},"pass":{"set":%s},"delpass":{"set":%s},"del":{"can":%s,"why":"%s","path":"/apps/bdpan/%s","hint":"%s","evidence":"%s"},"schedule":{"enabled":%s,"period":"%s","weekday":%s,"hour":%s,"minute":%s,"keep":%s,"keep_local":%s,"installed":%s,"line":"%s"}}\n' \
 		"$base" "$enc_on" "$pass_set" "$pass_set" "$dp_set" \
 		"$del_can" "$(jstr "${OC_DEL_WHY:-}")" "$(jstr "$OC_CLOUD_REMOTE")" "$(jstr "${OC_DEL_HINT:-}")" \
+		"$(jstr "${OC_DEL_WHY_LINE:-}")" \
 		"$sch_enabled" "$OC_SCH_PERIOD" "$OC_SCH_WEEKDAY" "$OC_SCH_HOUR" \
 		"$OC_SCH_MINUTE" "$OC_SCH_KEEP" "$OC_SCH_KEEP_LOCAL" "$sch_installed" "$(jstr "$sch_line")"
 }
@@ -2964,6 +2965,8 @@ OC_LS_ERR=""
 #   * 用完立刻删配置文件；任何回显先过 cloud_redact。
 OC_API_ERR=""
 OC_API_TOKEN=""
+# 能力判定的依据（命中的那一行，截断后给页面/排障看；不含凭据）
+OC_DEL_WHY_LINE=""
 
 cloud_json_deep() {
 	# cloud_json_deep <file> <key> -> 任意层级里第一个同名键的标量值。
@@ -3235,39 +3238,49 @@ cloud_del_capability() {
 	OC_DEL_CAN=0
 	OC_DEL_WHY=""
 	OC_DEL_HINT=""
+	OC_DEL_WHY_LINE=""
 	bin="$(cloud_bin_ready 2>/dev/null)" || {
 		OC_DEL_WHY="nobin"
 		OC_DEL_HINT="未安装网盘组件，无法删除云端备份"
 		return 1
 	}
-	help="$(cloud_run 30 "$bin" help 2>/dev/null)"
-	[ -n "$help" ] || help="$(cloud_run 30 "$bin" --help 2>/dev/null)"
-	# 只认「help 里的命令表格行」：命令名在行首、缩进至少一格、后面跟两个
-	# 以上空格（或直接行尾）。整段任意位置匹配会把正文里的 remove 当成命令 ——
-	# 真机就是这样被误判成「支持删除」的。
-	if printf '%s\n' "$help" | grep -qE '^[[:space:]]+(rm|delete|remove)([[:space:]]{2,}|$)'; then
-		OC_DEL_CAN=1
-		OC_DEL_WHY="cli"
-		return 0
-	fi
-	# 表格里没有也不下结论：问 `<sub> --help` 要**该子命令自己的用法行**。
-	# 注意不能只看退出码：cobra 一类 CLI 收到未知命令 + --help 时会打印根用法
-	# 并返回 0（真机 bdpan 就是），只看 rc 会把不存在的命令当存在。
-	local _s _h _rc
+	# **不再解析 help 正文**：真机上 help 里出现 rm/delete/remove 字样并不
+	# 代表有这些命令（正文、示例、提示都会带），据此判定会把「不支持删除」
+	# 说成「支持」。改为逐个问子命令自己的用法行：
+	#   * `help <sub>` 明确说没有这个话题 -> 跳过；
+	#   * `<sub> --help` 输出里的 Usage 行必须带这个子命令，且**不能**是
+	#     根用法（含 <command> / [command]）—— cobra 对未知命令 + --help
+	#     会打印根用法并返回 0，只看退出码会被骗。
+	# 全程只读，不动任何文件。
+	local _s _h _rc _line
 	for _s in rm delete remove; do
+		_h="$(cloud_run 15 "$bin" help "$_s" 2>&1)"
+		case "$_h" in
+			*'nknown help topic'*|*'nknown command'*|*'not a '*|*'No help topic'*)
+				continue ;;
+		esac
 		_h="$(cloud_run 15 "$bin" "$_s" --help 2>&1)"
 		_rc=$?
 		case "$_h" in
-			*'unknown command'*|*'Unknown command'*|*'unrecognized'*|*'Unrecognized'*|*'not found'*|*'no such'*)
+			*'nknown command'*|*'nrecognized'*|*'not found'*|*'no such'*)
 				continue ;;
 		esac
 		[ "$_rc" -eq 0 ] || continue
-		# 用法行必须带上这个子命令本身：`Usage: bdpan rm ...`
-		if printf '%s\n' "$_h" | grep -qiE "^[[:space:]]*usage:.*[[:space:]]$_s([[:space:]]|$)"; then
-			OC_DEL_CAN=1
-			OC_DEL_WHY="cli"
-			return 0
+		_line="$(printf '%s\n' "$_h" | grep -iE "^[[:space:]]*usage:" | head -n 1)"
+		[ -n "$_line" ] || continue
+		# 根用法（bdpan [command] / <command>）要排除。这里必须用 grep 而不是
+		# case 模式：case 里的 [command] 是字符集合，会匹配任何一个字母，
+		# 等于把所有行都排除掉（踩过一次）。
+		if printf '%s' "$_line" | grep -qE '\[command\]|<command>'; then
+			continue
 		fi
+		case "$_line" in
+			*" $_s "*|*" $_s"|*": $_s"*)
+				OC_DEL_CAN=1
+				OC_DEL_WHY="cli"
+				OC_DEL_WHY_LINE="$(printf '%s' "$_line" | oc_cut_utf8 120)"
+				return 0 ;;
+		esac
 	done
 	tok="$(cloud_api_raw_token 2>/dev/null)"
 	if [ -z "$tok" ]; then

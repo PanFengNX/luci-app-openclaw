@@ -1,12 +1,14 @@
 #!/bin/sh
 # cloud-del-capability.sh — 「云端删除不可用就不显示删除按钮」回归
 #
-# 背景：bdpan 3.8.9 既没有删除子命令，又把登录凭据加密保存成 v1:<密文>，
-# 插件无法调用网盘删除接口。此时界面不该给出一个必然失败的「删除」按钮 ——
+# 背景：bdpan 3.8.9 没有删除子命令，又把登录凭据加密保存成 v1:<密文>，插件
+# 无法调用网盘删除接口。此时界面不该给出一个必然失败的「删除」按钮 ——
 # 1.8.96 起由 overview 的 del 子对象决定按钮是否渲染，并给出替代做法。
 #
-# 本用例把 cloud_del_capability 从 cloud.sh 抽出来，桩掉 bdpan 与登录配置，
-# 逐场景断言「能力结论 + 原因码 + 提示文案」，并静态检查前端真的按它隐藏按钮。
+# 真机踩到的两个坑（本用例逐条覆盖）：
+#   1) help 正文里出现 remove 之类的词，被整段匹配当成「有删除命令」；
+#   2) cobra 类 CLI 对「未知命令 + --help」会打印根用法并返回 0，只看退出码
+#      仍然会把不存在的命令判成存在。
 #
 # 退出码：0 = 全部通过；1 = 有失败
 
@@ -67,8 +69,6 @@ check('新增 cloud_del_capability', func('cloud_del_capability') != '')
 check('能力判定不做网络请求（只读配置 + help）',
       'curl' not in func('cloud_del_capability')
       and 'cloud_api_probe' not in func('cloud_del_capability'))
-# stdout 必须为空：overview 正在输出 JSON，能力判定的任何回显都会破坏它。
-# 这条在下面每个行为用例里都会真跑一遍（judge 记录 OUT）。
 check('overview 暴露 del 子对象',
       '"del":{"can":%s' in src and 'OC_DEL_HINT' in src)
 check('前端按能力隐藏云端删除按钮',
@@ -84,27 +84,26 @@ B64BIN = 'v1:' + base64.b64encode(bytes(range(0, 40))).decode()
 PLAIN = TOKEN
 
 CASES = [
-    ('help 里有 rm -> 可用（成因 cli）',
-     'Commands://n  ls       list\n  rm       delete a file\n  upload   add', PLAIN,
-     0, 'cli', ''),
-    ('help 无删除命令 + 明文凭据 -> 可用（token）',
-     'usage: bdpan <command>', PLAIN, 0, 'token', ''),
-    ('help 无删除命令 + base64 JSON 凭据 -> 可用（token）',
-     'usage: bdpan <command>', B64JSON, 0, 'token', ''),
-    ('help 无删除命令 + 加密凭据 -> 不可用（encrypted）',
-     'usage: bdpan <command>', B64BIN, 1, 'encrypted', '加密保存'),
-    ('help 正文含 remove 但无该命令 -> 不可用（真机回归）',
+    ('子命令 rm 有自己的 Usage 行 -> 可用（cli）',
+     'anything', PLAIN, 0, 'cli', '', 'rm'),
+    ('help 正文含 remove 但无该命令 -> 不可用（真机回归 1）',
      'usage: bdpan <command>\n  upload   add a file (remove deletes it)', B64BIN,
-     1, 'encrypted', '加密保存'),
-    ('help 无表格行 + --help 只给根用法 -> 不可用（真机回归 v2）',
-     'usage: bdpan <command>\n  upload   add a file', B64BIN,
-     1, 'encrypted', '加密保存'),
-    ('help 无删除命令 + 没有登录配置 -> 不可用（nologin）',
-     'usage: bdpan <command>', None, 1, 'nologin', '未登录'),
+     1, 'encrypted', '加密保存', ''),
+    ('--help 只给根用法 [command] -> 不可用（真机回归 2）',
+     'usage: bdpan <command>', B64BIN, 1, 'encrypted', '加密保存', ''),
+    ('help 无删除命令 + 明文凭据 -> 可用（token）',
+     'usage: bdpan <command>', PLAIN, 0, 'token', '', ''),
+    ('help 无删除命令 + base64 JSON 凭据 -> 可用（token）',
+     'usage: bdpan <command>', B64JSON, 0, 'token', '', ''),
+    ('help 无删除命令 + 加密凭据 -> 不可用（encrypted）',
+     'usage: bdpan <command>', B64BIN, 1, 'encrypted', '加密保存', ''),
+    ('没有登录配置 -> 不可用（nologin）',
+     'usage: bdpan <command>', None, 1, 'nologin', '未登录', ''),
 ]
 
 
-def run_case(name, help_text, token, want_rc, want_why, want_hint):
+def run_case(name, help_text, token, want_rc, want_why, want_hint,
+             supports=''):
     if not HAVE_ALL:
         check(name + '（缺函数，判失败）', False)
         return
@@ -119,6 +118,25 @@ def run_case(name, help_text, token, want_rc, want_why, want_hint):
         bd.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
         bd.chmod(0o755)
         posix = lambda p: str(p).replace('\\', '/')
+
+        # 桩模拟 cobra 的真实行为（真机上踩到的两个坑）：
+        #   * 未知命令 + --help  -> 打印根用法并返回 0；
+        #   * help <未知>        -> 报 unknown help topic。
+        # 只有 supports 指定的子命令才有自己的 Usage 行。
+        stub = (
+            # 参数位置要分清：`bdpan help rm` 的 rm 在 $3，`bdpan rm --help` 的
+            # rm 在 $2（shift 掉超时值后）。
+            'cloud_run() { shift; '
+            'case "$*" in '
+            '*" help "*) _sub="$3"; case "$_sub" in ' + repr(supports) + ') '
+            'printf "Usage: bdpan %s [flags] <path>\\n" "$_sub"; return 0 ;; esac; '
+            'printf "Error: unknown help topic %s\\n" "$_sub"; return 1 ;; '
+            '*" --help") _sub="$2"; case "$_sub" in ' + repr(supports) + ') '
+            'printf "Usage: bdpan %s [flags] <path>\\n" "$_sub"; return 0 ;; esac; '
+            'printf "Usage: bdpan [command]\\n"; return 0 ;; '
+            'esac; printf %b ' + repr(help_text) + '; }'
+        )
+
         judge = d / 'judge.sh'
         lines = [
             '#!/bin/sh',
@@ -126,21 +144,15 @@ def run_case(name, help_text, token, want_rc, want_why, want_hint):
             'export OC_CLOUD_REMOTE=' + repr('openclaw-backups'),
             'OUTF=' + repr(posix(d / 'cap.out')),
             'cloud_bin_ready() { printf %s ' + repr(posix(bd)) + '; }',
-            # 桩要像真 CLI：help 打印正文；<sub> --help 对不存在的命令报
-            # unknown command 并非 0 —— 真机就是这个行为。
-            'cloud_run() { shift; case "$*" in '
-            '*" --help") case "$2" in rm|delete|remove) '
-            'printf "Usage: %s [command]\\n" ' + repr('bdpan') + '; return 0 ;; esac ;; esac; '
-            # %b：help 文本里的 \n 要被解释成换行，否则整段变成一行，
-            # 「行首命令名」的判据就永远匹配不上。
-            'printf %b ' + repr(help_text) + '; }',
+            stub,
             BODY,
             # 必须重定向到文件再 cat：用 $(...) 会把函数放进子 shell，
             # OC_DEL_CAN 这些全局变量随子 shell 一起消失（本项目踩过）。
             'cloud_del_capability >"$OUTF" 2>/dev/null',
             '_rc=$?',
             '_out="$(cat "$OUTF" 2>/dev/null)"',
-            'printf "RC=%s\\nCAN=%s\\nWHY=%s\\nHINT=%s\\nOUT=%s\\n" "$_rc" "$OC_DEL_CAN" "$OC_DEL_WHY" "$OC_DEL_HINT" "$_out"',
+            'printf "RC=%s\\nCAN=%s\\nWHY=%s\\nHINT=%s\\nOUT=%s\\n" '
+            '"$_rc" "$OC_DEL_CAN" "$OC_DEL_WHY" "$OC_DEL_HINT" "$_out"',
         ]
         judge.write_text('\n'.join(lines) + '\n', encoding='utf-8')
         p = subprocess.run(['sh', str(judge)], capture_output=True, text=True,
@@ -155,8 +167,9 @@ def run_case(name, help_text, token, want_rc, want_why, want_hint):
         hint = got.get('HINT', '')
         out = got.get('OUT', '')
         ok = (rc == str(want_rc) and why == want_why
-              and (want_hint in hint if want_hint else True) and out == '')
-        check(name, ok, 'RC=%s WHY=%s HINT=%s' % (rc, why, hint))
+              and (want_hint in hint if want_hint else True)
+              and out == '')
+        check(name, ok, 'RC=%s WHY=%s OUT=%r HINT=%s' % (rc, why, out, hint))
 
 
 for c in CASES:
