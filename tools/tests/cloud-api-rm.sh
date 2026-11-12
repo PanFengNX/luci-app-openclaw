@@ -334,6 +334,23 @@ run('配置里没有凭据字段 -> 报字段名清单',
     expect_rc=1, expect_err='现有字段：app_id,uid',
     extra_check=lambda r: (r['argv'] == '', '不应调用接口'))
 
+# 8d. 值被多包了一层引号 -> 剥一层后应可用（不误判成「格式异常」）
+run('凭据被多包一层引号 -> 仍能删除',
+    config='{"access_token":"\\"' + TOKEN + '\\""}',
+    expect_rc=0)
+
+# 8e. 值带 enc: 前缀（加密保存）-> 拒绝，并说清长度与可疑字符类别
+run('凭据带 enc: 前缀 -> 拒绝并给类别',
+    config='{"access_token":"enc:abcdef1234567890"}',
+    expect_rc=1, expect_err='含： 冒号',
+    extra_check=lambda r: (r['argv'] == '', '不应调用接口'))
+
+# 8f. 值太短（例如取到 null 之类）-> 报长度与字段名
+run('凭据过短 -> 报长度与字段名',
+    config='{"access_token":"null"}',
+    expect_rc=1, expect_err='取自字段 access_token，长度 4',
+    extra_check=lambda r: (r['argv'] == '', '不应调用接口'))
+
 # 9. 凭据异常（含空格）-> 拒绝且不调用接口
 run('凭据含非法字符 -> 拒绝', token='bad token with space',
     expect_rc=1, expect_err='凭据格式异常',

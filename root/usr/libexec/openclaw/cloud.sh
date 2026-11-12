@@ -3053,7 +3053,7 @@ cloud_api_token() {
 	# 刻意不用 stdout 回传：调用方一旦写成 tok="$(cloud_api_token)"，函数就
 	# 在子 shell 里执行，OC_API_ERR 会随子 shell 一起消失，界面只剩一句
 	# 没有原因的空错误。
-	local cfg tok _k _ks
+	local cfg tok _k _ks _bad _hint _hitk
 	OC_API_TOKEN=""
 	cfg="$(cloud_api_conf)"
 	if [ ! -f "$cfg" ]; then
@@ -3066,9 +3066,11 @@ cloud_api_token() {
 	fi
 	# 先按顶层找，再按任意层级找（bdpan 可能把凭据放在子对象里），
 	# 最后试几个常见别名。顺序固定，取到即止。
+	_hitk=""
 	for _k in access_token accessToken token; do
 		[ -n "$tok" ] && break
 		tok="$(cloud_json_deep "$cfg" "$_k" 2>/dev/null | sed -n '1p' | tr -d '\r')"
+		[ -n "$tok" ] && _hitk="$_k"
 	done
 	unset _k
 	if [ -z "$tok" ]; then
@@ -3078,15 +3080,35 @@ cloud_api_token() {
 		unset _ks
 		return 1
 	fi
+	# 规范化：有的版本会把值再包一层引号（JSON 里存的是 "\"xxx\""），
+	# 也可能带 Bearer 前缀。只在**字符集校验之前**做，剥完仍要过校验。
+	case "$tok" in
+		\"*\") tok="${tok#\"}"; tok="${tok%\"}" ;;
+	esac
+	case "$tok" in
+		[Bb]earer\ *) tok="${tok#* }" ;;
+	esac
+
 	# token 会被拼进 curl 配置文件的 url= 行：一旦掺入引号 / 空白 / 换行，
 	# 就等于让外部内容写入 curl 选项。字符集之外一律拒绝。
+	#
+	# 拒绝时只说清「长度 + 出现了哪类字符」，绝不回显凭据本身 —— 用来区分
+	# 「多包了一层」「带 enc: 前缀」「是加密后的二进制」这几种情况。
+	_bad=""
+	[ "${#tok}" -ge 8 ] || _bad=1
 	case "$tok" in
-		*[!A-Za-z0-9._~+/=-]*)
-			OC_API_ERR="网盘登录凭据格式异常，请在组件里重新登录"
-			return 1 ;;
+		*[!A-Za-z0-9._~+/=-]*) _bad=1 ;;
 	esac
-	if [ "${#tok}" -lt 8 ]; then
-		OC_API_ERR="网盘登录凭据格式异常，请在组件里重新登录"
+	if [ -n "$_bad" ]; then
+		_hint=""
+		case "$tok" in *:* ) _hint="$_hint 冒号" ;; esac
+		case "$tok" in *%* ) _hint="$_hint 百分号" ;; esac
+		case "$tok" in *'"'* ) _hint="$_hint 引号" ;; esac
+		case "$tok" in *'{'*|*'}'* ) _hint="$_hint 花括号" ;; esac
+		case "$tok" in *'['*|*']'* ) _hint="$_hint 方括号" ;; esac
+		case "$tok" in *[![:print:]]* ) _hint="$_hint 不可打印字节" ;; esac
+		OC_API_ERR="网盘登录凭据格式异常（取自字段 ${_hitk:-?}，长度 ${#tok}${_hint:+，含：$_hint}），请在组件里重新登录"
+		unset _bad _hint
 		return 1
 	fi
 	OC_API_TOKEN="$tok"
