@@ -55,6 +55,7 @@ NAMES = ('cloud_valid_remote_name', 'cloud_json_scalar', 'cloud_json_deep',
          'cloud_json_keys', 'cloud_ls_tsv',
          'cloud_rm_list', 'cloud_rm_stat', 'cloud_rm_verify',
          'cloud_rm_attempt', 'cloud_api_conf', 'cloud_api_token',
+         'cloud_api_cand_ok', 'cloud_api_probe',
          'cloud_api_delete', 'cloud_rm_remote')
 
 # ---------------------------------------------------------------- 静态契约
@@ -68,7 +69,7 @@ check('凭据只经 -K 配置文件传递，不进 argv',
       and '--data-urlencode' in api and 'access_token=$tok"' not in api.split('--data-urlencode')[-1])
 check('配置文件先 umask 077 再 chmod 600', 'umask 077' in api and 'chmod 600' in api)
 check('用完立刻删除配置文件', 'rm -f "$conf"' in api)
-check('token 校验字符集', "*[!A-Za-z0-9._~+/=-]*" in func('cloud_api_token'))
+check('token 校验字符集', "*[!A-Za-z0-9._~+/=-]*" in func('cloud_api_cand_ok'))
 check('接口成功也要复验（不复用退出码当结论）',
       'cloud_rm_verify "$bin" "$name" "$before"' in func('cloud_rm_remote'))
 check('CLI 失败后落到 API 通道', 'cloud_api_delete "$name"' in func('cloud_rm_remote'))
@@ -129,6 +130,21 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$conf" ] && cat "$conf" >"$STUB_CONF_DUMP" && cp "$conf" "$STUB_CONF_KEEP"
 printf '%s' "$data" >"$STUB_DATA_DUMP"
+# 1.8.94 起取凭据时会先用只读的 method=list 探测候选；这一步不能走删除桩，
+# 否则会把状态文件里的目标提前删掉，后面的断言就全乱了。
+if grep -q 'method=list' "$conf" 2>/dev/null; then
+  # 探测不是删除：把 argv 记录清空，断言「有没有走到删除接口」才有意义。
+  : >"$STUB_ARGV"
+  printf '%s\n' probe >>"$STUB_CALLS"
+  tok=$(sed -n 's/.*access_token=\([^"&]*\).*/\1/p' "$conf" | head -n 1)
+  printf '%s\n' "$tok" >>"$STUB_PROBED"
+  if [ -n "${STUB_GOOD_TOKEN:-}" ] && [ "$tok" != "$STUB_GOOD_TOKEN" ]; then
+    printf '{"errno":-6,"errmsg":"invalid access token"}' >"$out"
+    printf 'OC_HTTP:200'; exit 0
+  fi
+  printf '{"errno":0,"list":[]}' >"$out"
+  printf 'OC_HTTP:200'; exit 0
+fi
 mode="${STUB_API:-ok}"
 case "$mode" in
   ok)
@@ -173,7 +189,8 @@ OTHER = 'openclaw-backup-20261110-000000.tar.gz.enc'
 def run(name, api_mode='ok', api_effect=1, state=None, token=TOKEN,
         fmt_ok=True, expect_rc=None, expect_err=None, extra_check=None,
         remote='openclaw-backups', config=None, ls_fail_on='', help_text=None,
-        expect_not_err=None, ls_exit=1, calls_expect=None, rm_rc=1):
+        expect_not_err=None, ls_exit=1, calls_expect=None, rm_rc=1,
+        good_token=None):
     if not HAVE_ALL:
         check(name + '（缺函数，判失败）', False)
         return
@@ -223,6 +240,8 @@ def run(name, api_mode='ok', api_effect=1, state=None, token=TOKEN,
             'export STUB_TARGET=' + repr(TARGET),
             'export STUB_API=' + repr(api_mode),
             'export STUB_API_EFFECT=' + repr(str(api_effect)),
+            'export STUB_GOOD_TOKEN=' + repr(good_token or ''),
+            'export STUB_PROBED=' + repr(posix(d / 'probed.txt')),
             'export STUB_ARGV=' + repr(posix(d / 'argv.txt')),
             'export STUB_CONF_DUMP=' + repr(posix(d / 'conf.txt')),
             'export STUB_CONF_KEEP=' + repr(posix(d / 'conf.keep')),
@@ -339,11 +358,17 @@ run('凭据被多包一层引号 -> 仍能删除',
     config='{"access_token":"\\"' + TOKEN + '\\""}',
     expect_rc=0)
 
-# 8e. 值带 enc: 前缀（加密保存）-> 拒绝，并说清长度与可疑字符类别
-run('凭据带 enc: 前缀 -> 拒绝并给类别',
-    config='{"access_token":"enc:abcdef1234567890"}',
-    expect_rc=1, expect_err='含： 冒号',
-    extra_check=lambda r: (r['argv'] == '', '不应调用接口'))
+# 8e. 值带 enc: 前缀 -> 把冒号后那一段拆出来探测，可用就继续删
+run('凭据带 enc: 前缀 -> 拆出后半段后成功',
+    config='{"access_token":"enc:' + TOKEN + '"}',
+    good_token=TOKEN, expect_rc=0)
+
+# 8e2. 拆出来的候选网盘都不认 -> 明确说「试了几个都被拒绝」
+run('候选都被网盘拒绝 -> 报凭据不可用',
+    config='{"access_token":"enc:deadbeefdeadbeef"}',
+    good_token=TOKEN, expect_rc=1,
+    expect_err='网盘登录凭据不可用',
+    extra_check=lambda r: (r['argv'] == '', '不应走到删除接口'))
 
 # 8f. 值太短（例如取到 null 之类）-> 报长度与字段名
 run('凭据过短 -> 报长度与字段名',
@@ -424,6 +449,7 @@ def sec_check(r):
     if want not in r['data']:
         why.append('filelist 路径不对：' + r['data'][:80])
     left = [x.name for x in r['dir'].glob('.xpan-rm.*')]
+    left += [x.name for x in r['dir'].glob('.xpan-probe.*')]
     if left:
         why.append('临时文件未清理：' + ','.join(left))
     return (not why), '; '.join(why)

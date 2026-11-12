@@ -3053,7 +3053,7 @@ cloud_api_token() {
 	# 刻意不用 stdout 回传：调用方一旦写成 tok="$(cloud_api_token)"，函数就
 	# 在子 shell 里执行，OC_API_ERR 会随子 shell 一起消失，界面只剩一句
 	# 没有原因的空错误。
-	local cfg tok _k _ks _bad _hint _hitk
+	local cfg tok _k _ks _hint _hitk _try _why _c _prev
 	OC_API_TOKEN=""
 	cfg="$(cloud_api_conf)"
 	if [ ! -f "$cfg" ]; then
@@ -3094,12 +3094,25 @@ cloud_api_token() {
 	#
 	# 拒绝时只说清「长度 + 出现了哪类字符」，绝不回显凭据本身 —— 用来区分
 	# 「多包了一层」「带 enc: 前缀」「是加密后的二进制」这几种情况。
-	_bad=""
-	[ "${#tok}" -ge 8 ] || _bad=1
-	case "$tok" in
-		*[!A-Za-z0-9._~+/=-]*) _bad=1 ;;
-	esac
-	if [ -n "$_bad" ]; then
+	# 候选按可能性排序：整串 -> 冒号前 -> 冒号后。真机上 bdpan 存的是
+	# 「前缀:令牌」（长度 155、含冒号），而百度原始 token 不含冒号；到底哪
+	# 一段有效只能问网盘，所以逐个做只读探测，第一个通过的即采用。
+	_try=0
+	_why=""
+	for _c in "$tok" "${tok%%:*}" "${tok##*:}"; do
+		[ "$_try" -lt 3 ] || break
+		cloud_api_cand_ok "$_c" || continue
+		[ "$_c" = "$_prev" ] && continue
+		_prev="$_c"
+		_try=$((_try + 1))
+		if cloud_api_probe "$_c"; then
+			OC_API_TOKEN="$_c"
+			unset _try _why _c _prev
+			return 0
+		fi
+		_why="$OC_API_ERR"
+	done
+	if [ "$_try" -eq 0 ]; then
 		_hint=""
 		case "$tok" in *:* ) _hint="$_hint 冒号" ;; esac
 		case "$tok" in *%* ) _hint="$_hint 百分号" ;; esac
@@ -3108,11 +3121,71 @@ cloud_api_token() {
 		case "$tok" in *'['*|*']'* ) _hint="$_hint 方括号" ;; esac
 		case "$tok" in *[![:print:]]* ) _hint="$_hint 不可打印字节" ;; esac
 		OC_API_ERR="网盘登录凭据格式异常（取自字段 ${_hitk:-?}，长度 ${#tok}${_hint:+，含：$_hint}），请在组件里重新登录"
-		unset _bad _hint
-		return 1
+	else
+		OC_API_ERR="网盘登录凭据不可用（试了 $_try 个候选都被拒绝：${_why:-原因未知}），请在组件里重新登录"
 	fi
+	unset _try _why _hint _c _prev
+	return 1
 	OC_API_TOKEN="$tok"
 	return 0
+}
+
+cloud_api_cand_ok() {
+	# 候选凭据是否满足「可以拼进 URL」的最低要求。
+	case "$1" in
+		''|*[!A-Za-z0-9._~+/=-]*) return 1 ;;
+	esac
+	[ "${#1}" -ge 8 ]
+}
+
+cloud_api_probe() {
+	# cloud_api_probe <token> -> 0 可用 / 1 不可用（原因在 OC_API_ERR）
+	#
+	# 真机上 bdpan 存的 access_token 是「前缀:令牌」的打包形态（长度 155、
+	# 含冒号），直接拿去调接口会被拒绝。拆出来的哪一段才是真 token 只有网盘
+	# 知道，所以用一次**只读的列目录请求**去挑：errno=0 的就是它。探测不带
+	# 任何写操作，失败也不会动到任何文件。
+	local tok="$1" conf out code rc errno http last detail ok
+	[ -n "$tok" ] || { OC_API_ERR="凭据为空"; return 1; }
+	case "$tok" in
+		*[!A-Za-z0-9._~+/=-]*)
+			OC_API_ERR="凭据含非法字符"
+			return 1 ;;
+	esac
+	[ -d "$OC_RUNDIR" ] || { OC_API_ERR="私有运行目录不存在"; return 1; }
+	conf="$OC_RUNDIR/.xpan-probe.$$.conf"
+	out="$OC_RUNDIR/.xpan-probe.$$.out"
+	code="$OC_RUNDIR/.xpan-probe.$$.code"
+	rm -f "$conf" "$out" "$code" 2>/dev/null
+	( umask 077; : >"$conf" ) || { OC_API_ERR="无法创建临时文件"; return 1; }
+	{
+		printf 'url = "https://pan.baidu.com/rest/2.0/xpan/file?method=list&access_token=%s"\n' "$tok"
+		printf 'header = "User-Agent: pan.baidu.com"\n'
+	} >"$conf" 2>/dev/null
+	chmod 600 "$conf" 2>/dev/null
+	( umask 077; oc_timeout 30 curl -sS -K "$conf" -o "$out" \
+		-w 'OC_HTTP:%{http_code}' \
+		--data-urlencode "dir=/apps/bdpan/$OC_CLOUD_REMOTE" \
+		>"$code" 2>&1 )
+	rc=$?
+	http=""
+	last="$(tail -c 60 "$code" 2>/dev/null)"
+	case "$last" in
+		*OC_HTTP:*) http="${last##*OC_HTTP:}"; http="${http%%[!0-9]*}" ;;
+	esac
+	errno="$(cloud_json_scalar "$out" errno 2>/dev/null | sed -n '1p' | tr -d '\r')"
+	ok=1
+	if [ "$errno" = "0" ] && [ "$rc" -eq 0 ]; then
+		case "$http" in
+			2??|'') ok=0 ;;
+		esac
+	fi
+	if [ "$ok" -ne 0 ]; then
+		detail="$(cloud_redact <"$out" 2>/dev/null | tr -d '\r' | tail -n 1 | oc_cut_utf8 120)"
+		OC_API_ERR="网盘拒绝了这份凭据（errno=${errno:-?}${http:+，HTTP $http}）${detail:+：$detail}"
+	fi
+	rm -f "$conf" "$out" "$code" 2>/dev/null
+	return "$ok"
 }
 
 cloud_api_delete() {
