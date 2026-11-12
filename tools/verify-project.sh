@@ -374,6 +374,19 @@ else
 	skip "缺少 tools/tests/plugin-update-home.sh"
 fi
 
+head_ "7e2c. 自更新下载源：直连 -> API 资产接口 -> 镜像"
+if [ -f tools/tests/github-update-download.sh ]; then
+	if out="$(sh tools/tests/github-update-download.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "github-update-download.sh 全部断言通过"
+	else
+		bad "github-update-download.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/github-update-download.sh"
+fi
+
 head_ "7e3. install-status 的 idle/lost 判定（重启后不得误报中断）"
 if [ -f tools/tests/install-status-idle.sh ]; then
 	if out="$(sh tools/tests/install-status-idle.sh 2>&1)"; then

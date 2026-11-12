@@ -38,6 +38,16 @@ FETCH_TIMEOUT=30       # 元数据 / 校验和：30s
 PKG_TIMEOUT=180        # 插件包本体：3min
 MAX_ASSET_SCAN=64      # Release 里最多扫描的资产数
 
+# 下载资产内容用的 Accept 头。releases/download 直连地址直接回文件；而 API
+# 资产接口必须显式要 octet-stream，否则回的是 JSON 元数据 —— 那种响应也返回
+# 200，落盘后"大小正常"却装不上，校验和能挡住但报错会误导成"包被篡改"。
+ACCEPT_JSON='application/vnd.github+json'
+ACCEPT_BIN='application/octet-stream'
+# 内置镜像前缀（顺序即尝试顺序）。只在 GitHub 直连与 API 资产接口都失败后才
+# 用，且下载物必须与 api.github.com 给出的 SHA256 完全一致 —— 镜像只能"不给"，
+# 不能"给错"。要关掉见 update_mirror_get（UCI main.update_mirror=off）。
+GH_MIRRORS_DEFAULT='https://ghfast.top/ https://gh-proxy.com/ https://ghproxy.net/'
+
 WORK="$OC_RUNDIR/github-update"
 ROLLBACK_DIR="$WORK/rollback"
 LOG="$WORK/update.log"
@@ -323,28 +333,116 @@ need_tools() {
 # curl 退出码 -> 可读原因。只映射有把握的值，其余原样带回（"未知"比猜错好）。
 _curl_rc_text() {
 	case "$1" in
-		5|6)  printf '域名解析失败（DNS 无法解析 github.com）' ;;
+		5|6)  printf '域名解析失败（设备解析不到目标域名，DNS 或网络受限）' ;;
 		7)    printf '无法建立连接（对端不可达或被拦截）' ;;
 		28)   printf '连接或传输超时' ;;
 		35)   printf 'TLS 握手失败' ;;
 		51|60) printf 'TLS 证书校验失败（设备可能未安装 CA 证书，试试 opkg 安装 ca-certificates）' ;;
+		56)   printf '连接被对端中断' ;;
 		63)   printf '响应超过大小上限' ;;
 		*)    printf 'curl 错误（rc=%s）' "$1" ;;
 	esac
 }
 
+# ---------------------------------------------------------------- 下载源
+#
+# 真机现场：设备能"检查更新"（走 api.github.com，能拿到版本与 SHA256），却
+# 永远装不上 —— 包体在 github.com/releases/download，报「域名解析失败」或
+# 「TLS 握手失败」。这两个域名在部分网络里被区别对待，只留一条下载路径等于
+# 把"能不能升级"交给运气。
+#
+# 现在按顺序尝试，全都失败才报失败，并把每个源的原因一起带回日志：
+#   1) GitHub 直连（原有行为）
+#   2) GitHub API 资产接口（同在 api.github.com，与检查更新同域）
+#   3) 镜像前缀 + 同一个 GitHub 地址（传输层换掉，内容必须一致）
+# 完整性不因此下降：包内容必须与 api.github.com 给出的 SHA256 完全一致，
+# 镜像只能"不给"，不能"给错"。
+
+_mirror_ok() {
+	# 镜像前缀的安全判据。前缀会被直接拼在 GitHub 资产地址前面，所以字符集
+	# 必须收紧到 URL 安全集：空白、引号、反斜杠、$ ` 之类会在拼接后改变
+	# 语义；? 与 # 更要拒绝 —— 它们会把后面的资产地址变成查询串/片段，
+	# 请求的地址与校验过的地址就不是同一个了。
+	local u="${1:-}"
+	[ -n "$u" ] || return 1
+	case "$u" in
+		*[!A-Za-z0-9._~:/%+@-]*) return 1 ;;
+	esac
+	case "$u" in
+		https://?*) : ;;
+		*) return 1 ;;
+	esac
+	oc_safe_url "$u" || return 1
+	return 0
+}
+
+update_mirror_get() {
+	# 输出镜像前缀，每行一个（均已补成以 / 结尾）；输出为空 = 不使用镜像。
+	# UCI main.update_mirror：
+	#   off / none / 0      -> 完全不用镜像，只走 GitHub 的两个来源
+	#   其它非空值           -> 只把它当前缀（仍要过 _mirror_ok）
+	#   未设置 / 空          -> 内置 GH_MIRRORS_DEFAULT
+	local raw p
+	raw="$(uci_get main.update_mirror '')"
+	case "$raw" in
+		off|OFF|Off|none|NONE|None|0) return 0 ;;
+	esac
+	if [ -n "$raw" ]; then
+		case "$raw" in
+			*/) : ;;
+			*) raw="$raw/" ;;
+		esac
+		if _mirror_ok "$raw"; then
+			printf '%s\n' "$raw"
+		else
+			msg "UCI 中的更新镜像地址不合法（$raw），已忽略"
+		fi
+		return 0
+	fi
+	for p in $GH_MIRRORS_DEFAULT; do
+		case "$p" in
+			*/) : ;;
+			*) p="$p/" ;;
+		esac
+		_mirror_ok "$p" && printf '%s\n' "$p"
+	done
+	return 0
+}
+
+_dl_url_ok() {
+	# 允许下载的地址只有三种形状，都以固定仓库为锚：
+	#   1) 本仓库的 api.github.com 路径（Release 元数据、资产接口、校验和文件）
+	#   2) 本仓库 releases/download 下的直连地址
+	#   3) "<已校验的镜像前缀>" + 上面那个直连地址
+	# 也就是说镜像只换传输层，改变不了"要下载哪个文件"。
+	local u="${1:-}" m
+	case "$u" in
+		"https://api.github.com/repos/$GH_REPO/"*) return 0 ;;
+		"$GH_DL_PREFIX"*) return 0 ;;
+	esac
+	while IFS= read -r m; do
+		[ -n "$m" ] || continue
+		case "$u" in
+			"$m$GH_DL_PREFIX"*) return 0 ;;
+		esac
+	done <<EOF
+$(update_mirror_get)
+EOF
+	msg "拒绝非白名单地址：$u"
+	return 1
+}
+
 api_get() {
-	# api_get <url> <dest> <max-time>   —— 固定 https、限大小
+	# api_get <url> <dest> <max-time> [accept]   —— 固定 https、限大小
 	#
 	# 失败时把真实原因放进 API_GET_ERR 供调用方回显：
 	# 以前一律报「网络或仓库不可达」，DNS 失败 / 403 频率超限 / 证书缺失
 	# 三种完全不同的故障只能看到同一句话，根本无从排查。
-	local url="$1" dest="$2" mt="$3" proxy out rc code
+	# API_GET_RC 保留 curl 的原始退出码，供调用方判断"这个失败值不值得重试"。
+	local url="$1" dest="$2" mt="$3" acc="${4:-$ACCEPT_JSON}" proxy out rc code
 	API_GET_ERR=""
-	case "$url" in
-		https://api.github.com/repos/*|"$GH_DL_PREFIX"*) : ;;
-		*) msg "拒绝非白名单地址：$url"; return 1 ;;
-	esac
+	API_GET_RC=0
+	_dl_url_ok "$url" || return 1
 	# 遵循插件设置页已配置的代理（main.http_proxy）。GitHub 在很多网络下
 	# 直连不可达，不配代理时检查永远失败；代理地址仍要过安全校验。
 	proxy="$(uci_get main.http_proxy '')"
@@ -361,11 +459,12 @@ api_get() {
 	set -- -sSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time "$mt" \
 		--max-filesize "$MAX_BYTES" \
 		-H 'User-Agent: luci-app-openclaw-updater' \
-		-H 'Accept: application/vnd.github+json' \
+		-H "Accept: $acc" \
 		-o "$dest" -w 'OC_HTTP_CODE:%{http_code}'
 	[ -n "$proxy" ] && set -- "$@" -x "$proxy"
 	out="$(curl "$@" "$url" 2>&1)"; rc=$?
 	if [ "$rc" -ne 0 ]; then
+		API_GET_RC="$rc"
 		API_GET_ERR="$(_curl_rc_text "$rc")"
 		msg "下载失败：$url（$API_GET_ERR）"
 		rm -f "$dest" 2>/dev/null
@@ -387,15 +486,19 @@ api_get() {
 a_field() { jsonfilter -i "$1" -e "@.assets[$2].$3" 2>/dev/null | head -n1; }
 
 find_asset() {
-	# find_asset <meta> <release-version> -> 设置 ASSET_NAME / ASSET_URL / ASSET_DIGEST
-	local meta="$1" ver="$2" i=0 name url dig dig_hex
-	ASSET_NAME=""; ASSET_URL=""; ASSET_DIGEST=""
+	# find_asset <meta> <release-version> -> 设置 ASSET_NAME / ASSET_URL /
+	# ASSET_DIGEST / ASSET_ID
+	# ASSET_ID 是 API 资产接口用的数字 id，作为下载失败后的备用来源；
+	# 拿不到就是空（那就只走直连 + 镜像，不虚构一个 id）。
+	local meta="$1" ver="$2" i=0 name url dig dig_hex aid
+	ASSET_NAME=""; ASSET_URL=""; ASSET_DIGEST=""; ASSET_ID=""
 	while [ "$i" -lt "$MAX_ASSET_SCAN" ]; do
 		name="$(a_field "$meta" "$i" name)"
 		[ -n "$name" ] || break
 		if asset_name_ok "$name" "$ver"; then
 			url="$(a_field "$meta" "$i" browser_download_url)"
 			dig="$(a_field "$meta" "$i" digest)"
+			aid="$(a_field "$meta" "$i" id)"
 			case "$url" in
 				"$GH_DL_PREFIX"*) : ;;
 				*) msg "资产下载地址不在固定仓库：$url"; return 1 ;;
@@ -409,7 +512,12 @@ find_asset() {
 					;;
 				*) dig="" ;;
 			esac
-			ASSET_NAME="$name"; ASSET_URL="$url"; ASSET_DIGEST="$dig"
+			# 资产 id 只接受纯数字：它会被拼进 API 地址，任何其它字符都
+			# 意味着元数据异常，宁可不用这个备用来源。
+			case "$aid" in
+				''|*[!0-9]*) aid="" ;;
+			esac
+			ASSET_NAME="$name"; ASSET_URL="$url"; ASSET_DIGEST="$dig"; ASSET_ID="$aid"
 			return 0
 		fi
 		i=$((i + 1))
@@ -495,8 +603,10 @@ cmd_check() {
 	# 本身，拿它当路径会把文件写到 CWD 下、以版本号命名的文件里去，
 	# 随后 do_install 读 $RELEASE_VERSION_FILE 得到空值，安装被莫名拒绝。
 	#
-	# 第 5 列是候选标识，安装请求必须带回同一个值，用来证明
-	# "装的就是用户在页面上看到并确认的那一份"。
+	# 第 5 列是资产 id（备用下载源用），第 6 列是候选标识，安装请求必须
+	# 带回同一个值，用来证明"装的就是用户在页面上看到并确认的那一份"。
+	# ⚠️ 候选标识**必须留在最后一列**：install 用 `grep -q "\t$cid$"` 核对，
+	# 后面再追加字段会让行尾锚点失效，所有安装都会被判成"候选已失效"。
 	# 只靠原子 rename 不够：并发 check 可以在 install 读取前把快照换成
 	# 另一次检查的完整结果（组合是自洽的，但版本可能已经不同了），
 	# 于是用户点"安装 1.8.48"却装上了 1.8.49 —— 那是静默升级，必须禁止。
@@ -521,7 +631,7 @@ cmd_check() {
 	}
 	if ! {
 		umask 077
-		printf '%s\t%s\t%s\t%s\t%s\n' "$RELEASE_VERSION" "$ASSET_URL" "$ASSET_DIGEST" "$ASSET_NAME" "$CANDIDATE_ID" >"$CANDIDATE_TMP" &&
+		printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$RELEASE_VERSION" "$ASSET_URL" "$ASSET_DIGEST" "$ASSET_NAME" "$ASSET_ID" "$CANDIDATE_ID" >"$CANDIDATE_TMP" &&
 		mv -f "$CANDIDATE_TMP" "$CANDIDATE_FILE"
 	}; then
 		rm -f "$CANDIDATE_TMP" 2>/dev/null
@@ -722,16 +832,72 @@ verify_sha256() {
 	return 1
 }
 
+_dl_one() {
+	# _dl_one <dest> <url> <accept> <retry:0|1>
+	# 0 = 成功；失败时 API_GET_ERR 里是最后一次的原因。
+	# 重试只针对"可能瞬断"的几类：DNS、连不上、超时、TLS 握手、连接被中断。
+	# 403/404 是确定性结果，重试只会白等一个超时。
+	local dest="$1" url="$2" acc="$3" rt="$4" n=0
+	while :; do
+		n=$((n + 1))
+		api_get "$url" "$dest" "$PKG_TIMEOUT" "$acc" && return 0
+		if [ "$rt" = "1" ] && [ "$n" -lt 2 ]; then
+			case "$API_GET_RC" in
+				6|7|28|35|56) continue ;;
+			esac
+		fi
+		return 1
+	done
+}
+
+dl_try() {
+	# dl_try <dest> <github-url> <asset-id>
+	# 0 = 成功（来源写进 DL_SRC）；失败时 DL_ERR 汇总每个源的原因。
+	local dest="$1" furl="$2" aid="$3" m lg=""
+	DL_SRC=""; DL_ERR=""
+	if _dl_one "$dest" "$furl" "$ACCEPT_JSON" 1; then
+		DL_SRC='GitHub 直连'
+		return 0
+	fi
+	lg="GitHub 直连：${API_GET_ERR:-未知原因}"
+	if [ -n "$aid" ]; then
+		if _dl_one "$dest" "https://api.github.com/repos/$GH_REPO/releases/assets/$aid" "$ACCEPT_BIN" 1; then
+			DL_SRC='GitHub API 资产接口'
+			return 0
+		fi
+		lg="$lg；API 资产接口：${API_GET_ERR:-未知原因}"
+	fi
+	while IFS= read -r m; do
+		[ -n "$m" ] || continue
+		if _dl_one "$dest" "$m$furl" "$ACCEPT_JSON" 0; then
+			DL_SRC="镜像 $m"
+			return 0
+		fi
+		lg="$lg；镜像 $m：${API_GET_ERR:-未知原因}"
+	done <<EOF
+$(update_mirror_get)
+EOF
+	DL_ERR="$lg"
+	return 1
+}
+
 do_install() {
-	local url name digest ver pkg old backup rc size vrc line want_id got_id
+	local url name digest ver pkg old backup rc size vrc line want_id got_id aid
 	# 候选结果是一份原子快照（check 用 rename 覆盖写入），这里只读一次，
 	# 保证版本 / URL / digest / 资产名来自同一次检查。
 	line="$(cat "$CANDIDATE_FILE" 2>/dev/null)"
-	IFS='	' read -r ver url digest name got_id <<EOF
+	IFS='	' read -r ver url digest name aid got_id <<EOF
 $line
 EOF
 	if [ -z "$url" ] || [ -z "$ver" ] || [ -z "$name" ]; then
 		msg '没有可安装的检查结果，请先「检查更新」'
+		return 1
+	fi
+	# 1.8.88 起快照是 6 列（多了资产 id）。5 列的旧快照在这里会把候选标识
+	# 读进 aid、got_id 留空，随后被下面的指纹比对拒掉 —— 明确提示重查，
+	# 别让人对着"候选版本已变化"猜。
+	if [ -z "$got_id" ]; then
+		msg '检查结果格式已过期（缺少候选标识），请重新「检查更新」'
 		return 1
 	fi
 	# 候选指纹必须与用户在页面上确认的那一份一致。
@@ -759,9 +925,17 @@ EOF
 	trim_rollbacks
 	msg "已创建回滚备份：$backup"
 
-	# 2) 下载（https、限时、限大小、私有目录）
+	# 2) 下载（https、限时、限大小、私有目录）。多个来源依次尝试，见 dl_try。
+	# 资产 id 来自 check 的元数据，仍复核一遍形状：它会被拼进 API 地址。
+	case "$aid" in ''|*[!0-9]*) aid="" ;; esac
 	msg "开始下载：$name"
-	api_get "$url" "$pkg" "$PKG_TIMEOUT" || { msg "插件包下载失败：${API_GET_ERR:-未知原因}"; rm -f "$pkg"; return 1; }
+	if dl_try "$pkg" "$url" "$aid"; then
+		msg "下载成功（来源：$DL_SRC）"
+	else
+		msg "插件包下载失败：${DL_ERR:-未知原因}"
+		rm -f "$pkg"
+		return 1
+	fi
 	size="$(wc -c <"$pkg" 2>/dev/null | tr -d ' ')"
 	case "$size" in ''|*[!0-9]*) size=0 ;; esac
 	if [ "$size" -le 0 ] || [ "$size" -gt "$MAX_BYTES" ]; then
