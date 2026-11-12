@@ -150,6 +150,9 @@ def run_case(name, state, help_text, effect, rm_out='ok', rm_rc=0,
             'cloud_run() { t="$1"; shift; "$@"; }',
             'cloud_bin_ready() { printf %s "$STUB_BIN"; }',
             'cloud_redact() { cat; }',
+            # 1.8.90 起 CLI 三候选失败后会落到接口通道；本用例专测 CLI 侧，
+            # 这里给一个「不可用且不给原因」的桩，行为保持确定性。
+            'cloud_api_delete() { return 1; }',
             'oc_cut_utf8() { head -c "${1:-800}"; }',
             BODY,
             'cloud_rm_remote ' + repr(target),
@@ -187,7 +190,7 @@ THREE = TARGET + '\n' + OTHER1 + '\n' + OTHER2 + '\n'
 
 # 1. 现场复现：CLI 返回 0 但文件还在 —— 必须失败，不能报「已删除」
 run_case('删除命令返回 0 但远端仍在 -> 报失败', TARGET + '\n', HELP_RM,
-         'none', expect_rc=1, expect_err='远端仍存在')
+         'none', expect_rc=1, expect_err='删除失败')
 
 # 2. 真删掉了 -> 成功
 run_case('远端确实消失 -> 成功', TARGET + '\n', HELP_RM, 'rm', expect_rc=0)
@@ -203,7 +206,7 @@ run_case('help 无子命令 -> 自动试到 delete 成功', TARGET + '\n',
 # 5. help 无子命令且都不支持 -> 明确提示，不谎报成功
 run_case('CLI 不支持删除 -> 明确提示', TARGET + '\n',
          'usage: bdpan <command>', 'none',
-         rm_out='unknown command rm', expect_rc=1, expect_err='不支持删除')
+         rm_out='unknown command rm', expect_rc=1, expect_err='删除失败')
 
 # 6. 列表读不到 -> 明确说「无法确认」，绝不静默当成功
 run_case('远端列表读取失败 -> 报无法确认', TARGET + '\n', HELP_RM,
@@ -227,7 +230,7 @@ run_case('help 探测到 rm 但真实是 delete -> 兜底成功', TARGET + '\n',
 
 # 11. 删除前列表里根本没有目标（重复删除 / 列表不全）-> 无法确认
 run_case('删除前列表不含目标 -> 不假报成功', OTHER1 + '\n', HELP_RM,
-         'any', expect_rc=1, expect_err='无法确认')
+         'any', expect_rc=1, expect_err='远端列表里没有')
 
 # 12. 删除期间并发上传：条数没减少 -> 无法确认，不猜
 run_case('删除并发上传导致条数异常 -> 不假报成功',

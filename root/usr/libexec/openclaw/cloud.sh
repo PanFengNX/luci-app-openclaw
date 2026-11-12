@@ -39,7 +39,10 @@
 # 约定：
 #   * stdout 只有一行 JSON；日志一律 oc_warn / oc_err（stderr）。
 #   * 所有 bdpan 调用都带私有 HOME（登录态落点）并用 oc_timeout 包住。
-#   * 绝不读取 / 打印 $HOME/.config/bdpan/config.json（内含 access_token）。
+#   * $HOME/.config/bdpan/config.json 内含 access_token。只有在需要直连
+#     网盘接口删除时（bdpan 没有删除子命令）才读取一次，且：写进 0600 的
+#     curl 配置文件（-K），绝不进 argv、绝不打印、绝不写日志；请求只发往
+#     https://pan.baidu.com。其余任何路径都不读这个文件。
 #   * 口令绝不进 argv / env / URL / 日志：set-pass 与 download-dec 从 stdin 读，
 #     加密上传时从 $OC_CLOUD_PASS（0600）读，经 heredoc 交给 node 的 stdin。
 #
@@ -2939,6 +2942,191 @@ OC_RM_ERR=""
 # 复验无法确认时的具体原因，由 cloud_rm_verify 写入。
 OC_RM_VERIFY_ERR=""
 
+# bdpan 至今（实测 3.8.9）没有删除子命令：help 里只有 whoami / ls / upload /
+# download / transfer / share / version / init / update。网盘侧能真正删除的
+# 只有开放平台的 filemanager 接口，于是用它自己保存的 access_token 直接调用。
+#
+# 凭据规则（不可放宽）：
+#   * 只在需要时读一次，写进 0700 私有目录下 0600 的 curl 配置文件（-K）；
+#     token 绝不进 argv（/proc/<pid>/cmdline 全局可读）、绝不打印、绝不进日志。
+#   * 只请求 https://pan.baidu.com，不跟随重定向。
+#   * 用完立刻删配置文件；任何回显先过 cloud_redact。
+OC_API_ERR=""
+OC_API_TOKEN=""
+
+cloud_api_conf() {
+	# 组件用私有 HOME 安装，登录态固定落在 <home>/.config/bdpan/config.json。
+	printf '%s' "$OC_CLOUD_HOME/.config/bdpan/config.json"
+}
+
+cloud_api_token() {
+	# 结果写进 OC_API_TOKEN 并返回 0；失败返回 1，原因写 OC_API_ERR。
+	#
+	# 刻意不用 stdout 回传：调用方一旦写成 tok="$(cloud_api_token)"，函数就
+	# 在子 shell 里执行，OC_API_ERR 会随子 shell 一起消失，界面只剩一句
+	# 没有原因的空错误。
+	local cfg tok
+	OC_API_TOKEN=""
+	cfg="$(cloud_api_conf)"
+	if [ ! -f "$cfg" ]; then
+		OC_API_ERR="找不到网盘组件的登录配置，请先在组件设置里登录"
+		return 1
+	fi
+	if [ ! -s "$cfg" ]; then
+		OC_API_ERR="网盘组件的登录配置是空的，请在组件设置里重新登录"
+		return 1
+	fi
+	tok="$(cloud_json_scalar "$cfg" access_token 2>/dev/null | sed -n '1p' | tr -d '\r')"
+	if [ -z "$tok" ]; then
+		OC_API_ERR="网盘组件未登录（没有可用的 access_token），请重新登录"
+		return 1
+	fi
+	# token 会被拼进 curl 配置文件的 url= 行：一旦掺入引号 / 空白 / 换行，
+	# 就等于让外部内容写入 curl 选项。字符集之外一律拒绝。
+	case "$tok" in
+		*[!A-Za-z0-9._~+/=-]*)
+			OC_API_ERR="网盘登录凭据格式异常，请在组件里重新登录"
+			return 1 ;;
+	esac
+	if [ "${#tok}" -lt 8 ]; then
+		OC_API_ERR="网盘登录凭据格式异常，请在组件里重新登录"
+		return 1
+	fi
+	OC_API_TOKEN="$tok"
+	return 0
+}
+
+cloud_api_delete() {
+	# cloud_api_delete <remote-name> -> 0 接口受理 / 1 失败（原因在 OC_API_ERR）
+	#
+	# 路径固定在应用沙箱 /apps/bdpan/ 下：bdpan 所有命令都作用于这个目录，
+	# 传相对路径时它自己也是这么映射的。
+	local name="$1" tok conf out code rc errno http last detail url
+	if ! command -v curl >/dev/null 2>&1; then
+		OC_API_ERR="设备上没有 curl，无法调用网盘删除接口"
+		return 1
+	fi
+	# 本函数可能被单独调用（将来轮转若直接走接口），入口自己再校验一次，
+	# 不依赖调用方已经校验过。
+	cloud_valid_remote_name "$name" || {
+		OC_API_ERR="远端文件名不合法"
+		return 1
+	}
+	# 目录名与文件名同一口径：只允许字母数字与 . _ -，否则拼出来可能是
+	# /apps/bdpan//x 甚至跳出沙箱。
+	case "$OC_CLOUD_REMOTE" in
+		''|.|..|.*|*[!A-Za-z0-9._-]*)
+			OC_API_ERR="云端目录名不合法（$OC_CLOUD_REMOTE），请检查配置"
+			return 1 ;;
+	esac
+	cloud_api_token || return 1
+	tok="$OC_API_TOKEN"
+	if [ ! -d "$OC_RUNDIR" ]; then
+		OC_API_ERR="私有运行目录不存在（$OC_RUNDIR），请跑一次一键修复"
+		return 1
+	fi
+	conf="$OC_RUNDIR/.xpan-rm.$$.conf"
+	out="$OC_RUNDIR/.xpan-rm.$$.out"
+	code="$OC_RUNDIR/.xpan-rm.$$.code"
+	rm -f "$conf" "$out" "$code" 2>/dev/null
+	( umask 077; : >"$conf" ) || {
+		OC_API_ERR="无法创建临时配置文件，请检查磁盘空间"
+		return 1
+	}
+	url="https://pan.baidu.com/rest/2.0/xpan/file?method=filemanager&opera=delete&async=0&access_token=$tok"
+	{
+		printf 'url = "%s"\n' "$url"
+		printf 'header = "User-Agent: pan.baidu.com"\n'
+	} >"$conf"
+	chmod 600 "$conf" 2>/dev/null
+	# filelist 里只有文件名（已通过 cloud_valid_remote_name 校验，不含引号与
+	# 空白），不含凭据，因此允许留在 argv。
+	( umask 077; oc_timeout 90 curl -sS -K "$conf" -o "$out" \
+		-w 'OC_HTTP:%{http_code}' \
+		--data-urlencode "filelist=[\"/apps/bdpan/$OC_CLOUD_REMOTE/$name\"]" \
+		>"$code" 2>&1 )
+	rc=$?
+	rm -f "$conf" 2>/dev/null
+	# 状态码单独取：curl 的 -w 输出和错误文本都落在 $code 里。只看退出码会把
+	# 「HTTP 502 但 body 恰好是合法 JSON」当成成功。用纯 shell 提取（sed 的
+	# 转义写法在 busybox 与 MSYS 上表现不一致），只取末尾片段再截数字。
+	http=""
+	last="$(tail -c 60 "$code" 2>/dev/null)"
+	case "$last" in
+		*OC_HTTP:*)
+			http="${last##*OC_HTTP:}"
+			http="${http%%[!0-9]*}" ;;
+	esac
+	errno="$(cloud_json_scalar "$out" errno 2>/dev/null | sed -n '1p' | tr -d '\r')"
+
+	if [ "$rc" -ne 0 ]; then
+		# body 与 curl 自己的错误文本都并进来，但先脱敏、去掉状态码标记。
+		detail="$( { cloud_redact <"$out" 2>/dev/null
+			cloud_redact <"$code" 2>/dev/null; } | grep -v 'OC_HTTP:' \
+			| tail -n 2 | oc_cut_utf8 200)"
+		rm -f "$out" "$code" 2>/dev/null
+		case "$rc" in
+			6|7)      OC_API_ERR="解析不了网盘接口域名（DNS 失败），请检查设备网络或代理" ;;
+			28)       OC_API_ERR="连接网盘接口超时，请稍后重试" ;;
+			35|51|60) OC_API_ERR="与网盘接口的 HTTPS 握手失败（设备可能缺 CA 证书）" ;;
+			*)
+				if [ -n "$detail" ]; then
+					OC_API_ERR="调用网盘删除接口失败：$detail"
+				else
+					OC_API_ERR="调用网盘删除接口失败（curl 退出码 $rc）"
+				fi ;;
+		esac
+		return 1
+	fi
+
+	# errno=0 但状态码不是 2xx：接口层面的失败，绝不按成功处理。
+	if [ "$errno" = "0" ]; then
+		# http 为空（-w 输出没落到 $code）不算失败：此时不能凭猜，改由
+		# 下面的远端复验判定 —— 复验要求「目标消失且条数恰好少 1」，接口
+		# 假成功进不了成功分支。
+		case "$http" in
+			''|2[0-9][0-9]) : ;;
+			*)
+				rm -f "$out" "$code" 2>/dev/null
+				OC_API_ERR="网盘删除接口返回 HTTP $http（不是 2xx），未按成功处理"
+				return 1 ;;
+		esac
+		# 接口说成功不等于真删掉了，调用方仍要复验。
+		rm -f "$out" "$code" 2>/dev/null
+		return 0
+	fi
+
+	case "$errno" in
+		-7|-9|105|31066)
+			# 文件本来就不存在：交给复验判定（此时复验会成功）。若复验说还在，
+			# 说明是分页/权限问题，调用方会照实报失败。
+			rm -f "$out" "$code" 2>/dev/null
+			return 0 ;;
+		-6|110|111|31061|31064)
+			OC_API_ERR="网盘登录态已失效，请在组件设置里重新登录后再删除" ;;
+		2|-2|422|31023)
+			OC_API_ERR="网盘拒绝删除这个路径（可能不属于本应用的数据目录）" ;;
+		'')
+			detail="$(cloud_redact <"$out" 2>/dev/null | tail -n 1 | oc_cut_utf8 160)"
+			case "$http" in
+				401|403)
+					OC_API_ERR="网盘接口拒绝访问（HTTP $http），请重新登录组件" ;;
+				404)
+					OC_API_ERR="网盘接口不存在（HTTP 404），组件版本可能过旧" ;;
+				'')
+					OC_API_ERR="网盘删除接口没有返回可识别的结果：${detail:-无输出}" ;;
+				*)
+					OC_API_ERR="网盘删除接口返回 HTTP $http，且没有可识别的错误码" ;;
+			esac ;;
+		*)
+			detail="$(cloud_redact <"$out" 2>/dev/null | tail -n 1 | oc_cut_utf8 160)"
+			OC_API_ERR="网盘删除接口返回错误码 $errno：${detail:-无输出}" ;;
+	esac
+	rm -f "$out" "$code" 2>/dev/null
+	return 1
+}
+
+
 # 读取一次远端列表，转成 TSV 写入 <out>。
 # 返回：0 成功 / 2 列表读不到或无法解析（绝不返回 0 却留下不完整文件）。
 cloud_rm_list() {
@@ -3020,9 +3208,11 @@ cloud_rm_attempt() {
 cloud_rm_remote() {
 	# cloud_rm_remote <remote-name> -> 0 成功 / 1 失败（原因在 $OC_RM_ERR）
 	# 不往 stdout 写任何东西：手动删除（cmd_rm）与远端轮转（backup-run）共用。
-	local name="${1:-}" bin help sub tmp out err cand tried arc c before
+	local name="${1:-}" bin help sub tmp out err cand tried arc c before api_tried
 
 	OC_RM_ERR=""
+	OC_API_ERR=""
+	OC_RM_VERIFY_ERR=""
 	[ -n "$name" ] || { OC_RM_ERR="缺少远端文件名"; return 1; }
 	cloud_valid_remote_name "$name" || {
 		OC_RM_ERR="远端文件名不合法（只允许字母数字与 . _ -，不能以 - 开头，长度 1-128）"
@@ -3038,6 +3228,12 @@ cloud_rm_remote() {
 		OC_RM_ERR="无法读取远端列表确认结果，未执行删除，请稍后重试"
 		return 1
 	}
+	# 目标不在基线里就不必再试：这通常表示列表已过期，或文件已被别处删掉。
+	if [ "$(cloud_rm_stat "$before" "$name" | awk '{ print $2 }')" != "1" ]; then
+		rm -f "$before" 2>/dev/null
+		OC_RM_ERR="远端列表里没有 $name，请刷新备份列表后重试"
+		return 1
+	fi
 
 	# 只使用 CLI 自己声明的删除子命令；没有就按常见命名试，绝不自行拼 API。
 	help="$(cloud_run 30 "$bin" help 2>&1)"
@@ -3073,6 +3269,24 @@ cloud_rm_remote() {
 		[ "$arc" -eq 0 ] && break
 		[ "$arc" -eq 2 ] && break
 	done
+	# CLI 三个候选都删不掉（bdpan 目前根本没有删除子命令）：改走开放平台
+	# 接口。接口返回 0 也仍然要复验，绝不再拿退出码当结论。
+	if [ "$arc" -eq 1 ]; then
+		tried="${tried:+$tried/}xpan-api"
+		api_tried=1
+		if cloud_api_delete "$name"; then
+			cloud_rm_verify "$bin" "$name" "$before"
+			arc=$?
+			# 接口返回 0 也可能是假成功（路径不对、权限不足、异步未执行）。
+			# 复验说还在，就照实报「接口成功但文件仍在」，别退回一句
+			# 「CLI 不支持删除」把真正的原因盖掉。
+			if [ "$arc" -eq 1 ]; then
+				OC_API_ERR="网盘删除接口返回成功，但远端仍有该文件（可能路径不在本应用目录内）"
+			fi
+		else
+			arc=1
+		fi
+	fi
 	rm -f "$before" 2>/dev/null
 
 	out="$(cat "$tmp" 2>/dev/null)"
@@ -3083,9 +3297,18 @@ cloud_rm_remote() {
 		OC_RM_ERR="已执行删除，但无法确认结果：${OC_RM_VERIFY_ERR:-远端列表未返回全量}，请刷新备份列表核对。CLI 输出：${err:-无输出}"
 		return 1
 	fi
+	if [ "$arc" -eq 1 ] && [ -n "${api_tried:-}" ] && [ -z "$OC_API_ERR" ]; then
+		OC_API_ERR="调用网盘删除接口失败（原因未知），请刷新备份列表确认 $name 是否还在"
+	fi
+	# 接口给出了明确原因（登录态失效 / 路径被拒 / 网络）就照实说，
+	# 不要在能定位的时候丢一句「不支持删除」。
+	if [ -n "$OC_API_ERR" ]; then
+		OC_RM_ERR="删除失败：$OC_API_ERR"
+		return 1
+	fi
 	case "$out" in
 		*unknown*|*Unknown*|*unrecognized*|*Unrecognized*|*"invalid command"*|*"no such command"*|*未知*|*不支持*)
-			OC_RM_ERR="当前 CLI 不支持删除（已试 ${tried:-无}），请在网盘 App 里删除" ;;
+			OC_RM_ERR="网盘组件没有删除命令，登录态也不能直接删除（已试 ${tried:-无}），请在网盘 App 里删除" ;;
 		*)
 			OC_RM_ERR="删除未生效（已试 ${tried:-无}），远端仍存在 $name。CLI 输出：${err:-无输出}" ;;
 	esac
