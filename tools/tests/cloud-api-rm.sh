@@ -55,7 +55,8 @@ NAMES = ('cloud_valid_remote_name', 'cloud_json_scalar', 'cloud_json_deep',
          'cloud_json_keys', 'cloud_ls_tsv',
          'cloud_rm_list', 'cloud_rm_stat', 'cloud_rm_verify',
          'cloud_rm_attempt', 'cloud_api_conf', 'cloud_api_token',
-         'cloud_api_cand_ok', 'cloud_api_probe',
+         'cloud_api_cand_ok', 'cloud_api_probe', 'cloud_api_unwrap',
+         'cloud_api_unwrap_binary',
          'cloud_api_delete', 'cloud_rm_remote')
 
 # ---------------------------------------------------------------- 静态契约
@@ -375,6 +376,18 @@ run('凭据过短 -> 报长度与字段名',
     config='{"access_token":"null"}',
     expect_rc=1, expect_err='取自字段 access_token，长度 4',
     extra_check=lambda r: (r['argv'] == '', '不应调用接口'))
+
+# 8g. 值是 v1:<base64(JSON)> -> 解开后拿到真 token 并成功删除
+run('凭据是 v1:base64(JSON) 包装 -> 解开后成功',
+    config='{"access_token":"v1:eyJhY2Nlc3NfdG9rZW4iOiAiVEVTVFRPS19hYmNkZWYxMjM0NTYifQ=="}',
+    good_token=TOKEN, expect_rc=0)
+
+# 8h. 值是 v1:<base64(密文)> -> 说清「加密保存」，并给出可执行的替代做法
+run('凭据是加密包 -> 提示去网盘 App 删',
+    config='{"access_token":"v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw=="}',
+    expect_rc=1, expect_err='加密保存',
+    good_token=TOKEN,
+    extra_check=lambda r: (r['argv'] == '', '不应走到删除接口'))
 
 # 9. 凭据异常（含空格）-> 拒绝且不调用接口
 run('凭据含非法字符 -> 拒绝', token='bad token with space',

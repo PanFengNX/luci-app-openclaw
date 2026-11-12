@@ -3053,7 +3053,7 @@ cloud_api_token() {
 	# 刻意不用 stdout 回传：调用方一旦写成 tok="$(cloud_api_token)"，函数就
 	# 在子 shell 里执行，OC_API_ERR 会随子 shell 一起消失，界面只剩一句
 	# 没有原因的空错误。
-	local cfg tok _k _ks _hint _hitk _try _why _c _prev
+	local cfg tok _k _ks _hint _hitk _try _why _c _prev _un1 _un2 _enc
 	OC_API_TOKEN=""
 	cfg="$(cloud_api_conf)"
 	if [ ! -f "$cfg" ]; then
@@ -3097,10 +3097,20 @@ cloud_api_token() {
 	# 候选按可能性排序：整串 -> 冒号前 -> 冒号后。真机上 bdpan 存的是
 	# 「前缀:令牌」（长度 155、含冒号），而百度原始 token 不含冒号；到底哪
 	# 一段有效只能问网盘，所以逐个做只读探测，第一个通过的即采用。
+	# 解包：整串与「冒号后」两段都可能只是 base64 包装。
+	_un1="$(cloud_api_unwrap "$tok")"
+	_un2="$(cloud_api_unwrap "${tok##*:}")"
+	_enc=0
+	# 只有「带冒号的打包值」才谈得上加密包：明文 token 本身也是 base64 字符集，
+	# 拿它去 base64 -d 必然解出二进制，会把普通 token 误判成加密包。
+	case "$tok" in
+		*:*) [ -z "$_un1" ] && [ -z "$_un2" ] && \
+			cloud_api_unwrap_binary "${tok##*:}" && _enc=1 ;;
+	esac
 	_try=0
 	_why=""
-	for _c in "$tok" "${tok%%:*}" "${tok##*:}"; do
-		[ "$_try" -lt 3 ] || break
+	for _c in "$tok" "${tok%%:*}" "${tok##*:}" "$_un1" "$_un2"; do
+		[ "$_try" -lt 4 ] || break
 		cloud_api_cand_ok "$_c" || continue
 		[ "$_c" = "$_prev" ] && continue
 		_prev="$_c"
@@ -3122,12 +3132,46 @@ cloud_api_token() {
 		case "$tok" in *[![:print:]]* ) _hint="$_hint 不可打印字节" ;; esac
 		OC_API_ERR="网盘登录凭据格式异常（取自字段 ${_hitk:-?}，长度 ${#tok}${_hint:+，含：$_hint}），请在组件里重新登录"
 	else
-		OC_API_ERR="网盘登录凭据不可用（试了 $_try 个候选都被拒绝：${_why:-原因未知}），请在组件里重新登录"
+		OC_API_ERR="网盘登录凭据不可用（试了 $_try 个候选都被拒绝：${_why:-原因未知}）。"
+		if [ "${_enc:-0}" = "1" ]; then
+			OC_API_ERR="$OC_API_ERR 组件把凭据加密保存了，插件没法直接拿它调删除接口 —— 请在百度网盘 App 的 bdpan → openclaw-backups 目录里删除这份备份。"
+		else
+			OC_API_ERR="$OC_API_ERR 请在组件里重新登录后再试。"
+		fi
 	fi
-	unset _try _why _hint _c _prev
+	unset _try _why _hint _c _prev _un1 _un2 _enc
 	return 1
 	OC_API_TOKEN="$tok"
 	return 0
+}
+
+cloud_api_unwrap() {
+	# cloud_api_unwrap <值> -> 若该值是 base64（含 URL-safe）且解出来还有一层
+	# access_token，就把它取出来；否则输出空。
+	#
+	# 真机上 bdpan 存的 access_token 是「v1:<base64>」这种打包形态。若 base64
+	# 解出来是明文 JSON，说明只是套了一层编码，可以直接用；若是二进制，那就是
+	# 加密包，谁也没法用（调用方据此给出准确说法）。
+	command -v base64 >/dev/null 2>&1 || return 0
+	printf '%s' "$1" | tr '_-' '/+' | base64 -d 2>/dev/null | \
+		sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._~+/=-]\{8,\}\)".*/\1/p' | \
+		sed -n '1p'
+}
+
+cloud_api_unwrap_binary() {
+	# cloud_api_unwrap_binary <值> -> 0 表示 base64 解出来是不可打印内容（加密包）
+	command -v base64 >/dev/null 2>&1 || return 1
+	local f="$OC_RUNDIR/.xpan-b64.$$" nprint
+	printf '%s' "$1" | tr '_-' '/+' | base64 -d 2>/dev/null >"$f" || { rm -f "$f"; return 1; }
+	[ -s "$f" ] || { rm -f "$f"; return 1; }
+	# 按字节数判断有没有不可打印内容：grep/head 遇到 NUL 会当成空行，
+	# 用 wc 数出来才可靠（密文里 NUL 很常见）。
+	nprint="$(LC_ALL=C tr -d '[:print:]\n\r\t' <"$f" 2>/dev/null | wc -c | tr -d ' ')"
+	rm -f "$f" 2>/dev/null
+	case "$nprint" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$nprint" -gt 0 ]
 }
 
 cloud_api_cand_ok() {
