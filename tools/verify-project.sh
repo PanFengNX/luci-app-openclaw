@@ -400,6 +400,19 @@ else
 	skip "缺少 tools/tests/state-owner-release.sh"
 fi
 
+head_ "7e30. OpenClaw 2026.11 兼容（锁协议 / 降权执行 / 启动宽限期）"
+if [ -f tools/tests/openclaw-2026.11-compat.sh ]; then
+	if out="$(sh tools/tests/openclaw-2026.11-compat.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "openclaw-2026.11-compat.sh 全部断言通过"
+	else
+		bad "openclaw-2026.11-compat.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/openclaw-2026.11-compat.sh"
+fi
+
 head_ "7e2f. 云端删除不可用时不显示删除按钮（能力判定）"
 if [ -f tools/tests/cloud-del-capability.sh ]; then
 	if out="$(sh tools/tests/cloud-del-capability.sh 2>&1)"; then

@@ -312,9 +312,14 @@ EOF
 					# "mode=token 但没有 token" 的半截配置，网关直接起不来。
 					token="$(oc_rand_hex)"
 					if [ -n "$token" ]; then
-						HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+						# 以网关用户执行：root 侧会被 OpenClaw 的临时目录校验拒绝
+						# （openclaw-0 属主已被 oc_fix_perms 改成网关用户），
+						# 这里失败就等于「一键修复也没补上 token」。
+						oc_as_user env HOME="$HOME_DIR" TMPDIR="$(oc_base_dir)/tmp" \
+							PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
 							"$OB" config set gateway.auth.mode token >/dev/null 2>&1
-						HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+						oc_as_user env HOME="$HOME_DIR" TMPDIR="$(oc_base_dir)/tmp" \
+							PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
 							"$OB" config set gateway.auth.token "$token" >/dev/null 2>&1 \
 							&& say FIX "已补齐网关 token"
 					else
@@ -522,8 +527,13 @@ if [ -x "$OB" ] && [ -x "$NB" ]; then
 	lock_rc=$?
 	case "$lock_rc" in
 		0)
-			doc_out="$(HOME="$HOME_DIR" OPENCLAW_STATE_DIR="$DATA" OPENCLAW_CONFIG_PATH="$CONF" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
-				oc_timeout 300 "$OB" doctor --fix 2>&1)"
+			# 以网关用户执行：root 身份会被 OpenClaw 的临时目录校验拒绝
+			# （Unsafe fallback OpenClaw temp dir ... expected uid 0），
+			# 一键修复里的 doctor --fix 等于没跑，离线维护租约也就清不掉。
+			doc_out="$(oc_as_user_timeout 300 env HOME="$HOME_DIR" TMPDIR="$(oc_base_dir)/tmp" \
+				OPENCLAW_STATE_DIR="$DATA" OPENCLAW_CONFIG_PATH="$CONF" \
+				PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+				"$OB" doctor --fix 2>&1)"
 			doc_rc=$?
 			if [ "$doc_rc" = "0" ]; then
 				say FIX "OpenClaw 自检修复完成"

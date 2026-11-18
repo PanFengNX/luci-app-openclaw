@@ -368,6 +368,20 @@ oc_installed_version() {
 	printf '%s' "$v"
 }
 
+oc_obsolete_heartbeat_paths() {
+	# 从 `openclaw config validate` 的输出里挑出「2026.11 已移除的心跳键」路径。
+	#
+	# 输入行形如：  - agents.defaults: Unrecognized key: "heartbeat"
+	# 输出：每行一个完整路径（去重），例如 agents.defaults.heartbeat。
+	#
+	# 只认 heartbeat 这一个键名：别的未知键可能有迁移办法，误删等于丢用户配置。
+	# stdin 输入、stdout 输出，纯函数（便于回归测试）。
+	# 注意要拼回 .heartbeat：报错行里的路径只到父对象（`agents.defaults: ...`），
+	# 直接拿父路径去 unset 会删掉整个 defaults 段。
+	grep -oE 'agents\.(defaults|entries\.[A-Za-z0-9_.-]+): Unrecognized key: "heartbeat"' 2>/dev/null \
+		| sed 's/: Unrecognized.*//' | sed 's/$/.heartbeat/' | sort -u
+}
+
 oc_purge_legacy_controlui() {
 	# oc_purge_legacy_controlui [config-path] [oc-dir] [node-bin]
 	#
@@ -1568,6 +1582,26 @@ oc_kill_tree() {
 	[ -z "$(oc_gateway_pids)" ]
 }
 
+oc_gateway_age_ok() {
+	# oc_gateway_age_ok <secs> -> 0 表示网关进程启动还不到 <secs> 秒
+	#
+	# 用途：OpenClaw 2026.11 起启动要 15-40 秒（进程引导 → schema 预检 →
+	# 会话准入 → 插件加载 → 端口绑定）。这段时间里进程在跑、端口还没监听，
+	# 状态页若照常探测就会显示「运行中（端口未应答）」，用户以为坏了。
+	# 拿不到进程年龄时返回 1（不下结论），调用方按原逻辑处理。
+	local secs="${1:-120}" p started now age
+	case "$secs" in ''|*[!0-9]*) secs=120 ;; esac
+	now="$(date +%s 2>/dev/null)"
+	case "$now" in ''|*[!0-9]*) return 1 ;; esac
+	for p in $(oc_gateway_pids 2>/dev/null); do
+		started="$(stat -c %Y "/proc/$p" 2>/dev/null)"
+		case "$started" in ''|*[!0-9]*) continue ;; esac
+		age=$((now - started))
+		[ "$age" -lt "$secs" ] && return 0
+	done
+	return 1
+}
+
 oc_gateway_pids() {
 	# pids of the real gateway process.
 	#
@@ -1984,8 +2018,21 @@ oc_clear_stale_state_lock() {
 			# 那不是库里定义的变量，猜错会让整段逻辑永远走不到，
 			# 于是"假装修好了"而实际上什么都没检查。
 							if [ -n "$ocbin" ] && [ -x "$ocbin" ]; then
-					out="$(oc_as_user env HOME="$(oc_home_dir)" OPENCLAW_STATE_DIR="$sd" OPENCLAW_CONFIG_PATH="$sd/openclaw.json" "$ocbin" gateway recover-lock 2>&1)"
+					out="$(oc_as_user_timeout 60 env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+						OPENCLAW_STATE_DIR="$sd" OPENCLAW_CONFIG_PATH="$sd/openclaw.json" \
+						"$ocbin" gateway recover-lock 2>&1)"
 					rc=$?
+					# 2026.11.x 起该命令被移除（`openclaw gateway --help` 里没有
+					# recover-lock）。新版的锁协议是：进程所有者用 fs-safe 的
+					# remove-if-unchanged，**死进程/启动身份变化的锁在启动时自动
+					# 回收**，只有「无法验证的外来持有者」才需要人工确认。
+					# 因此命令不存在时不能继续 fail-closed —— 那会让网关永远起不来，
+					# 用户只能手工去跑 doctor。此处交给网关自己回收，只记一条日志。
+					case "$out" in
+						*'has no command "recover-lock"'*|*'no such command'*|*"has no command 'recover-lock'"*)
+							oc_warn "该 OpenClaw 版本已移除 gateway recover-lock；锁由新版启动时自动回收，继续启动"
+							return 0 ;;
+					esac
 				# 126/127 表示命令不可执行；其它返回码不能单独证明结果。
 				# 只有官方输出明确给出 confirm/fingerprint/holder 线索时，
 				# 才归类为“需人工恢复”；未知输出 fail-closed 为 2。
@@ -2049,6 +2096,15 @@ oc_heal_openclaw_cache_dirs() {
 				esac
 				owner="$(stat -c '%u' "$d" 2>/dev/null)"
 				case "$owner" in ''|*[!0-9]*) continue ;; esac
+				# 名字里的 uid 与属主不一致 = 历史遗留（典型：openclaw-0
+				# 被 chown -R 翻成了网关用户）。这种目录对**任何**身份都不
+				# 合法，必须删掉重建，否则 root 永远被 OpenClaw 拒绝。
+				name_uid="${d##*-}"
+				case "$name_uid" in ''|*[!0-9]*) name_uid="" ;; esac
+				if [ -n "$name_uid" ] && [ "$owner" != "$name_uid" ]; then
+					rm -rf "$d" 2>/dev/null && n=$((n + 1))
+					continue
+				fi
 				[ "$owner" = "$want" ] && continue
 				rm -rf "$d" 2>/dev/null && n=$((n + 1))
 			done
@@ -2394,7 +2450,7 @@ oc_fix_install_owner() {
 	# 顺序不可颠倒：安全校验 → 服务用户存在性（fail-open）→ 探测 → chown → 复验。
 	# chown 失败只告警不拦截调用方：安装本身可能已成功，属主错误只影响自更新
 	# （2026-11-04 教训：功能路径上的检查必须 fail-open）。
-	local ocdir real probe ptgt pdir
+	local ocdir real probe ptgt pdir crc
 	ocdir="$(oc_oc_dir)"
 	[ -d "$ocdir" ] || return 0
 	if ! oc_oc_dir_safe; then
@@ -2415,10 +2471,14 @@ oc_fix_install_owner() {
 			oc_warn "安装树属主修复被拒绝：$ocdir 解析到 $real，后者未通过安全校验"
 			return 1
 		fi
-		if ! chown -R "$OC_USER":"$OC_GROUP" "$real" 2>/dev/null; then
-			if ! chown -R "$OC_USER" "$real" 2>/dev/null; then
-				oc_warn "chown -R $OC_USER $real 失败（退出码 $?）"
-			fi
+		# 不要写成 `if ! chown ...; then ... $? ...`：`!` 取反后 $? 恒为 0，
+		# 日志会变成「失败（退出码 0）」，把真实原因（如只读文件系统、
+		# 不支持的属主位）彻底藏掉。用 || 直接接住原始退出码。
+		crc=0
+		chown -R "$OC_USER":"$OC_GROUP" "$real" 2>/dev/null || crc=$?
+		if [ "$crc" -ne 0 ]; then
+			chown -R "$OC_USER" "$real" 2>/dev/null \
+				|| oc_warn "chown -R $OC_USER $real 失败（退出码 $crc）"
 		fi
 		# 操作数本身若是符号链接，也一并归位（admission 若按 lstat 看链接
 		# 本身，链接属主同样不能是 root）。

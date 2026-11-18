@@ -123,8 +123,12 @@ diag_body() {
 			oc_env_doctor
 			printf '\n===== openclaw doctor --fix =====\n'
 			if installed; then
-				HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-					oc_timeout 300 "$(oc_oc_bin)" doctor --fix 2>&1 | tail -n 60
+				# 必须以网关用户执行：root 身份会用到 <cache>/openclaw-0，
+				# 被 chown -R 翻属主后会被 OpenClaw 以「临时目录不安全」拒绝，
+				# 一键诊断就只剩一句 "shared state database is unreadable"。
+				oc_as_user_timeout 300 env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+					PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+					"$(oc_oc_bin)" doctor --fix 2>&1 | tail -n 60
 			fi
 			printf '\n===== 一键修复 =====\n'
 			sh "$OC_REPAIR" ;;
@@ -528,6 +532,13 @@ _reachable_flag() {
 	# 「端口未应答」，所以 null 不会造成误报。
 	installed || { printf 'null'; return 0; }
 	running   || { printf 'null'; return 0; }
+	# 宽限期：刚启动的网关还没绑端口，此时探测必然失败。
+	# 报 false 会让页面显示「运行中（端口未应答）」，而它只是还在起 ——
+	# 2026.11 起启动要 15-40 秒，这个误报在每次升级/重启后都会出现。
+	if command -v oc_gateway_age_ok >/dev/null 2>&1 && oc_gateway_age_ok 150; then
+		printf 'null'
+		return 0
+	fi
 	oc_gateway_reachable "$(get_port)" "$(uci_get main.bind lan)" \
 		&& printf 'true' || printf 'false'
 }
@@ -884,7 +895,8 @@ cmd_run() {
 	local _out _rc
 	if run_needs_tty "$@"; then
 		# 这类命令只在 TTY 下肯输出（见 oc_pty_run 的说明）。
-		_out="$(HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+		_out="$(oc_as_user env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+			PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
 			oc_pty_run 120 "$(oc_oc_bin)" "$@")"
 		_rc=$?
 		if [ "$_rc" -eq 127 ]; then
@@ -893,8 +905,12 @@ cmd_run() {
 			return 127
 		fi
 	else
-		_out="$(HOME="$(oc_home_dir)" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-			oc_timeout 120 "$(oc_oc_bin)" "$@" 2>&1)"
+		# 以网关用户执行（与 doctor/models 同口径）：root 跑会让 OpenClaw
+		# 用 <cache>/openclaw-0，属主被 chown 翻过之后一律被拒 —— 用户在
+		# 终端里执行 update / doctor / config 都会看到「临时目录不安全」。
+		_out="$(oc_as_user_timeout 120 env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+			PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+			"$(oc_oc_bin)" "$@" 2>&1)"
 		_rc=$?
 	fi
 	printf '%s\n' "$_out" | tail -n 200
@@ -2196,7 +2212,9 @@ EOF
 	{
 		if installed; then
 			( HOME="$home" PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
-				export_timeout 120 "$(oc_oc_bin)" doctor 2>&1 )
+				oc_as_user_timeout 120 env HOME="$(oc_home_dir)" TMPDIR="$(oc_base_dir)/tmp" \
+					PATH="$(oc_node_dir)/bin:$(oc_oc_dir)/bin:$PATH" \
+					"$(oc_oc_bin)" doctor 2>&1 )
 		else
 			printf '(openclaw 未安装，跳过 doctor)\n'
 		fi

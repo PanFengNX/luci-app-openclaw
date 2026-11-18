@@ -809,13 +809,25 @@ EOF
 }
 
 # ---------------------------------------------------------------- bootstrap
+oc_cli() {
+	# 安装期调用 openclaw CLI 的唯一入口：**一律以网关用户执行**。
+	#
+	# root 跑会用到 <cache>/openclaw-0，而 oc_fix_perms 已经把整个 base 目录
+	# 交给网关用户，于是 root 侧被 OpenClaw 的临时目录校验拒绝（
+	# "Unsafe fallback OpenClaw temp dir ... expected uid 0"）。更糟的是
+	# bootstrap_config 里的 config set 全都重定向到了 /dev/null，失败是静默的
+	# ——网关端口/绑定/token 根本写不进去，页面却显示安装成功。
+	oc_as_user env HOME="$HOME_DIR" TMPDIR="$BASE_DIR/tmp" \
+		PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" "$OC_DIR/bin/openclaw" "$@"
+}
+
 bootstrap_config() {
 	ilog "== 初始化配置 =="
 	oc_ensure_user || ilog "WARN: 未创建系统用户 $OC_USER，将以 root 运行"
 	mkdir -p "$HOME_DIR/.openclaw" "$BASE_DIR/workspace" "$BASE_DIR/logs"
 	oc_fix_perms
 
-	local port bind conf token
+	local port bind conf token _cur
 	port="$(uci_get main.port 18789)"
 	bind="$(uci_get main.bind lan)"
 	# bind lands in openclaw.json verbatim; keep it to a safe character set
@@ -828,7 +840,7 @@ bootstrap_config() {
 
 	if [ ! -f "$conf" ]; then
 		ilog "生成初始配置"
-		"$OC" onboard --non-interactive --mode local --skip-health --accept-risk \
+		oc_cli onboard --non-interactive --mode local --skip-health --accept-risk \
 			--skip-channels >/dev/null 2>&1 || ilog "WARN: onboard 未完全成功，将写入最小配置"
 	fi
 	if [ ! -f "$conf" ]; then
@@ -850,8 +862,12 @@ bootstrap_config() {
 EOF
 	fi
 
-	"$OC" config set gateway.port "$port" >/dev/null 2>&1
-	"$OC" config set gateway.bind "$bind" >/dev/null 2>&1
+	# 写入失败要说出来：这里是端口/绑定/凭据的落盘点，静默失败会让页面
+	# 显示安装成功但网关仍用旧值（或根本没有 token）。
+	oc_cli config set gateway.port "$port" >/dev/null 2>&1 \
+		|| ilog "WARN: 写入 gateway.port 失败（$port）"
+	oc_cli config set gateway.bind "$bind" >/dev/null 2>&1 \
+		|| ilog "WARN: 写入 gateway.bind 失败（$bind）"
 	# 凭据存在性走 lib.sh 的唯一判定。
 	# 旧写法 `grep -q '"token"'` 有两个问题：`"mode": "token"` 也会命中，
 	# 且无法区分 SecretRef 与明文 —— 一旦判成"没有"，就会用新明文覆盖掉
@@ -861,8 +877,8 @@ EOF
 		if [ "$OC_CRED_STATE" = "MISSING" ]; then
 			token="$(oc_rand_hex)"
 			[ -n "$token" ] || { ilog "ERROR: 无法生成安全网关 token，已中止配置初始化"; return 1; }
-			"$OC" config set gateway.auth.mode token >/dev/null 2>&1
-			"$OC" config set gateway.auth.token "$token" >/dev/null 2>&1
+			oc_cli config set gateway.auth.mode token >/dev/null 2>&1
+			oc_cli config set gateway.auth.token "$token" >/dev/null 2>&1
 			ilog "已生成网关 token（原本缺失）"
 		else
 			ilog "保留已有网关凭据（$OC_CRED_STATE）"
@@ -874,8 +890,8 @@ EOF
 			token="$(oc_rand_hex)"
 			# 宁可中止，也不用空 token 或弱随机值补凭据。
 			[ -n "$token" ] || { ilog "ERROR: 无法生成安全网关 token（随机源不可用），已中止凭据补齐"; return 1; }
-			"$OC" config set gateway.auth.mode token >/dev/null 2>&1
-			"$OC" config set gateway.auth.token "$token" >/dev/null 2>&1
+			oc_cli config set gateway.auth.mode token >/dev/null 2>&1
+			oc_cli config set gateway.auth.token "$token" >/dev/null 2>&1
 		fi
 	fi
 
@@ -887,6 +903,25 @@ EOF
 	if [ "${OC_LEGACY_CONTROLUI_REMOVED:-0}" -gt 0 ] 2>/dev/null; then
 		ilog "已移除 ${OC_LEGACY_CONTROLUI_REMOVED} 个 2026.10 不再支持的配置键（gateway.controlUi.*，较早版本写入）"
 	fi
+
+	# 关掉 OpenClaw 自带的 npm 自更新（幂等）。
+	# 这套布局里它不可能成功：安装树由插件安装、属主是网关用户，网关没有
+	# 系统 npm 前缀的写权限。真机日志是
+	#   Gateway restart update skipped (npm): update restart sentinel
+	#   remained pending after retry window
+	# —— 每次重启/升级都留一条错误，用户以为插件坏了。
+	# 更新由插件自己走 GitHub Release（页面「更新」），因此这里固定关掉。
+	_cur="$(oc_cli config get update.auto.enabled 2>/dev/null | sed -n '1p' | tr -d '\r')"
+	case "$_cur" in
+		*false*) : ;;
+		*)
+			if oc_cli config set update.auto.enabled false >/dev/null 2>&1; then
+				ilog "已关闭 OpenClaw 自带的 npm 自更新（更新统一由插件负责）"
+			else
+				ilog "WARN: 无法关闭 OpenClaw 自更新（update.auto.enabled），重启后可能再报更新失败"
+			fi
+			;;
+	esac
 	oc_fix_perms
 	ilog "配置文件: $conf"
 }
@@ -909,7 +944,8 @@ install_default_providers() {
 			# closes the pipe after 20 lines, the writer takes SIGPIPE and the
 			# plugin install is cut off mid-way while still reporting success.
 			# 同 doctor：以网关用户执行，避免 openclaw-<uid> 临时目录属主冲突。
-			if oc_as_user env HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+			if oc_as_user env HOME="$HOME_DIR" TMPDIR="$BASE_DIR/tmp" \
+				PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
 				"$OC" plugins install @openclaw/deepseek-provider >>"$OC_INSTALLLOG" 2>&1; then
 				ilog "DeepSeek 插件安装完成"
 			else
@@ -1017,7 +1053,8 @@ autostart_service() {
 				# 官方升级流程的最后一步：`openclaw gateway status --deep`
 				# 端口通只说明进程在听，不说明网关自己认为健康（插件加载失败、
 				# schema 未迁移完都可能仍然监听）。这一步把结论记进日志。
-				_deep="$(oc_as_user env HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+				_deep="$(oc_as_user env HOME="$HOME_DIR" TMPDIR="$BASE_DIR/tmp" \
+					PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
 					"$OC_DIR/bin/openclaw" gateway status --deep 2>&1)"
 				if [ -n "$_deep" ]; then
 					printf '%s\n' "$_deep" | tail -n 10 | while IFS= read -r _l; do
@@ -1091,7 +1128,7 @@ run_doctor_after_upgrade() {
 	#
 	# 用 --fix（与官方"从极旧版本升级"的桥接步骤一致）：只跑只读体检不会改配置。
 	# 失败不判死：doctor 在个别问题上会返回非零，但那不代表安装失败。
-	local oc out rc vout vrc
+	local oc out rc vout vrc hbp _p
 	oc="$OC_DIR/bin/openclaw"
 	[ -x "$oc" ] || { ilog "跳过 doctor：未找到 $oc"; return 0; }
 
@@ -1124,6 +1161,25 @@ run_doctor_after_upgrade() {
 	vout="$(oc_as_user env HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
 		"$oc" config validate 2>&1)"
 	vrc=$?
+	# 2026.11 起 agents.defaults.heartbeat 被移除（改成 automation jobs）。
+	# 官方迁移路径是 doctor --fix（把心跳转成 job 再删键），上面已经跑过一次；
+	# 这里还留着说明本版 doctor 迁不动它。而留着它的后果很重：整份配置被判
+	# 无效，网关虽然能起，却**忽略所有渠道 / 模型 / 凭据**（真机 2026-11-18
+	# 08:04 就是这个状态，doctor 随后报一堆 Auth profile missing）。
+	hbp="$(printf '%s\n' "$vout" | oc_obsolete_heartbeat_paths 2>/dev/null)"
+	if [ "$vrc" -ne 0 ] && [ -n "$hbp" ]; then
+		ilog "检测到 2026.11 已移除的心跳配置键（旧版 agents.defaults.heartbeat）"
+		for _p in $hbp; do
+			if oc_cli config unset "$_p" >/dev/null 2>&1; then
+				ilog "已移除无效键 $_p（心跳不再由该键控制，请改用页面/CLI 的 Automations）"
+			else
+				ilog "WARN: 无法移除无效键 $_p，整份配置仍会失效"
+			fi
+		done
+		vout="$(oc_as_user env HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+			"$oc" config validate 2>&1)"
+		vrc=$?
+	fi
 	if [ "$vrc" -ne 0 ] && [ -n "$vout" ]; then
 		ilog "WARN: 配置校验未通过，以下是具体问题（插件安装可能因此失败）："
 		printf '%s\n' "$vout" | grep -E '^\s*-|unknown|invalid|Problem' | head -n 12 | \

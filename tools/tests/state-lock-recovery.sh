@@ -36,6 +36,8 @@ EOF
 		. "$LIBSH" >/dev/null 2>&1
 		oc_home_dir() { printf '%s' "$base/home"; }
 		oc_as_user() { shift; env "$@"; }
+		# 2026.11 起锁检查改走 oc_as_user_timeout（多一个超时参数）
+		oc_as_user_timeout() { shift; shift; env "$@"; }
 		oc_warn() { printf '%s\n' "$*" >> "$base/log"; }
 		oc_clear_stale_state_lock "$base/state" "$ocbin"
 		rc=$?
@@ -64,6 +66,32 @@ run_case human-recovery 1 yes '需要确认：gateway recover-lock --confirm fp-
 run_case rc0-empty 2 yes ''
 run_case rc0-unknown 2 yes 'operation completed successfully'
 run_case cli-missing 2 no ''
+
+# 2026.11.x 删除了 recover-lock：此时必须放行，否则网关永远起不来
+# （现场症状就是「升级后端口未应答」，只能手工跑 doctor）。
+if (
+	base="$TMP/removed"
+	mkdir -p "$base/state/tmp/openclaw-1000"
+	printf '{"pid":1234}\n' > "$base/state/tmp/openclaw-1000/state.test.lock"
+	cat > "$base/oc" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'OpenClaw gateway has no command "recover-lock".'
+exit 1
+EOF
+	chmod +x "$base/oc"
+	. "$LIBSH" >/dev/null 2>&1
+	oc_home_dir() { printf '%s' "$base/home"; }
+	oc_base_dir() { printf '%s' "$base"; }
+	oc_as_user() { shift; env "$@"; }
+	oc_as_user_timeout() { shift; shift; env "$@"; }
+	oc_warn() { printf '%s\n' "$*" >> "$base/log"; }
+	oc_clear_stale_state_lock "$base/state" "$base/oc" || exit 1
+	grep -q '自动回收' "$base/log" || exit 1
+); then
+	pass 'recover-lock-removed'
+else
+	fail 'recover-lock-removed'
+fi
 
 # No lock is the only path that permits doctor to proceed.
 base="$TMP/no-lock"

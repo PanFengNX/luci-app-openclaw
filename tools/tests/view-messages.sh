@@ -820,8 +820,11 @@ check('rm -f' not in _lk_code and 'rm -rf' not in _lk_code,
       "检查函数绝不删锁文件（只删 sidecar 会留下 DB lease，官方明确禁止手工删）")
 # 只看**真正以命令形式调用 CLI 的那一行**：既不是 oc_warn 提示，
 # 也不是 `recover-lock| $_l` 这种把官方输出转发进日志的循环。
+# 只认「以命令形式调用」的那一行：`... gateway recover-lock`。
+# 2026.11 起还要能识别「命令已被移除」的提示分支，那条也含 recover-lock
+# 字样（`has no command "recover-lock"`），但不是执行行。
 _lk_exec = [l for l in _lk_code.splitlines()
-            if 'recover-lock' in l
+            if ' gateway recover-lock' in l
             and not l.lstrip().startswith('oc_warn')
             and 'recover-lock|' not in l]
 check(len(_lk_exec) == 1, "只调用一次官方 recover-lock（inspect）",

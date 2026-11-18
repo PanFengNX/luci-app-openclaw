@@ -1,8 +1,36 @@
-<!-- version: 1.8.99 -->
+<!-- version: 1.9.0 -->
 
 # 更新日志
 
 版本按倒序排列，最新的在最上面。
+
+## 1.9.0
+
+修复：升级 OpenClaw 2026.11 后网关起不来（端口未应答）、插件里执行命令报错。
+
+- **锁协议变了**：2026.11 已删除 `openclaw gateway recover-lock`，改成「死进程
+  或启动身份变化的锁在启动时自动回收」。插件原来遇到锁一律 fail-closed，
+  于是升级后网关永远起不来，只能人工跑 doctor。现在识别到「命令已移除」就
+  交还给新版的自动回收，并在日志里写明原因。
+- **以 root 跑 openclaw 一律被拒**：`<cache>/openclaw-0` 被 chown 成网关用户后，
+  root 侧报 `Unsafe fallback OpenClaw temp dir`。诊断的 doctor --fix、导出诊断、
+  命令行终端、一键修复里的 doctor --fix 全部改为以网关用户 + 私有 TMPDIR 执行。
+- **缓存自愈**：连带清理「名字里的 uid 与属主不一致」的 `openclaw-<uid>` 目录
+  （就是上面那个历史遗留），清掉后两个身份都不再被拒。
+- **启动宽限期**：2026.11 启动要 15-40 秒，状态页在启动途中不再误报
+  「端口未应答」，改为「读取中」。
+- **关掉 OpenClaw 自带的 npm 自更新**：这套布局里它不可能成功（安装树属主是
+  网关用户，网关没有系统 npm 前缀的写权限），日志每次重启都留一条
+  `Gateway restart update skipped (npm): update restart sentinel remained
+  pending`。更新统一由插件走 GitHub Release。
+- **安装期 config set 全部降权**：`gateway.port` / `bind` / `auth.*` 原来以 root
+  写入且把错误重定向进 /dev/null —— 身份冲突时是**静默失败**（页面说安装成功，
+  端口/token 却没写进去）。现在以网关用户执行，失败会在安装日志里明说。
+- **心跳遗留键兜底**：2026.11 已移除 `agents.defaults.heartbeat`（改成
+  automation jobs）。`doctor --fix` 迁移不成功时删掉该键并在日志说明 ——
+  留着它会让**整份配置失效**，网关能起但忽略所有渠道/模型/凭据。
+- **chown 失败日志不再被吞**：`if ! chown ...` 里 `$?` 恒为 0，原来永远打印
+  「失败（退出码 0）」，真实原因看不到。
 
 ## 1.8.99
 
