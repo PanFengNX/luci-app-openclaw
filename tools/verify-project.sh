@@ -413,6 +413,19 @@ else
 	skip "缺少 tools/tests/openclaw-2026.11-compat.sh"
 fi
 
+head_ "7e31. OpenClaw 本体升级：按跨度选策略 / 网络重试换源 / 失败恢复网关"
+if [ -f tools/tests/upgrade-strategy.sh ]; then
+	if out="$(sh tools/tests/upgrade-strategy.sh 2>&1)"; then
+		printf '%s\n' "$out" | tail -1 | sed 's/^/    /'
+		ok "upgrade-strategy.sh 全部断言通过"
+	else
+		bad "upgrade-strategy.sh 有失败断言"
+		printf '%s\n' "$out" | grep -E 'FAIL|共 ' | sed 's/^/        /'
+	fi
+else
+	skip "缺少 tools/tests/upgrade-strategy.sh"
+fi
+
 head_ "7e2f. 云端删除不可用时不显示删除按钮（能力判定）"
 if [ -f tools/tests/cloud-del-capability.sh ]; then
 	if out="$(sh tools/tests/cloud-del-capability.sh 2>&1)"; then

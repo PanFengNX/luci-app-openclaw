@@ -246,6 +246,36 @@ run_with_heartbeat() {
 die() {
 	hb_stop
 	ilog "ERROR: $*"
+	# 覆盖安装前安装器会先停网关。若 npm install 没成功就走到这里，不把服务拉回来，
+	# 用户看到的就是「升级失败，网关也没了」（2026-11-26 真机：ECONNRESET 之后状态
+	# 停在 stopped，只能手工点启动）。
+	#
+	# 但「原程序还能用」必须有证据，不能只看 package.json 还是旧版本：npm 在替换
+	# 阶段失败时它可能没变，旁边的包却已被换过，启动的是半新半旧的树。
+	# 要同时满足下面三条才恢复，任何一条不满足都保持停止并说清原因 ——
+	# 启动一个不确定完好的网关比停着更糟。
+	#   1. 确实停过网关（OC_GW_WAS_RUNNING=1，npm 成功后清零）；
+	#   2. 自 npm 开始以来程序目录里没有任何文件/目录被创建、修改、删除
+	#      （oc_tree_untouched：说明 npm 连替换阶段都没进入）；
+	#   3. 程序版本等于升级前的版本。
+	# 版本用全局 OC_PRE_UPGRADE_VER 传进来，不靠动态作用域去读调用方的 local。
+	if [ "${OC_GW_WAS_RUNNING:-0}" = "1" ]; then
+		OC_GW_WAS_RUNNING=0
+		die_old_ver=""
+		if [ -x "$OC_DIR/bin/openclaw" ]; then
+			die_old_ver="$(oc_pkg_version "$OC_DIR" 2>/dev/null | head -n1)"
+			[ -n "$die_old_ver" ] || die_old_ver="$(oc_installed_version "$OC_DIR" 2>/dev/null | head -n1)"
+		fi
+		if [ -n "${OC_UPGRADE_MARKER:-}" ] && oc_tree_untouched "$OC_DIR" "$OC_UPGRADE_MARKER" \
+				&& [ -n "$die_old_ver" ] && [ "$die_old_ver" = "${OC_PRE_UPGRADE_VER:-}" ] \
+				&& [ -x "${OC_INITD:-/etc/init.d/openclaw}" ]; then
+			ilog "升级未完成：程序目录自升级开始后没有任何改动，仍是原版本 $die_old_ver，重新启动网关"
+			"${OC_INITD:-/etc/init.d/openclaw}" start >/dev/null 2>&1
+		else
+			ilog "WARN: 升级未完成，且无法确认原程序完好（当前版本 ${die_old_ver:-读不到}，升级前 ${OC_PRE_UPGRADE_VER:-未知}，安装目录是否有改动见上），未自动启动网关。请重新执行一次安装（会完整重装）或点「一键修复」"
+		fi
+	fi
+	case "${OC_UPGRADE_MARKER:-}" in ?*) rm -f "$OC_UPGRADE_MARKER" 2>/dev/null ;; esac
 	exit 1
 }
 
@@ -601,12 +631,273 @@ install_node() {
 
 NODE_DIR_bin() { "$NODE_DIR/bin/node" -v 2>/dev/null; }
 
+# ---------------------------------------------------------------- upgrade strategy
+oc_ver_norm() {
+	# oc_ver_norm <任意版本输出> -> 年.月.补丁 三个纯数字段（取不到则无输出）
+	# 「OpenClaw 2026.11.10 (6ea542f)」「v2026.11.10」「2026.11.10-beta.1」-> 2026.11.10
+	# 只用于**比较跨度**；判断「是不是同一个版本」必须用 oc_pkg_version 的原值，
+	# 否则 2026.11.10-beta.1 会被当成 2026.11.10。
+	printf '%s' "$1" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' 2>/dev/null | head -n1
+}
+
+oc_pkg_version() {
+	# oc_pkg_version [oc-dir] -> package.json 里的原始 version（可带 -beta.1 等后缀）
+	# 读文件、不启动 CLI：不受「配置文件非法」影响，也没有 --version 那种
+	# 「OpenClaw 2026.11.10 (6ea542f)」的整行前缀。
+	local pj v
+	pj="${1:-$(oc_oc_dir 2>/dev/null)}/lib/node_modules/openclaw/package.json"
+	[ -f "$pj" ] || return 1
+	v=""
+	if command -v jsonfilter >/dev/null 2>&1; then
+		v="$(jsonfilter -i "$pj" -e '@.version' 2>/dev/null | head -n1)"
+	fi
+	[ -n "$v" ] || v="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pj" 2>/dev/null | head -n1)"
+	[ -n "$v" ] || return 1
+	printf '%s' "$v"
+}
+
+oc_upgrade_class() {
+	# oc_upgrade_class <当前版本> <目标版本>
+	#   -> same | patch | minor | downgrade | prerelease | unknown
+	#
+	# OpenClaw 用日历版本（年.月.补丁号[-预发布]）。跨度不同，升级要做的事确实不同：
+	#   same       同一个版本：不必重装（强制重装除外）
+	#   patch      同月内升级：只换程序，配置格式不变
+	#              （beta -> 同号正式版、beta.1 -> beta.2 也算）
+	#   minor      跨月升级：配置格式会变 —— 2026.10 删了 gateway.controlUi.*，
+	#              2026.11 删了 agents.defaults.heartbeat，残留一个键整份配置
+	#              就被判无效。所以升级前必须备份配置，装完跑 doctor --fix 并校验。
+	#   downgrade  降级：共享状态库只升不降（官方文档：迁移之后旧版 Gateway
+	#              跑不了已迁移的任务），默认拒绝。
+	#   prerelease 正式版 -> 预发布版：数字段再大，状态库也可能被预发布版迁移，
+	#              按跨月升级对待（备份配置），并明确提示。
+	# 任一版本认不出来 -> unknown，调用方按最保守的 minor 处理。
+	#
+	# 数字段相同不等于同一个版本：2026.11.10-beta.1 与 2026.11.10、
+	# 与 2026.11.10-beta.2 都是不同版本，按 semver 的预发布规则比。
+	local cur tgt cy cm ty tm r pc pt
+	cur="$(oc_ver_norm "${1:-}")"
+	tgt="$(oc_ver_norm "${2:-}")"
+	if [ -z "$cur" ] || [ -z "$tgt" ]; then printf 'unknown'; return 0; fi
+	if ver_eq "$cur" "$tgt"; then
+		pc="$(oc_pre_part "${1:-}" "$cur")"
+		pt="$(oc_pre_part "${2:-}" "$tgt")"
+		if [ -z "$pc" ] && [ -z "$pt" ]; then printf 'same'
+		elif [ -z "$pc" ]; then printf 'prerelease'
+		elif [ -z "$pt" ]; then printf 'patch'
+		else
+			# oc_pre_cmp 返回 -1 表示当前的预发布段更早（beta.1 -> beta.2 是升级）
+			case "$(oc_pre_cmp "$pc" "$pt")" in
+				0) printf 'same' ;;
+				1) printf 'downgrade' ;;
+				*) printf 'patch' ;;
+			esac
+		fi
+		return 0
+	fi
+	if ver_lt "$tgt" "$cur"; then printf 'downgrade'; return 0; fi
+	cy="${cur%%.*}"; r="${cur#*.}"; cm="${r%%.*}"
+	ty="${tgt%%.*}"; r="${tgt#*.}"; tm="${r%%.*}"
+	if [ "$cy" = "$ty" ] && [ "$cm" = "$tm" ]; then printf 'patch'
+	else printf 'minor'
+	fi
+}
+
+oc_pre_part() {
+	# oc_pre_part <原始版本> <年.月.补丁> -> 预发布段（没有则无输出）
+	# 「2026.11.10-beta.1」-> beta.1；「OpenClaw 2026.11.10 (6ea542f)」-> 无
+	local rest="${1#*"$2"}"
+	[ "$rest" != "$1" ] || return 0
+	case "$rest" in
+		-*) printf '%s' "${rest#-}" | sed 's/[[:space:]].*$//; s/+.*$//' ;;
+	esac
+}
+
+oc_pre_cmp() {
+	# oc_pre_cmp <预发布段a> <预发布段b> -> -1 / 0 / 1（semver 规则）
+	#
+	# 逐段比较：纯数字段按数值，数字段小于字母段，字母段按字典序；
+	# 前面都相同则段数多的更大（beta < beta.1）。
+	# expr 的操作数前面各加一个 x：让「1」「01」这类段不会被 expr 当成
+	# 运算符，也保证它做的是字符串比较。
+	local a="$1" b="$2" x y
+	while [ -n "$a" ] && [ -n "$b" ]; do
+		x="${a%%.*}"; y="${b%%.*}"
+		if [ "$x" != "$y" ]; then
+			case "$x" in
+				*[!0-9]*)
+					case "$y" in
+						*[!0-9]*)
+							# 都是字母段：字典序
+							if expr "x$x" '<' "x$y" >/dev/null 2>&1; then printf -- '-1'
+							else printf '1'; fi
+							return 0 ;;
+						*) printf '1'; return 0 ;;    # 字母段 > 数字段
+					esac ;;
+			esac
+			case "$y" in *[!0-9]*) printf -- '-1'; return 0 ;; esac
+			# 都是数字段：去掉前导零再比（1 与 01 是同一个数）
+			while [ "${#x}" -gt 1 ] && [ "${x#0}" != "$x" ]; do x="${x#0}"; done
+			while [ "${#y}" -gt 1 ] && [ "${y#0}" != "$y" ]; do y="${y#0}"; done
+			if [ "$x" = "$y" ]; then :; elif [ "$x" -lt "$y" ]; then printf -- '-1'; return 0
+			else printf '1'; return 0; fi
+		fi
+		case "$a" in *.*) a="${a#*.}" ;; *) a="" ;; esac
+		case "$b" in *.*) b="${b#*.}" ;; *) b="" ;; esac
+	done
+	if [ -n "$a" ]; then printf '1'; return 0; fi
+	if [ -n "$b" ]; then printf -- '-1'; return 0; fi
+	printf '0'
+}
+
+npm_net_fail() {
+	# npm_net_fail <**这一次尝试**的 npm 日志> -> 0 表示失败原因是网络（值得重试/换源）
+	#
+	# 入参必须是单次尝试自己的日志（npm_install_retry 每次写一个文件）：几份日志
+	# 合在一起时，分不清哪条报错属于哪一次。也不看「最后 N 行」—— 网络报错后面
+	# 可能还跟着几十行上下文，按行数截会漏。
+	#
+	# 只认 npm 自己的错误码行和那句 network aborted，不用泛泛的关键字：
+	# 「fetch failed」之类在包不存在、磁盘满时的上下文里也会出现，拿它去换源
+	# 只会得到一个更难懂的 404。
+	# 不属于网络的（E404 / ETARGET / ENOSPC / EACCES / 生命周期脚本失败）不重试：
+	# 再跑一次结果一样，只会多等十几分钟。
+	[ -s "$1" ] || return 1
+	grep -qE '^npm error code (ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|ECONNABORTED|EPIPE|ENETUNREACH|EHOSTUNREACH|ENOTFOUND)([[:space:]]|$)' \
+		"$1" 2>/dev/null || grep -q '^npm error network aborted' "$1" 2>/dev/null
+}
+
+npm_alt_registry() {
+	# npm_alt_registry <当前源> -> 另一个源；不在「官方 / npmmirror」范围内则无输出
+	# （用户自建的源不替他换，换了可能根本同步不到这个版本）。
+	case "$1" in
+		*registry.npmjs.org*) printf 'https://registry.npmmirror.com' ;;
+		*registry.npmmirror.com*) printf 'https://registry.npmjs.org' ;;
+	esac
+}
+
+
+oc_install_ok() {
+	# oc_install_ok <oc-dir> <版本> -> 0 表示这个版本**完整装完过**
+	#
+	# 「已是该版本就跳过」必须同时满足三个条件：有入口、package.json 是这个版本、
+	# 并且装完时写过完成标记。只看 package.json 不够：npm 在替换阶段失败时它
+	# 可能已经是新版本，而旁边的依赖还没换完 —— 那种半截状态最需要重装，
+	# 却会被「版本一样」放过。没有完成标记就一律当作没装完。
+	[ -x "$1/bin/openclaw" ] && [ -f "$1/.oc-install-ok" ] \
+		&& [ "$(sed -n '1p' "$1/.oc-install-ok" 2>/dev/null)" = "$2" ] \
+		&& [ "$(oc_pkg_version "$1" 2>/dev/null | head -n1)" = "$2" ]
+}
+
+oc_tree_untouched() {
+	# oc_tree_untouched <目录> <标记文件> -> 0 表示标记创建之后，该目录下**没有任何
+	# 文件或目录被创建、修改、删除**。
+	#
+	# 判据是 mtime：目录里增删条目会更新该目录自己的 mtime，所以「没有任何东西比
+	# 标记新」等价于「这段时间这个目录没人动过」。npm 替换包的方式是整目录移走、
+	# 移入，父目录的 mtime 一定会变，所以只要它进入了替换阶段就一定查得出来。
+	# 取不到结论（目录/标记不存在、find 失败）一律返回非 0：宁可不起网关。
+	[ -d "$1" ] && [ -e "$2" ] || return 1
+	[ -z "$(find "$1" -newer "$2" 2>/dev/null | head -n 1)" ]
+}
+
+npm_registry_has() {
+	# npm_registry_has <源> -> 0 表示该源上查得到 openclaw@$OCV
+	#
+	# 换源之前先确认：镜像可能还没同步这个版本，换过去只会把「网络中断」变成
+	# 一个更难懂的 404。查不到就不换，留在原源重试。
+	[ -n "$1" ] && [ -n "$OCV" ] || return 1
+	oc_timeout 60 "$NODE_BIN" "$npmcli" view "openclaw@$OCV" version \
+		--registry "$1" --loglevel=error >/dev/null 2>&1
+}
+
+npm_install_retry() {
+	# 跑 `npm install -g openclaw@<版本>`，网络类失败自动重试（最多 3 次），
+	# 第 3 次换源。
+	#
+	# 2026-11-26 真机：设备直连 registry.npmjs.org 拉 tarball，两次都在 87 秒
+	# 左右被重置（ECONNRESET / network aborted）；同一个版本走 npmmirror 一次
+	# 成功。安装器原先一失败就 die，而那时网关已经停了。
+	#   第 1 次：配置里的源
+	#   第 2 次：还是它（多半只是抖一下，npm 缓存里已下载的部分会复用）
+	#   第 3 次：换成另一个源 —— 仅限官方 <-> npmmirror 这两个插件本来就自动二选一
+	#           的源，且先确认备用源上查得到这个版本。用户自建的源不替他换。
+	# 不重试的情况：超时 / 被 SIGKILL（多半是内存不足）/ 被 SIGTERM 中止 ——
+	# 这些都不是「网络抖一下」，再跑一次结果一样；非网络错误同理。
+	# 总耗时仍受 NPM_INSTALL_TIMEOUT 约束：算不出剩余时间、或剩余不足 2 分钟，
+	# 就不再起新的一轮。
+	#
+	# 入参取调用方 install_openclaw 作用域里的（POSIX 动态作用域）：
+	#   reg npm_log allow_scripts OC_DIR OCV NPM_INSTALL_TIMEOUT NODE_BIN npmcli start_ts
+	# 结果经全局变量回传：NPM_RC（最后一次退出码）/ NPM_REG_USED（最终用的源）/
+	# NPM_ATTEMPTS（共试了几次）。
+	local n_attempt=0 n_reg n_now n_left n_alt n_log n_i
+	n_reg="$reg"
+	NPM_RC=0
+	NPM_ATTEMPTS=0
+	while :; do
+		n_attempt=$((n_attempt + 1))
+		NPM_ATTEMPTS="$n_attempt"
+		[ "$n_attempt" -le 1 ] || ilog "npm install 第 $n_attempt 次尝试（源：$n_reg）"
+		# 每次尝试单独记日志：判断「这一次为什么失败」时，上一次的报错不能混进来。
+		# 全部结束后再并回完整日志（失败时取末尾、成功时找 added 行都看它）。
+		n_log="$npm_log.attempt$n_attempt"
+		: >"$n_log" 2>/dev/null || n_log="$npm_log"
+		set -- install -g --prefix "$OC_DIR" --registry "$n_reg" \
+			--no-audit --no-fund --loglevel=http --prefer-online \
+			--fetch-retries=4 --fetch-retry-mintimeout=2000 --fetch-retry-maxtimeout=60000
+		[ -n "$allow_scripts" ] && set -- "$@" "$allow_scripts"
+		set -- "$@" "openclaw@$OCV"
+		run_with_heartbeat "npm install" -- \
+			run_with_timeout "$NPM_INSTALL_TIMEOUT" "$NODE_BIN" "$npmcli" "$@" \
+			>>"$n_log" 2>&1
+		NPM_RC=$?
+		[ "$NPM_RC" -eq 0 ] && break
+		[ "$n_attempt" -lt 3 ] || break
+		# 124 = 超时包装器返回；137 = 被 SIGKILL；143 = 被 SIGTERM。后两个在
+		# 没有 timeout 命令的设备上分别是「被杀」和「被中止」，都不该重试。
+		case "$NPM_RC" in 124|137|143) break ;; esac
+		npm_net_fail "$n_log" || break
+		n_now="$(date +%s 2>/dev/null)"
+		# start_ts 取不到时被置成了 0：拿它算出来的「剩余时间」是个巨大的负数，
+		# 看起来像「时间用完」，其实只是没开始计时。算不出来就不重试，并说明原因。
+		case "$start_ts" in ''|*[!0-9]*|0) n_now="" ;; esac
+		case "$n_now" in
+			''|*[!0-9]*) ilog "无法计算剩余时间，不再重试 npm install"; break ;;
+		esac
+		n_left=$((NPM_INSTALL_TIMEOUT - (n_now - start_ts)))
+		[ "$n_left" -ge 120 ] || { ilog "剩余时间不足（${n_left}s），不再重试"; break; }
+		if [ "$n_attempt" -eq 1 ]; then
+			ilog "npm install 第 1 次因网络中断失败，5 秒后用同一个源重试"
+		else
+			n_alt="$(npm_alt_registry "$n_reg")"
+			if [ -n "$n_alt" ] && npm_registry_has "$n_alt"; then
+				ilog "同一个源连续 2 次网络中断，换源重试：$n_reg → $n_alt"
+				n_reg="$n_alt"
+			else
+				ilog "同一个源连续 2 次网络中断，再重试一次（无可用的备用源）"
+			fi
+		fi
+		sleep 5
+	done
+	n_i=1
+	while [ "$n_i" -le "$n_attempt" ] && [ -f "$npm_log.attempt$n_i" ]; do
+		cat "$npm_log.attempt$n_i" >>"$npm_log"
+		rm -f "$npm_log.attempt$n_i"
+		n_i=$((n_i + 1))
+	done
+	NPM_REG_USED="$n_reg"
+}
+
 # ---------------------------------------------------------------- openclaw
 install_openclaw() {
 	ilog "== 安装 OpenClaw $OCV（官方 npm 包） =="
 	local reg npmcache npmcli npm_log rc start_ts end_ts elapsed added timed_out
 	local npm_ver npm_major npm_minor allow_scripts _cur_ver _want_ver
 	local _gw_pids _i
+	# _cur_ver 是本函数的 local；die() 由本函数调用，POSIX 的动态作用域让它看得到。
+	# die_old_ver 在 die() 里赋值，故意不加 local（加了 die 自己也读不到）。
+	local _cls _pre_conf _pre_bak _reg _alt _left _now npm_attempt _old
 	# 优先用「取版本列表时实际成功的那个源」。
 	# 只记 official/mirror 是不够的：安装阶段要重新推断 URL，推断结果一旦
 	# 与取列表时不同，就会出现"列表里有这个版本、npm 说没有"。
@@ -640,17 +931,79 @@ install_openclaw() {
 	# 这里应当立刻返回，而不是让他等几分钟。
 	# 注意：只用 main.oc_version 不可靠（手工装过、或被改过），
 	# 以**程序自己报的版本**为准。
-	if [ "$FORCE" != "1" ] && [ -x "$OC_DIR/bin/openclaw" ]; then
-		_cur_ver="$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
-			oc_timeout 20 "$OC_DIR/bin/openclaw" --version 2>/dev/null | head -n1)"
-		_cur_ver="$(printf '%s' "$_cur_ver" | tr -d ' \t\r\n' | sed 's/^v//')"
-		_want_ver="$(printf '%s' "$OCV" | sed 's/^v//')"
-		if [ -n "$_cur_ver" ] && [ "$_cur_ver" = "$_want_ver" ]; then
-			ilog "OpenClaw 已是 $_cur_ver，跳过 npm install（如需强制重装请在设置页勾选强制）"
-			return 0
-		fi
-		[ -n "$_cur_ver" ] && ilog "当前 OpenClaw $_cur_ver → 目标 $_want_ver，开始升级"
+	# 当前版本以 npm 包自带的 package.json 为准。原先读 `openclaw --version`，
+	# 而它的输出是「OpenClaw 2026.11.10 (6ea542f)」这样带前缀和提交号的整行，
+	# 跟目标版本比**永远不相等** —— 「已是该版本就跳过」从来没生效过，同版本
+	# 再点一次升级照样停网关、重下几百 MB（2026-11-26 真机实测）。
+	# 原值可能带 -beta.1 之类后缀：要保留，否则 beta 与正式版会被当成同一个。
+	_cur_ver=""
+	if [ -x "$OC_DIR/bin/openclaw" ]; then
+		_cur_ver="$(oc_pkg_version "$OC_DIR" 2>/dev/null | head -n1)"
+		[ -n "$_cur_ver" ] || _cur_ver="$(oc_installed_version "$OC_DIR" 2>/dev/null | head -n1)"
+		[ -n "$_cur_ver" ] || _cur_ver="$(oc_ver_norm "$(HOME="$HOME_DIR" PATH="$NODE_DIR/bin:$OC_DIR/bin:$PATH" \
+			oc_timeout 20 "$OC_DIR/bin/openclaw" --version 2>/dev/null | head -n1)")"
 	fi
+	_want_ver="$(printf '%s' "$OCV" | sed 's/^[vV]//')"
+	# 跳过还要有「装完」的证据（oc_install_ok）：上次装到一半失败时 package.json
+	# 可能已经是这个版本，那种半截状态恰恰最需要重装。
+	if [ "$FORCE" != "1" ] && oc_install_ok "$OC_DIR" "$_want_ver"; then
+		ilog "OpenClaw 已是 $_cur_ver，跳过 npm install（如需强制重装请在设置页勾选强制）"
+		return 0
+	fi
+	[ -n "$_cur_ver" ] && [ "$_cur_ver" != "$_want_ver" ] && \
+		ilog "当前 OpenClaw $_cur_ver → 目标 $_want_ver，开始升级"
+
+	# ---- 按升级跨度选策略 ----------------------------------------------
+	# 全新安装 / 同版本 / 同月补丁 / 跨月 / 降级，各自要做的事不同。
+	if [ -z "$_cur_ver" ]; then
+		_cls="fresh"
+	else
+		_cls="$(oc_upgrade_class "$_cur_ver" "$_want_ver")"
+	fi
+	case "$_cls" in
+		fresh)
+			ilog "升级策略：全新安装 $_want_ver" ;;
+		same)
+			if [ "$FORCE" = "1" ]; then
+				ilog "升级策略：同版本重装（$_cur_ver，已勾选强制）"
+			else
+				# 走到这里说明没有完成标记：多半是更早的插件版本装的。
+				ilog "升级策略：同版本 $_cur_ver，但没有上次完整装完的记录，重装一次并记录（之后同版本会直接跳过）"
+			fi ;;
+		patch)
+			ilog "升级策略：同月补丁升级（$_cur_ver → $_want_ver），配置格式不变；失败时原版本不受影响" ;;
+		minor|unknown|prerelease)
+			[ "$_cls" = "prerelease" ] && \
+				ilog "注意：要从正式版换到预发布版（$_cur_ver → $_want_ver），状态库可能被预发布版迁移，换回正式版时需要强制"
+			ilog "升级策略：跨月升级（$_cur_ver → $_want_ver），升级前先备份配置，装完由 doctor 迁移并校验"
+			_pre_conf="$HOME_DIR/.openclaw/openclaw.json"
+			if [ -f "$_pre_conf" ]; then
+				# 文件名带上 pid：同一秒内重复触发也不会互相覆盖。
+				_pre_bak="$_pre_conf.pre-upgrade-$(printf '%s' "${_cur_ver:-unknown}" | tr -c 'A-Za-z0-9._-' '_').$(date +%Y%m%d%H%M%S 2>/dev/null).$$"
+				if cp "$_pre_conf" "$_pre_bak" 2>/dev/null; then
+					# 里面有网关 token 与模型凭据：不能按 umask 落成全局可读。
+					# 收紧权限失败就删掉这份副本，并且说出来 —— 留下一份全局可读的
+					# 凭据副本而不自知，比没有备份更糟。
+					if chmod 600 "$_pre_bak" 2>/dev/null; then
+						ilog "已备份升级前的配置：$_pre_bak"
+					else
+						rm -f "$_pre_bak" 2>/dev/null
+						ilog "WARN: 配置备份无法收紧为 600，已删除该副本；升级前请手动备份 $_pre_conf"
+					fi
+				else
+					ilog "WARN: 升级前备份配置失败（继续安装；doctor 也会另存 openclaw.json.bak）"
+				fi
+				# 只留最近 3 份，跨月升级多了也不会无限累积。
+				for _old in $(ls -1t "$HOME_DIR/.openclaw/"openclaw.json.pre-upgrade-* 2>/dev/null | tail -n +4); do
+					rm -f "$HOME_DIR/.openclaw/$_old" 2>/dev/null
+				done
+			fi ;;
+		downgrade)
+			if [ "$FORCE" != "1" ]; then
+				die "目标版本 $_want_ver 低于当前已安装的 $_cur_ver，已拒绝降级：OpenClaw 的共享状态库只升不降，降级后旧版网关可能起不来。如确需降级，请先备份 $HOME_DIR/.openclaw，再到设置页勾选「强制重装」"
+			fi
+			ilog "WARN: 降级 $_cur_ver → $_want_ver（已勾选强制）；状态库若已被新版迁移，旧版可能无法启动" ;;
+	esac
 
 	# ---- 覆盖安装前必须先停服务 ----------------------------------------
 	# 整份脚本原先没有一处 init.d stop，直接在运行中的网关脚下替换
@@ -666,6 +1019,8 @@ install_openclaw() {
 	if [ -n "$_gw_pids" ]; then
 		ilog "检测到网关正在运行（pid: $(printf '%s' "$_gw_pids" | tr '\n' ' ')），先停止再覆盖安装"
 		[ -x /etc/init.d/openclaw ] && /etc/init.d/openclaw stop >/dev/null 2>&1
+		# 记下来：npm 没装成功就退出时，die() 要把原版本重新拉起来。
+		OC_GW_WAS_RUNNING=1
 		# 等进程真的退出（最多 40 秒）：procd 的 stop 是异步的，
 		# 立刻 npm install 仍会与正在退出的进程抢同一批文件。
 		_i=0
@@ -745,14 +1100,30 @@ install_openclaw() {
 	# 心跳是"还在干活"的唯一可见证据，命令结束（含被 timeout 杀掉）后立刻收掉。
 	# 用 set -- 组装参数：allow_scripts 可能为空，直接拼字符串会留下多余空格，
 	# 而这里每一个选项都必须原样传给 npm。
-	set -- install -g --prefix "$OC_DIR" --registry "$reg" \
-		--no-audit --no-fund --loglevel=http --prefer-online
-	[ -n "$allow_scripts" ] && set -- "$@" "$allow_scripts"
-	set -- "$@" "openclaw@$OCV"
-	run_with_heartbeat "npm install" -- \
-		run_with_timeout "$NPM_INSTALL_TIMEOUT" "$NODE_BIN" "$npmcli" "$@" \
-		>>"$npm_log" 2>&1
-	rc=$?
+	# 网络类失败自动重试并换源，见 npm_install_retry（结果经 NPM_RC / NPM_REG_USED /
+	# NPM_ATTEMPTS 回传）。
+	# 「安装树没被碰过」的参照物：npm 失败后 die() 靠它判断原程序是否完好。
+	# 放在 npm 缓存目录（不在程序目录里），npm 自己不会去动它。
+	OC_UPGRADE_MARKER="$npmcache/.upgrade-marker.$$"
+	if : >"$OC_UPGRADE_MARKER" 2>/dev/null; then
+		# mtime 是有精度的：ext4 是纳秒，但有些文件系统只有 1 秒甚至 2 秒。
+		# 标记与 npm 随后的写入若落在同一个精度单位里，-newer 分不出先后。
+		# 等 3 秒把 2 秒精度的情况也盖住（多等这几秒无伤大雅）。
+		sleep 3
+	else
+		OC_UPGRADE_MARKER=""
+		ilog "WARN: 无法创建升级标记（$npmcache），升级失败时将不会自动重启网关"
+	fi
+	OC_PRE_UPGRADE_VER="$_cur_ver"
+	# 从这里开始 npm 可能改动程序目录：之前的「装完」标记作废，装完再写。
+	rm -f "$OC_DIR/.oc-install-ok" 2>/dev/null
+	# npm 期间收到 TERM/HUP/INT 也要走 die()：否则安装脚本直接没了，网关停在
+	# 「已停止」且没人把它拉起来。npm 结束（成功）后恢复默认处置。
+	trap 'die "安装被信号中止（npm install 未完成）"' TERM HUP INT
+	npm_install_retry
+	rc="$NPM_RC"
+	_reg="$NPM_REG_USED"
+	npm_attempt="$NPM_ATTEMPTS"
 
 	end_ts="$(date +%s 2>/dev/null)"
 	case "$end_ts" in ''|*[!0-9]*) end_ts=0 ;; esac
@@ -772,7 +1143,17 @@ install_openclaw() {
 	fi
 
 	if [ "$rc" -eq 0 ]; then
+		# 新版本已经就位：之后的失败不再走 die() 的「恢复原版本」分支。
+		OC_GW_WAS_RUNNING=0
+		trap - TERM HUP INT
+		case "${OC_UPGRADE_MARKER:-}" in ?*) rm -f "$OC_UPGRADE_MARKER" 2>/dev/null ;; esac
+		OC_UPGRADE_MARKER=""
 		ilog "npm install 完成（$(date '+%Y-%m-%d %H:%M:%S')，耗时 ${elapsed}s）"
+		if [ "$_reg" != "$reg" ]; then
+			ilog "注意：本次是换源后装成功的（$_reg，共 $npm_attempt 次）。设置里的 npm 源（$reg）在当前网络下不稳，可到设置页改成 $_reg"
+		elif [ "$npm_attempt" -gt 1 ]; then
+			ilog "注意：本次重试 $npm_attempt 次才成功，当前网络到 $_reg 不太稳定"
+		fi
 		# 汇总行单独提出来：确认真的出现了 added N packages，而不是中途静默结束。
 		added="$(grep -E '^added [0-9]+ packages?' "$npm_log" 2>/dev/null | tail -n 1)"
 		if [ -n "$added" ]; then ilog "npm: $added"; fi
@@ -805,6 +1186,9 @@ EOF
 		fi
 	fi
 	[ -x "$OC_DIR/bin/openclaw" ] || die "OpenClaw 安装失败：未生成可执行文件"
+	# 装完了才写完成标记（下一次「同版本跳过」要求它在，见 oc_install_ok）。
+	printf '%s\n' "$_want_ver" >"$OC_DIR/.oc-install-ok" 2>/dev/null \
+		|| ilog "WARN: 无法写入安装完成标记（$OC_DIR/.oc-install-ok），下次点同版本会重装一次"
 	ilog "OpenClaw 就绪: $("$OC_DIR/bin/openclaw" --version 2>/dev/null || echo unknown)"
 }
 
